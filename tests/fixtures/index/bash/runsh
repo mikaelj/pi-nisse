@@ -1,0 +1,6 @@
+#!/bin/sh
+# Extensionless script detected by its sh shebang (indexed as bash).
+
+detect_os() {
+  uname -s
+}

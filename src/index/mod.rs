@@ -2,14 +2,19 @@
 //!
 //! The index maps file **content** (never paths) to parse artifacts:
 //!
-//! - [`language`] classifies paths into the seven indexed languages;
+//! - [`language`] classifies paths into the eleven indexed languages
+//!   (C, C++, C#, Dart, Rust, JavaScript, TypeScript, Python, Bash,
+//!   Lua, HTML);
+//! - [`shebang`] recognizes Python/Bash/Lua shebangs for extensionless
+//!   files, bounded to the first line;
 //! - [`content`] computes content keys (`git:<blob-oid>` for Git object
 //!   content, `sha256:<hash>` for dirty or untracked working-tree
 //!   content);
 //! - [`artifact`] is the parsed-artifact model whose identity is
 //!   `(content key, language, parser version)`;
 //! - [`extract`] turns source text into artifacts deterministically with
-//!   tree-sitter;
+//!   tree-sitter, driven by per-language rule tables plus the
+//!   language-specific detail passes in [`languages`];
 //! - [`refresh`] performs the lazy incremental refresh against the exact
 //!   target snapshot, reusing artifacts across branches and worktrees.
 //!
@@ -23,7 +28,9 @@ pub mod content;
 pub mod error;
 pub mod extract;
 pub mod language;
+pub mod languages;
 pub mod refresh;
+pub mod shebang;
 
 pub use artifact::{
     ExtractedIndex, IdentifierRef, ImportDecl, PARSER_VERSION, ParsedArtifact, REFERENCE_ROW_LIMIT,

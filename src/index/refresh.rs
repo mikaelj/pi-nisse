@@ -5,7 +5,9 @@
 //!
 //! 1. enumerate the target snapshot through the snapshot reader (Git is
 //!    the membership authority);
-//! 2. obtain a content key for every file of a recognized language;
+//! 2. detect each file's language (a recognized extension always wins;
+//!    extensionless files are classified by a bounded shebang read) and
+//!    obtain a content key;
 //! 3. compare the worktree manifest:
 //!    - path known with the same key, and the artifact still in the
 //!      shared cache → reuse;
@@ -35,6 +37,7 @@ use super::content::{ContentKey, git_blob_oid, working_tree_key};
 use super::error::IndexError;
 use super::extract::{IndexerCache, LanguageIndexer};
 use super::language::Language;
+use super::shebang;
 use crate::domain::time::now_utc_rfc3339;
 use crate::git::{ObjectFormat, RepoContext, ResolvedSnapshot, SnapshotReader, SnapshotTarget};
 use crate::storage::StoragePaths;
@@ -78,6 +81,8 @@ struct IndexPath {
     path: String,
     /// Content key of the exact target-side bytes.
     key: ContentKey,
+    /// Language detected for the path (extension or shebang).
+    language: Language,
     /// Byte length of the content (from the parse read, or from the
     /// recorded content row for reuses).
     byte_len: i64,
@@ -108,12 +113,6 @@ pub fn refresh_index(
     let reader = SnapshotReader::new(ctx, resolved)?;
     let listings = reader.list_files_with_oids()?;
 
-    // Candidate files of recognized languages, in Git's path order.
-    let candidates: Vec<_> = listings
-        .into_iter()
-        .filter(|listing| Language::from_path(&listing.path).is_some())
-        .collect();
-
     // Working-tree targets hash the exact bytes; index and commit-tree
     // targets already carry Git blob object IDs.
     let working = matches!(resolved.target, SnapshotTarget::Working);
@@ -135,7 +134,7 @@ pub fn refresh_index(
     let manifest = load_manifest(&worktree.conn, &paths.worktree)?;
 
     let mut stats = RefreshStats {
-        files_seen: candidates.len() as u64,
+        files_seen: 0,
         files_reused: 0,
         files_parsed: 0,
         files_removed: 0,
@@ -150,9 +149,16 @@ pub fn refresh_index(
     // colliding on the parsed_artifact unique constraint.
     let mut known_keys: BTreeSet<String> = BTreeSet::new();
 
-    for listing in candidates {
+    // One file at a time, in Git's path order: detect the language (a
+    // recognized extension always wins; extensionless files get a
+    // bounded shebang read), then reuse-or-parse the exact target-side
+    // content.
+    for listing in listings {
+        let Some(language) = detect_language(&reader, &listing.path)? else {
+            continue;
+        };
+        stats.files_seen += 1;
         let path = listing.path.clone();
-        let language = Language::from_path(&path).expect("filtered to indexed languages");
 
         let key = if let Some(oid) = &listing.blob_oid {
             // Index and commit-tree sides are defined by Git objects.
@@ -185,6 +191,7 @@ pub fn refresh_index(
                 current.push(IndexPath {
                     path,
                     key,
+                    language,
                     byte_len: file.bytes.len() as i64,
                 });
                 stats.files_reused += 1;
@@ -196,7 +203,7 @@ pub fn refresh_index(
                 // manifest, so later refreshes reconsider it.
                 continue;
             };
-            let extracted = indexers.for_path(&path)?.parse(text);
+            let extracted = indexers.for_detected_path(&path, language)?.parse(text);
             let artifact = ParsedArtifact::new(&key.as_str(), language, extracted);
             stats.files_parsed += 1;
             known_keys.insert(key.as_str());
@@ -208,6 +215,7 @@ pub fn refresh_index(
             current.push(IndexPath {
                 path,
                 key,
+                language,
                 byte_len: file.bytes.len() as i64,
             });
             continue;
@@ -221,6 +229,7 @@ pub fn refresh_index(
             current.push(IndexPath {
                 path,
                 key,
+                language,
                 byte_len,
             });
             stats.files_reused += 1;
@@ -232,7 +241,7 @@ pub fn refresh_index(
         let Ok(text) = std::str::from_utf8(&file.bytes) else {
             continue;
         };
-        let extracted = indexers.for_path(&path)?.parse(text);
+        let extracted = indexers.for_detected_path(&path, language)?.parse(text);
         let artifact = ParsedArtifact::new(&key.as_str(), language, extracted);
         stats.files_parsed += 1;
         known_keys.insert(key.as_str());
@@ -244,6 +253,7 @@ pub fn refresh_index(
         current.push(IndexPath {
             path,
             key,
+            language,
             byte_len: file.bytes.len() as i64,
         });
     }
@@ -264,6 +274,28 @@ pub fn refresh_index(
     stats.duration = started.elapsed();
     persist_refresh_state(&worktree.conn, &paths.worktree, stats)?;
     Ok(stats)
+}
+
+/// Detect the language of one snapshot path.
+///
+/// A recognized extension always wins — extension-based classification
+/// never reads content. Files whose name carries no extension at all are
+/// classified by a bounded shebang read (see [`super::shebang`]);
+/// everything else is not part of the source index.
+fn detect_language(
+    reader: &SnapshotReader<'_>,
+    path: &str,
+) -> Result<Option<Language>, IndexError> {
+    if let Some(language) = Language::from_path(path) {
+        return Ok(Some(language));
+    }
+    if !shebang::is_extensionless(path) {
+        return Ok(None);
+    }
+    let Some(prefix) = reader.read_prefix(path, shebang::PREFIX_LIMIT)? else {
+        return Ok(None);
+    };
+    Ok(shebang::language_from_prefix(&prefix))
 }
 
 /// Load the worktree manifest: path -> content key.
@@ -425,7 +457,6 @@ fn persist_worktree(
     let now = now_utc_rfc3339();
     let tx = conn.unchecked_transaction().map_err(query_error(db_path))?;
     for entry in current {
-        let language = Language::from_path(&entry.path).map(|l| l.label().to_string());
         tx.execute(
             "INSERT INTO manifest (path, content_key, updated_at) VALUES (?1, ?2, ?3) \
              ON CONFLICT(path) DO UPDATE SET \
@@ -442,7 +473,7 @@ fn persist_worktree(
             rusqlite::params![
                 entry.path,
                 entry.key.as_str(),
-                language,
+                entry.language.label(),
                 entry.byte_len,
                 now
             ],
@@ -1072,5 +1103,450 @@ mod tests {
         let ctx = discover(&fixture);
         let stats = refresh(&ctx, &SnapshotSpec::Working);
         assert_eq!(stats.files_seen, 7, ".json records are not indexable");
+    }
+
+    /// A fixture with one file per new indexed language.
+    fn new_language_fixture() -> Fixture {
+        let fixture = Fixture::repo("idx-new-languages");
+        write_file(
+            &fixture.root,
+            "app/client.py",
+            "from protocol import Packet\n\n\nclass Client:\n    async def connect(self):\n        await dial()\n\n    def parse(self, data):\n        return parse_packet(data)\n\n\ndef make_client(config):\n    return Client(config)\n",
+        );
+        write_file(
+            &fixture.root,
+            "scripts/lib.sh",
+            "#!/usr/bin/env bash\nsource ./lib/common.sh\n\nvalidate() {\n  check_file \"$1\"\n}\n\nmain() {\n  validate\n}\n",
+        );
+        write_file(
+            &fixture.root,
+            "lua/modbox.lua",
+            "local protocol = require(\"protocol\")\n\nlocal function decode(data)\n    return data\nend\n\nfunction M.send(packet)\nend\n",
+        );
+        write_file(
+            &fixture.root,
+            "web/page.html",
+            "<!doctype html>\n<html><body>\n<main id=\"checkout\">\n  <a href=\"#checkout\">home</a>\n  <script src=\"js/app.js\"></script>\n</main>\n</body></html>\n",
+        );
+        fixture
+    }
+
+    /// The `path_content.language` recorded for one path.
+    fn recorded_language(ctx: &RepoContext, path: &str) -> String {
+        let paths = StoragePaths::for_repo(ctx);
+        let opened = open_or_recover(&paths.worktree, DbKind::Worktree).unwrap();
+        opened
+            .conn
+            .query_row(
+                "SELECT language FROM path_content WHERE path = ?1",
+                rusqlite::params![path],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    /// `(language, path)` rows of the symbol table for one symbol name —
+    /// the ordinary retrieval path over the shared cache.
+    fn symbol_rows_for(ctx: &RepoContext, name: &str) -> Vec<(String, String)> {
+        let paths = StoragePaths::for_repo(ctx);
+        let opened = open_or_recover(&paths.shared, DbKind::Shared).unwrap();
+        let mut stmt = opened
+            .conn
+            .prepare(
+                "SELECT pa.language, s.path FROM symbol s \
+                 JOIN parsed_artifact pa ON pa.id = s.parsed_artifact_id \
+                 WHERE s.name = ?1 ORDER BY s.path",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn new_languages_participate_in_content_addressed_caching() {
+        let fixture = new_language_fixture();
+        commit_all(&fixture.root, "one");
+        let ctx = discover(&fixture);
+
+        // 1. Initial parse creates one artifact per file, with the new
+        //    languages recorded on the path side.
+        let first = refresh(&ctx, &SnapshotSpec::Working);
+        assert_eq!(first.files_seen, 4);
+        assert_eq!(first.files_parsed, 4);
+        assert_eq!(first.files_reused, 0);
+        for (path, language) in [
+            ("app/client.py", "python"),
+            ("scripts/lib.sh", "bash"),
+            ("lua/modbox.lua", "lua"),
+            ("web/page.html", "html"),
+        ] {
+            assert_eq!(recorded_language(&ctx, path), language, "{path}");
+        }
+
+        // 2. Re-indexing unchanged content reuses every artifact.
+        let second = refresh(&ctx, &SnapshotSpec::Working);
+        assert_eq!(second.files_parsed, 0);
+        assert_eq!(second.files_reused, 4);
+
+        // 3. Editing content in every new language produces a different
+        //    content key and a new parse.
+        write_file(
+            &fixture.root,
+            "app/client.py",
+            "from protocol import Packet\n\n\nclass Client:\n    def parse(self, data):\n        return parse_packet(data)\n",
+        );
+        write_file(
+            &fixture.root,
+            "scripts/lib.sh",
+            "#!/usr/bin/env bash\nsource ./lib/common.sh\n\nvalidate() {\n  check \"$1\"\n}\n\nextra_fn() {\n  :\n}\n",
+        );
+        write_file(
+            &fixture.root,
+            "lua/modbox.lua",
+            "local protocol = require(\"protocol\")\n\nlocal function decode(data)\n    return data\nend\n\nfunction M.send(packet)\nend\n\nfunction extra_fn()\nend\n",
+        );
+        write_file(
+            &fixture.root,
+            "web/page.html",
+            "<!doctype html>\n<html><body>\n<main id=\"checkout\">\n  <a href=\"#checkout\">home</a>\n  <aside id=\"extra\"></aside>\n  <script src=\"js/app.js\"></script>\n</main>\n</body></html>\n",
+        );
+        let third = refresh(&ctx, &SnapshotSpec::Working);
+        assert_eq!(third.files_parsed, 4, "one new parse per language");
+        assert_eq!(third.files_reused, 0);
+        let manifest = manifest_of(&ctx);
+        for path in [
+            "app/client.py",
+            "scripts/lib.sh",
+            "lua/modbox.lua",
+            "web/page.html",
+        ] {
+            assert!(manifest[path].starts_with("sha256:"), "dirty file: {path}");
+        }
+
+        // 4. Reverting to the tracked blobs reuses the old artifacts.
+        git_in(
+            &fixture.root,
+            &[
+                "checkout",
+                "--",
+                "app/client.py",
+                "scripts/lib.sh",
+                "lua/modbox.lua",
+                "web/page.html",
+            ],
+        );
+        let fourth = refresh(&ctx, &SnapshotSpec::Working);
+        assert_eq!(fourth.files_parsed, 0);
+        assert_eq!(fourth.files_reused, 4);
+        let manifest = manifest_of(&ctx);
+        for path in [
+            "app/client.py",
+            "scripts/lib.sh",
+            "lua/modbox.lua",
+            "web/page.html",
+        ] {
+            assert!(manifest[path].starts_with("git:"), "clean again: {path}");
+        }
+        // Exactly four extra artifacts (the dirty versions) were added.
+        assert_eq!(
+            query(&ctx, DbKind::Shared, "SELECT count(*) FROM parsed_artifact"),
+            8
+        );
+    }
+
+    #[test]
+    fn linked_worktree_reuses_new_language_artifacts() {
+        let fixture = new_language_fixture();
+        commit_all(&fixture.root, "one");
+
+        let wt_path = fixture
+            .sibling("wt")
+            .to_str()
+            .expect("worktree path is valid UTF-8")
+            .to_owned();
+        git_in(
+            &fixture.root,
+            &["worktree", "add", "--quiet", &wt_path, "-b", "topic"],
+        );
+
+        let main_ctx = discover(&fixture);
+        let main = refresh(&main_ctx, &SnapshotSpec::Working);
+        assert_eq!(main.files_parsed, 4);
+
+        // Same Git blobs in the linked worktree: shared artifacts, no
+        // reparse, worktree-local path mapping.
+        let wt_root = std::path::Path::new(&wt_path).canonicalize().unwrap();
+        let wt_ctx = RepoContext::discover(&GitRunner::new(), &wt_root).unwrap();
+        let shared = refresh(&wt_ctx, &SnapshotSpec::Working);
+        assert_eq!(shared.files_seen, 4);
+        assert_eq!(shared.files_parsed, 0);
+        assert_eq!(shared.files_reused, 4);
+        assert_eq!(
+            query(
+                &main_ctx,
+                DbKind::Shared,
+                "SELECT count(*) FROM parsed_artifact"
+            ),
+            4
+        );
+        assert_eq!(
+            query(&wt_ctx, DbKind::Worktree, "SELECT count(*) FROM manifest"),
+            4
+        );
+    }
+
+    #[test]
+    fn extensionless_scripts_are_indexed_by_shebang() {
+        let fixture = Fixture::repo("idx-shebang");
+        write_file(
+            &fixture.root,
+            "bin/pytool",
+            "#!/usr/bin/env python3\nimport os\n\n\ndef run():\n    return os.getpid()\n",
+        );
+        write_file(
+            &fixture.root,
+            "bin/entry",
+            "#!/bin/bash\nmain_entry() {\n  :\n}\n",
+        );
+        write_file(
+            &fixture.root,
+            "bin/posix",
+            "#!/bin/sh\nposix_fn() {\n  :\n}\n",
+        );
+        write_file(
+            &fixture.root,
+            "bin/luatool",
+            "#!/usr/bin/env lua5.4\nfunction luafn()\nend\n",
+        );
+        // Extensionless files without a recognized shebang stay out.
+        write_file(&fixture.root, "Makefile", "all:\n\techo no shebang\n");
+        write_file(&fixture.root, "LICENSE", "no shebang either\n");
+        // Files with any extension are never sniffed — even with a
+        // shebang — and a recognized extension beats a contradictory
+        // shebang.
+        write_file(
+            &fixture.root,
+            "notes.txt",
+            "#!/usr/bin/env python\n# not indexed: unknown extension\n",
+        );
+        write_file(
+            &fixture.root,
+            "tricky.sh",
+            "#!/usr/bin/env python3\ndef py_function():\n    pass\n",
+        );
+        commit_all(&fixture.root, "one");
+
+        let ctx = discover(&fixture);
+        let stats = refresh(&ctx, &SnapshotSpec::Working);
+        assert_eq!(stats.files_seen, 5, "four shebang scripts plus tricky.sh");
+        for (path, language) in [
+            ("bin/pytool", "python"),
+            ("bin/entry", "bash"),
+            ("bin/posix", "bash"),
+            ("bin/luatool", "lua"),
+            ("tricky.sh", "bash"),
+        ] {
+            assert_eq!(recorded_language(&ctx, path), language, "{path}");
+        }
+        let manifest = manifest_of(&ctx);
+        for absent in ["Makefile", "LICENSE", "notes.txt"] {
+            assert!(
+                !manifest.contains_key(absent),
+                "{absent} must not be indexed"
+            );
+        }
+        // The shebang scripts' symbols are ordinary retrievable rows.
+        assert_eq!(
+            symbol_rows_for(&ctx, "run"),
+            vec![("python".to_string(), "bin/pytool".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "posix_fn"),
+            vec![("bash".to_string(), "bin/posix".to_string())]
+        );
+    }
+
+    #[test]
+    fn malformed_new_language_files_do_not_abort_the_refresh() {
+        let fixture = Fixture::repo("idx-malformed");
+        write_file(&fixture.root, "broken.py", "def broken(:\n");
+        write_file(
+            &fixture.root,
+            "broken.sh",
+            "#!/usr/bin/env bash\nbroken() {\n  if fi fi\n",
+        );
+        write_file(&fixture.root, "broken.lua", "function broken(\n");
+        write_file(
+            &fixture.root,
+            "broken.html",
+            "<div id=\"outer\"\n  <p>text\n",
+        );
+        write_file(&fixture.root, "good.rs", "pub fn good() {}\n");
+        write_file(&fixture.root, "good.py", "def fine():\n    pass\n");
+        commit_all(&fixture.root, "one");
+
+        let ctx = discover(&fixture);
+        let stats = refresh(&ctx, &SnapshotSpec::Working);
+        assert_eq!(stats.files_seen, 6);
+        assert_eq!(
+            stats.files_parsed, 6,
+            "partial trees still produce artifacts"
+        );
+        // The good files are fully indexed despite the broken ones.
+        assert_eq!(
+            symbol_rows_for(&ctx, "fine"),
+            vec![("python".to_string(), "good.py".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "good"),
+            vec![("rust".to_string(), "good.rs".to_string())]
+        );
+    }
+
+    #[test]
+    fn retrieval_finds_new_language_symbols() {
+        let fixture = new_language_fixture();
+        commit_all(&fixture.root, "one");
+        let ctx = discover(&fixture);
+        refresh(&ctx, &SnapshotSpec::Working);
+
+        // Python: query a class/function name, retrieve the artifact.
+        assert_eq!(
+            symbol_rows_for(&ctx, "Client"),
+            vec![("python".to_string(), "app/client.py".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "make_client"),
+            vec![("python".to_string(), "app/client.py".to_string())]
+        );
+        // Bash: shell function name.
+        assert_eq!(
+            symbol_rows_for(&ctx, "validate"),
+            vec![("bash".to_string(), "scripts/lib.sh".to_string())]
+        );
+        // Lua: function/method name (qualified syntactic form).
+        assert_eq!(
+            symbol_rows_for(&ctx, "decode"),
+            vec![("lua".to_string(), "lua/modbox.lua".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "M.send"),
+            vec![("lua".to_string(), "lua/modbox.lua".to_string())]
+        );
+        // HTML: element ID and custom-element name.
+        assert_eq!(
+            symbol_rows_for(&ctx, "checkout"),
+            vec![("html".to_string(), "web/page.html".to_string())]
+        );
+        // References are retrievable too (fragment -> id relation).
+        let paths = StoragePaths::for_repo(&ctx);
+        let opened = open_or_recover(&paths.shared, DbKind::Shared).unwrap();
+        let reference_hit: i64 = opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM reference WHERE name = 'checkout'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reference_hit, 1, "fragment reference row exists");
+    }
+
+    #[test]
+    fn repository_fixture_files_are_indexed_end_to_end() {
+        let fixture = Fixture::repo("idx-repo-fixtures");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index");
+        copy_tree(&source, &fixture.root);
+        commit_all(&fixture.root, "one");
+
+        let ctx = discover(&fixture);
+        let stats = refresh(&ctx, &SnapshotSpec::Working);
+        // 13 fixture files: four Python (incl. .pyi and one shebang
+        // script), four Bash (incl. two shebang scripts), three Lua
+        // (incl. one shebang script), two HTML.
+        assert_eq!(stats.files_seen, 13);
+        assert_eq!(stats.files_parsed, 13);
+
+        for (path, language) in [
+            ("bash/broken.sh", "bash"),
+            ("bash/libbox.sh", "bash"),
+            ("bash/runbash", "bash"),
+            ("bash/runsh", "bash"),
+            ("html/broken.html", "html"),
+            ("html/page.html", "html"),
+            ("lua/broken.lua", "lua"),
+            ("lua/modbox.lua", "lua"),
+            ("lua/tool", "lua"),
+            ("python/broken.py", "python"),
+            ("python/client.py", "python"),
+            ("python/protocol.pyi", "python"),
+            ("python/tool", "python"),
+        ] {
+            assert_eq!(recorded_language(&ctx, path), language, "{path}");
+        }
+
+        // Representative retrieval per language, straight from the
+        // frozen fixtures (including the extensionless ones).
+        assert_eq!(
+            symbol_rows_for(&ctx, "parse_packet"),
+            vec![("python".to_string(), "python/protocol.pyi".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "validate_config"),
+            Vec::<(String, String)>::new(),
+            "references live in the reference table, not symbols"
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "run_all"),
+            vec![("bash".to_string(), "bash/runbash".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "detect_os"),
+            vec![("bash".to_string(), "bash/runsh".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "object:method"),
+            vec![("lua".to_string(), "lua/modbox.lua".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "checkout"),
+            vec![("html".to_string(), "html/page.html".to_string())]
+        );
+        assert_eq!(
+            symbol_rows_for(&ctx, "user-profile"),
+            vec![("html".to_string(), "html/page.html".to_string())]
+        );
+
+        // One skeleton chunk per non-empty skeleton. Twelve of the
+        // thirteen artifacts carry structure; `broken.lua` recovers
+        // nothing (no shebang, no parseable definition) and therefore
+        // contributes an empty skeleton — deterministic, and refresh
+        // still succeeds.
+        assert_eq!(
+            query(&ctx, DbKind::Shared, "SELECT count(*) FROM text_chunk"),
+            12
+        );
+        assert_eq!(
+            query(&ctx, DbKind::Shared, "SELECT count(*) FROM parsed_artifact"),
+            13
+        );
+    }
+
+    /// Recursively copy a fixture tree into a repository root.
+    fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let destination = target.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                std::fs::create_dir_all(&destination).unwrap();
+                copy_tree(&entry.path(), &destination);
+            } else {
+                std::fs::copy(entry.path(), &destination).unwrap();
+            }
+        }
     }
 }

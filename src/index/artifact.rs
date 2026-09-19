@@ -45,6 +45,9 @@ pub enum SymbolKind {
     Interface,
     /// A module or namespace.
     Module,
+    /// An HTML element carrying an explicit `id`, or a custom element
+    /// (a tag name containing a hyphen).
+    Element,
 }
 
 impl SymbolKind {
@@ -60,6 +63,7 @@ impl SymbolKind {
             SymbolKind::Type => "type",
             SymbolKind::Interface => "interface",
             SymbolKind::Module => "module",
+            SymbolKind::Element => "element",
         }
     }
 }
@@ -221,6 +225,7 @@ mod tests {
             (SymbolKind::Type, "type"),
             (SymbolKind::Interface, "interface"),
             (SymbolKind::Module, "module"),
+            (SymbolKind::Element, "element"),
         ] {
             assert_eq!(
                 serde_json::to_string(&kind).unwrap(),

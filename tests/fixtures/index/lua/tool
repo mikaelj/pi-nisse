@@ -1,0 +1,8 @@
+#!/usr/bin/env lua5.4
+-- Extensionless Lua script detected by shebang.
+
+local function main()
+  print("hi")
+end
+
+main()

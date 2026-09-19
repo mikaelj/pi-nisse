@@ -124,5 +124,9 @@ statistics of the last refresh (`files_seen`, `files_reused`,
 `files_parsed`, `files_removed`, duration).
 
 Indexed languages (tree-sitter): C, C++, C#, Dart, Rust, JavaScript,
-TypeScript. Files without a recognized extension, or whose content is not
-valid UTF-8, are not indexed.
+TypeScript, Python, Bash, Lua, HTML. Files whose content is not valid
+UTF-8 are not indexed. Extensionless files are indexed when their first
+line carries a recognized Python, bash/sh, or Lua shebang (`env` and
+`env -S` forms included); a `sh` shebang indexes as `bash`. A recognized
+extension always wins over contradictory content, and files with any
+extension are never content-sniffed.

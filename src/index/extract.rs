@@ -2,15 +2,19 @@
 //! trees (plan section 27).
 //!
 //! [`LanguageIndexer`] is the abstraction; [`TreeSitterIndexer`] is the
-//! real implementation for the seven Nisse 1.0 languages. Extraction is a
-//! pure function of `(source text, language, extraction version)`:
+//! real implementation for the eleven Nisse indexed languages.
+//! Extraction is a pure function of `(source text, language, extraction
+//! version)`:
 //!
-//! - **definitions** — functions, methods, classes/structs, enums, unions,
-//!   types, interfaces/traits/mixins, modules/namespaces — with spans;
-//! - **imports** — import/include/using statements;
+//! - **definitions** — functions, methods, classes/structs, enums,
+//!   unions, types, interfaces/traits/mixins, modules/namespaces, and
+//!   HTML elements — with spans;
+//! - **imports** — import/include/using statements and literal
+//!   dependency statements (`source`, `require`, `script src`, ...);
 //! - **identifier references** — deduplicated per `(name, line)`, with
 //!   definition-name occurrences excluded and a hard row limit;
-//! - **skeleton** — a compact one-line-per-definition text rendering.
+//! - **skeleton** — a compact one-line-per-definition text rendering
+//!   plus bounded per-language header lines (shebangs, doctype).
 //!
 //! The rules are static tables, not LLM output: a reviewer never invents
 //! its own review methodology and neither does the indexer. Tree-sitter's
@@ -25,6 +29,7 @@ use super::artifact::{
     ExtractedIndex, IdentifierRef, ImportDecl, REFERENCE_ROW_LIMIT, SymbolDef, SymbolKind,
 };
 use super::language::Language;
+use super::languages::{Extraction, augment, collapse_whitespace};
 
 /// Extracts an [`ExtractedIndex`] from source text.
 pub trait LanguageIndexer {
@@ -65,6 +70,16 @@ impl TreeSitterIndexer {
                 language: Language::Rust,
                 reason: format!("path `{path}` has no indexed language"),
             })?;
+        Self::for_detected_path(path, language)
+    }
+
+    /// Build an indexer for a path whose language was already detected —
+    /// by extension or shebang. `.tsx` still selects the TSX grammar;
+    /// everything else uses its language's default grammar.
+    pub fn for_detected_path(
+        path: &str,
+        language: Language,
+    ) -> Result<Self, super::error::IndexError> {
         let grammar = if matches!(language, Language::TypeScript)
             && path.to_ascii_lowercase().ends_with(".tsx")
         {
@@ -134,19 +149,29 @@ impl IndexerCache {
                 language: Language::Rust,
                 reason: format!("path `{path}` has no indexed language"),
             })?;
+        self.for_detected_path(path, language)
+    }
+
+    /// The indexer for a path whose language was already detected — by
+    /// extension or shebang — creating it on first use.
+    pub fn for_detected_path(
+        &mut self,
+        path: &str,
+        language: Language,
+    ) -> Result<&mut TreeSitterIndexer, super::error::IndexError> {
         let tsx =
             matches!(language, Language::TypeScript) && path.to_ascii_lowercase().ends_with(".tsx");
         match self.indexers.entry((language, tsx)) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let indexer = TreeSitterIndexer::new_for_path(path)?;
+                let indexer = TreeSitterIndexer::for_detected_path(path, language)?;
                 Ok(entry.insert(indexer))
             }
         }
     }
 }
 
-/// Grammar table for the seven indexed languages.
+/// Grammar table for the eleven indexed languages.
 fn grammar_for(language: Language) -> Option<tree_sitter_language::LanguageFn> {
     match language {
         Language::C => Some(tree_sitter_c::LANGUAGE),
@@ -156,6 +181,10 @@ fn grammar_for(language: Language) -> Option<tree_sitter_language::LanguageFn> {
         Language::Rust => Some(tree_sitter_rust::LANGUAGE),
         Language::JavaScript => Some(tree_sitter_javascript::LANGUAGE),
         Language::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
+        Language::Python => Some(tree_sitter_python::LANGUAGE),
+        Language::Bash => Some(tree_sitter_bash::LANGUAGE),
+        Language::Lua => Some(tree_sitter_lua::LANGUAGE),
+        Language::Html => Some(tree_sitter_html::LANGUAGE),
     }
 }
 
@@ -182,13 +211,16 @@ enum MethodResolution {
     /// in-class definitions inside `field_declaration_list`).
     Parent { kinds: &'static [&'static str] },
     /// Method when the parent is a wrapper kind (Rust:
-    /// `declaration_list`) whose own parent is a container kind
-    /// (`impl_item`/`trait_item`). Free and nested functions stay
-    /// functions.
+    /// `declaration_list`; Python: class-body `block`) whose own parent
+    /// is a container kind (`impl_item`/`trait_item`/
+    /// `class_definition`). Free and nested functions stay functions.
     ParentWrapper {
         wrapper: &'static str,
         containers: &'static [&'static str],
     },
+    /// Method when the resolved name is colon-qualified (Lua
+    /// `function obj:method()`; dotted `module.fn` stays a function).
+    ColonQualified,
 }
 
 /// Per-language definition rule tables.
@@ -326,6 +358,31 @@ mod rules {
         ("enum_declaration", plain(SymbolKind::Enum)),
     ];
 
+    static RULES_PYTHON: &[(&str, DefRule)] = &[
+        // Free, nested, and async functions; methods are the ones whose
+        // surrounding block belongs to a class definition. Decorators
+        // wrap definitions in `decorated_definition` nodes and are never
+        // symbols themselves.
+        (
+            "function_definition",
+            function_or_method(MethodResolution::ParentWrapper {
+                wrapper: "block",
+                containers: &["class_definition"],
+            }),
+        ),
+        ("class_definition", plain(SymbolKind::Class)),
+    ];
+
+    static RULES_BASH: &[(&str, DefRule)] = &[("function_definition", plain(SymbolKind::Function))];
+
+    static RULES_LUA: &[(&str, DefRule)] = &[(
+        // `function foo()`, `local function foo()`, `function module.fn()`,
+        // `function obj:method()` — the name field carries the qualified
+        // syntactic form.
+        "function_declaration",
+        function_or_method(MethodResolution::ColonQualified),
+    )];
+
     /// All definition rules of one language: `(node kind, rule)` pairs.
     pub fn for_language(language: Language) -> &'static [(&'static str, DefRule)] {
         match language {
@@ -336,11 +393,18 @@ mod rules {
             Language::Rust => RULES_RUST,
             Language::JavaScript => RULES_JS,
             Language::TypeScript => RULES_TS,
+            Language::Python => RULES_PYTHON,
+            Language::Bash => RULES_BASH,
+            Language::Lua => RULES_LUA,
+            Language::Html => &[],
         }
     }
 }
 
-/// Import-statement node kinds per language.
+/// Import-statement node kinds per language. Languages whose
+/// dependencies are not distinct node kinds (Bash `source`, Lua
+/// `require`, HTML resource attributes) extract them in
+/// [`super::languages`] instead.
 fn import_kinds(language: Language) -> &'static [&'static str] {
     match language {
         Language::C => &["preproc_include"],
@@ -349,6 +413,12 @@ fn import_kinds(language: Language) -> &'static [&'static str] {
         Language::Dart => &["import_or_export"],
         Language::Rust => &["use_declaration"],
         Language::JavaScript | Language::TypeScript => &["import_statement"],
+        Language::Python => &[
+            "import_statement",
+            "import_from_statement",
+            "future_import_statement",
+        ],
+        Language::Bash | Language::Lua | Language::Html => &[],
     }
 }
 
@@ -361,25 +431,26 @@ const REFERENCE_KINDS: &[&str] = &[
     "namespace_identifier",
 ];
 
-/// One raw identifier occurrence gathered during the walk.
-struct RawRef {
-    name: String,
-    line: usize,
-    byte_start: usize,
-    byte_end: usize,
+/// One raw identifier occurrence gathered during a walk.
+pub(crate) struct RawRef {
+    pub(crate) name: String,
+    pub(crate) line: usize,
+    pub(crate) byte_start: usize,
+    pub(crate) byte_end: usize,
 }
 
 /// Extract the index of a parsed tree.
+///
+/// The generic walk applies the per-language rule tables; the
+/// per-language detail pass ([`augment`]) then appends whatever those
+/// tables cannot express (Bash `source`/commands, Lua `require`/calls,
+/// Python decorators, HTML structure). For HTML the generic walk matches
+/// nothing and the detail pass does all the work.
 fn extract(language: Language, tree: Tree, source: &str) -> ExtractedIndex {
     let def_rules = rules::for_language(language);
     let imports = import_kinds(language);
 
-    let mut symbols: Vec<SymbolDef> = Vec::new();
-    let mut import_lines: Vec<ImportDecl> = Vec::new();
-    let mut raw_refs: Vec<RawRef> = Vec::new();
-    // Byte ranges of nodes recorded as definition names; those
-    // occurrences are definitions, not references.
-    let mut name_spans: Vec<(usize, usize)> = Vec::new();
+    let mut ex = Extraction::new();
 
     // Iterative document-order walk over named nodes (an explicit stack
     // so pathological nesting cannot overflow the call stack).
@@ -390,13 +461,13 @@ fn extract(language: Language, tree: Tree, source: &str) -> ExtractedIndex {
             let kind = node.kind();
 
             if let Some((_, rule)) = def_rules.iter().find(|(k, _)| *k == kind) {
-                if let Some(def) = definition_of(node, *rule, source, &mut name_spans) {
-                    symbols.push(def);
+                if let Some(def) = definition_of(node, *rule, source, &mut ex.name_spans) {
+                    ex.symbols.push(def);
                 }
             } else if imports.contains(&kind)
                 && let Ok(text) = node.utf8_text(source.as_bytes())
             {
-                import_lines.push(ImportDecl {
+                ex.imports.push(ImportDecl {
                     text: collapse_whitespace(text),
                     line: node.start_position().row + 1,
                 });
@@ -405,7 +476,7 @@ fn extract(language: Language, tree: Tree, source: &str) -> ExtractedIndex {
             if REFERENCE_KINDS.contains(&kind)
                 && let Ok(name) = node.utf8_text(source.as_bytes())
             {
-                raw_refs.push(RawRef {
+                ex.refs.push(RawRef {
                     name: name.to_owned(),
                     line: node.start_position().row + 1,
                     byte_start: node.start_byte(),
@@ -423,15 +494,27 @@ fn extract(language: Language, tree: Tree, source: &str) -> ExtractedIndex {
         }
     }
 
-    // References: drop definition-name occurrences, deduplicate per
-    // (name, line), and bound the row count in document order.
+    augment(language, &tree, source, &mut ex);
+    finish(ex)
+}
+
+/// Turn the collected extraction into the final index.
+///
+/// References: merge the generic walk and the detail pass in document
+/// order, drop definition-name occurrences, deduplicate per
+/// `(name, line)`, and bound the row count.
+fn finish(mut ex: Extraction) -> ExtractedIndex {
+    let mut raw_refs = std::mem::take(&mut ex.refs);
+    raw_refs.sort_by_key(|raw| raw.byte_start);
+
     let mut seen = BTreeSet::new();
     let mut references = Vec::new();
     for raw in raw_refs {
         if references.len() >= REFERENCE_ROW_LIMIT {
             break;
         }
-        if name_spans
+        if ex
+            .name_spans
             .iter()
             .any(|(start, end)| *start == raw.byte_start && *end == raw.byte_end)
         {
@@ -445,11 +528,11 @@ fn extract(language: Language, tree: Tree, source: &str) -> ExtractedIndex {
         }
     }
 
-    let skeleton = render_skeleton(&import_lines, &symbols);
+    let skeleton = render_skeleton(&ex);
 
     ExtractedIndex {
-        symbols,
-        imports: import_lines,
+        symbols: ex.symbols,
+        imports: ex.imports,
         references,
         skeleton,
     }
@@ -467,7 +550,6 @@ fn definition_of(
         return None;
     }
 
-    let mut kind = rule.kind;
     if rule.member_function {
         // Only member *functions*: the declarator must be a
         // function_declarator. Data members are not symbols.
@@ -475,37 +557,45 @@ fn definition_of(
         if declarator.kind() != "function_declarator" {
             return None;
         }
-    } else {
-        kind = match rule.method {
-            MethodResolution::Never => kind,
-            MethodResolution::Parent { kinds } => {
-                if let Some(parent) = node.parent()
-                    && kinds.contains(&parent.kind())
-                {
-                    SymbolKind::Method
-                } else {
-                    kind
-                }
-            }
-            MethodResolution::ParentWrapper {
-                wrapper,
-                containers,
-            } => {
-                if let Some(parent) = node.parent()
-                    && parent.kind() == wrapper
-                    && let Some(container) = parent.parent()
-                    && containers.contains(&container.kind())
-                {
-                    SymbolKind::Method
-                } else {
-                    kind
-                }
-            }
-        };
     }
 
     let name_node = resolve_name(node)?;
     let name = name_node.utf8_text(source.as_bytes()).ok()?.to_owned();
+
+    let kind = match rule.method {
+        MethodResolution::Never => rule.kind,
+        MethodResolution::Parent { kinds } => {
+            if let Some(parent) = node.parent()
+                && kinds.contains(&parent.kind())
+            {
+                SymbolKind::Method
+            } else {
+                rule.kind
+            }
+        }
+        MethodResolution::ParentWrapper {
+            wrapper,
+            containers,
+        } => {
+            if let Some(parent) = node.parent()
+                && parent.kind() == wrapper
+                && let Some(container) = parent.parent()
+                && containers.contains(&container.kind())
+            {
+                SymbolKind::Method
+            } else {
+                rule.kind
+            }
+        }
+        MethodResolution::ColonQualified => {
+            if name.contains(':') {
+                SymbolKind::Method
+            } else {
+                rule.kind
+            }
+        }
+    };
+
     name_spans.push((name_node.start_byte(), name_node.end_byte()));
     Some(SymbolDef {
         name,
@@ -609,20 +699,24 @@ fn first_with_name_field<'a>(node: Node<'a>) -> Option<Node<'a>> {
     None
 }
 
-/// Collapse runs of whitespace into single spaces.
-fn collapse_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Render the compact skeleton: imports first, then definitions, both in
-/// document order.
-fn render_skeleton(imports: &[ImportDecl], symbols: &[SymbolDef]) -> String {
+/// Render the compact skeleton: bounded header lines first (shebangs,
+/// doctype, title), then imports, then definitions with their
+/// decorators, all in document order.
+fn render_skeleton(ex: &Extraction) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    for import in imports {
+    for line in &ex.skeleton_prefix {
+        let _ = writeln!(out, "{line}");
+    }
+    for import in &ex.imports {
         let _ = writeln!(out, "import {}", import.text);
     }
-    for symbol in symbols {
+    for symbol in &ex.symbols {
+        if let Some(decorators) = ex.decorators.get(&symbol.byte_start) {
+            for decorator in decorators {
+                let _ = writeln!(out, "{decorator}");
+            }
+        }
         let _ = writeln!(
             out,
             "{} {} L{}-L{}",
@@ -960,6 +1054,425 @@ export function area(s: Shape): number {
             Language::TypeScript,
             "plain .ts stays TypeScript"
         );
+    }
+
+    #[test]
+    fn registry_maps_every_language_to_its_indexer() {
+        // Every registered language builds its grammar and reports itself.
+        for language in Language::all() {
+            let indexer =
+                TreeSitterIndexer::new(language).unwrap_or_else(|err| panic!("{language}: {err}"));
+            assert_eq!(indexer.language(), language);
+        }
+        // The path-based registry resolves the four new languages.
+        let mut cache = IndexerCache::new();
+        for (path, expected) in [
+            ("app.py", Language::Python),
+            ("stubs/protocol.pyi", Language::Python),
+            ("run.sh", Language::Bash),
+            ("run.bash", Language::Bash),
+            ("init.lua", Language::Lua),
+            ("page.html", Language::Html),
+            ("page.htm", Language::Html),
+        ] {
+            assert_eq!(
+                cache.for_path(path).unwrap().language(),
+                expected,
+                "wrong indexer for {path}"
+            );
+        }
+        // Shebang-detected (extensionless) files resolve through the
+        // same registry with their default grammar.
+        assert_eq!(
+            cache
+                .for_detected_path("bin/tool", Language::Python)
+                .unwrap()
+                .language(),
+            Language::Python
+        );
+    }
+
+    #[test]
+    fn extracts_python_definitions_imports_and_references() {
+        let source = r#"import asyncio
+import foo.bar as fb
+from protocol import Packet
+from . import peer
+from ..lib import helper
+
+@dataclass
+class Client(Base):
+    def __init__(self, transport):
+        self.transport = transport
+
+    async def connect(self):
+        await asyncio.sleep(1)
+
+    def parse(self, data):
+        return parse_packet(data)
+
+def make_client(config):
+    async def inner():
+        pass
+    return Client(config)
+"#;
+        let index = extract_for(Language::Python, source);
+        let names = symbol_names(&index);
+        // Classes, methods, free/async/nested functions. Methods are
+        // recorded by simple name, matching the existing symbol model
+        // (like C++ `Widget::draw` -> `draw`).
+        assert!(names.contains(&("Client".to_string(), SymbolKind::Class)));
+        assert!(names.contains(&("__init__".to_string(), SymbolKind::Method)));
+        assert!(names.contains(&("connect".to_string(), SymbolKind::Method)));
+        assert!(names.contains(&("parse".to_string(), SymbolKind::Method)));
+        assert!(names.contains(&("make_client".to_string(), SymbolKind::Function)));
+        assert!(names.contains(&("inner".to_string(), SymbolKind::Function)));
+        // Imports: plain, dotted, aliased, from, relative — statement text
+        // preserves module, member, and relative level.
+        let texts: Vec<&str> = index.imports.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "import asyncio",
+                "import foo.bar as fb",
+                "from protocol import Packet",
+                "from . import peer",
+                "from ..lib import helper",
+            ]
+        );
+        // References: plain calls and attribute calls are kept; the
+        // class-name occurrence at its definition is excluded but the
+        // constructor call is kept.
+        assert!(index.references.iter().any(|r| r.name == "parse_packet"));
+        assert!(index.references.iter().any(|r| r.name == "sleep"));
+        let client_lines: Vec<usize> = index
+            .references
+            .iter()
+            .filter(|r| r.name == "Client")
+            .map(|r| r.line)
+            .collect();
+        assert!(!client_lines.contains(&8), "definition line excluded");
+        assert!(client_lines.contains(&21), "call line kept");
+        // Decorators are not symbols but ride along in the skeleton.
+        assert!(!names.iter().any(|(name, _)| name == "dataclass"));
+        assert!(index.skeleton.contains("@dataclass\nclass Client L8-L16"));
+        assert!(index.skeleton.contains("method connect L12-L13"));
+        assert!(index.skeleton.contains("function make_client L18-L21"));
+        // Spans cover the exact definition bytes.
+        let client = index.symbols.iter().find(|s| s.name == "Client").unwrap();
+        assert!(source[client.byte_start..client.byte_end].starts_with("class Client"));
+    }
+
+    #[test]
+    fn python_pyi_files_parse_as_python() {
+        let index = extract_for(Language::Python, "def greet(name: str) -> str: ...\n");
+        assert_eq!(
+            symbol_names(&index),
+            vec![("greet".to_string(), SymbolKind::Function)]
+        );
+    }
+
+    #[test]
+    fn malformed_python_still_extracts_deterministically() {
+        let broken = "def broken(:\n    return\nclass OK:\n";
+        let first = extract_for(Language::Python, broken);
+        let second = extract_for(Language::Python, broken);
+        assert_eq!(first, second);
+        assert!(
+            first
+                .symbols
+                .iter()
+                .all(|s| s.name == "OK" || s.name == "broken")
+        );
+    }
+
+    #[test]
+    fn extracts_bash_functions_sources_and_command_references() {
+        let source = r#"#!/usr/bin/env bash
+source ./lib/common.sh
+. ./lib/other.sh
+source "$DIR/dynamic.sh"
+
+function foo {
+    validate_config "$file"
+}
+
+function bar() {
+    :
+}
+
+baz() {
+    if true; then echo hi; fi
+}
+
+main
+"#;
+        let index = extract_for(Language::Bash, source);
+        // All three function definition forms.
+        let names = symbol_names(&index);
+        assert_eq!(
+            names,
+            vec![
+                ("foo".to_string(), SymbolKind::Function),
+                ("bar".to_string(), SymbolKind::Function),
+                ("baz".to_string(), SymbolKind::Function),
+            ]
+        );
+        // Static source/dot dependencies plus the dynamic expression as
+        // literal text — never shell-expanded or resolved.
+        let texts: Vec<&str> = index.imports.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "source ./lib/common.sh",
+                ". ./lib/other.sh",
+                "source \"$DIR/dynamic.sh\"",
+            ]
+        );
+        // Plain command invocations become unresolved references,
+        // including indexed function invocations.
+        assert!(index.references.iter().any(|r| r.name == "validate_config"));
+        assert!(index.references.iter().any(|r| r.name == "main"));
+        // Shell keywords never become references, and expansion or path
+        // forms are filtered out.
+        for keyword in [
+            "if", "then", "fi", "else", "for", "while", "do", "done", "case", "esac", "function",
+        ] {
+            assert!(
+                !index.references.iter().any(|r| r.name == keyword),
+                "{keyword}"
+            );
+        }
+        assert!(
+            index
+                .references
+                .iter()
+                .all(|r| !r.name.contains('$') && !r.name.contains('/'))
+        );
+        // The definition-name words are not references.
+        assert!(
+            index
+                .references
+                .iter()
+                .all(|r| !matches!(r.name.as_str(), "foo" | "bar" | "baz"))
+        );
+        // Skeleton: shebang, dependencies, function names — no bodies.
+        assert!(index.skeleton.starts_with("#!/usr/bin/env bash\n"));
+        assert!(index.skeleton.contains("import source ./lib/common.sh"));
+        assert!(index.skeleton.contains("function foo L6-L8"));
+        assert!(!index.skeleton.contains("validate_config"));
+    }
+
+    #[test]
+    fn malformed_bash_still_extracts_deterministically() {
+        let broken = "#!/bin/bash\nbroken() {\n  if fi fi\n";
+        let first = extract_for(Language::Bash, broken);
+        let second = extract_for(Language::Bash, broken);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn extracts_lua_functions_requires_and_call_references() {
+        let source = r#"#!/usr/bin/env lua
+local protocol = require("protocol")
+local util = require 'util'
+local dyn = require(prefix .. ".mod")
+
+function foo(a, b)
+    return a + b
+end
+
+local function helper(x)
+    return x * 2
+end
+
+function module.fn()
+end
+
+function object:method()
+end
+
+M.send(packet)
+obj:call()
+plain()
+"#;
+        let index = extract_for(Language::Lua, source);
+        let names = symbol_names(&index);
+        // Global, local, dotted, and colon forms; qualified names are
+        // kept syntactically, colon methods classify as methods.
+        assert!(names.contains(&("foo".to_string(), SymbolKind::Function)));
+        assert!(names.contains(&("helper".to_string(), SymbolKind::Function)));
+        assert!(names.contains(&("module.fn".to_string(), SymbolKind::Function)));
+        assert!(names.contains(&("object:method".to_string(), SymbolKind::Method)));
+        assert_eq!(names.len(), 4, "table assignments are not symbols");
+        // Literal requires (both quoting styles) are dependencies; the
+        // dynamic require is not.
+        let texts: Vec<&str> = index.imports.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, vec!["require(\"protocol\")", "require 'util'"]);
+        // Call references keep the syntactic callee form without
+        // claiming runtime dispatch.
+        assert!(index.references.iter().any(|r| r.name == "M.send"));
+        assert!(index.references.iter().any(|r| r.name == "obj:call"));
+        assert!(index.references.iter().any(|r| r.name == "plain"));
+        // Skeleton: shebang, requires, definitions — no bodies.
+        assert!(index.skeleton.starts_with("#!/usr/bin/env lua\n"));
+        assert!(index.skeleton.contains("import require(\"protocol\")"));
+        assert!(index.skeleton.contains("function foo L6-L8"));
+        assert!(index.skeleton.contains("method object:method L17-L18"));
+        assert!(!index.skeleton.contains("x * 2"));
+    }
+
+    #[test]
+    fn malformed_lua_still_extracts_deterministically() {
+        let broken = "#! /usr/bin/lua5.4\nfunction broken(\n  local x = = 2\n";
+        let first = extract_for(Language::Lua, broken);
+        let second = extract_for(Language::Lua, broken);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn extracts_html_structure_dependencies_and_fragment_references() {
+        let source = r##"<!doctype html>
+<html>
+<head>
+  <title>Checkout page</title>
+  <link href="styles/main.css">
+  <script src="/js/app.js"></script>
+  <script>inline_call();</script>
+  <style>body { color: red; }</style>
+</head>
+<body>
+  <main id="checkout" class="hero big">
+    <p id="intro">Welcome prose.</p>
+    <a href="#checkout">home</a>
+    <a href="https://example.com/x">ext</a>
+    <a href="#">empty</a>
+    <user-profile></user-profile>
+    <img src="images/logo.svg">
+    <img src="/static/pic.png"/>
+  </main>
+</body>
+</html>
+"##;
+        let index = extract_for(Language::Html, source);
+        let names = symbol_names(&index);
+        // id-bearing elements and custom elements only.
+        assert!(names.contains(&("checkout".to_string(), SymbolKind::Element)));
+        assert!(names.contains(&("intro".to_string(), SymbolKind::Element)));
+        assert!(names.contains(&("user-profile".to_string(), SymbolKind::Element)));
+        // Ordinary tags and CSS classes never become symbols.
+        for not_symbol in [
+            "html", "head", "body", "main", "p", "a", "img", "link", "script", "style", "hero",
+            "big", "title",
+        ] {
+            assert!(
+                !names.iter().any(|(name, _)| name == not_symbol),
+                "{not_symbol} must not be a symbol"
+            );
+        }
+        // Resource dependencies, literal text preserved; external URLs
+        // stay recorded as-is (deterministically) and are never fetched.
+        let texts: Vec<&str> = index.imports.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                r#"<link href="styles/main.css">"#,
+                r#"<script src="/js/app.js">"#,
+                r#"<img src="images/logo.svg">"#,
+                r#"<img src="/static/pic.png"/>"#,
+            ]
+        );
+        // Fragment references relate to id symbols in the same document;
+        // external and empty fragments are not fragment references.
+        assert!(index.references.iter().any(|r| r.name == "checkout"));
+        assert!(
+            index
+                .references
+                .iter()
+                .all(|r| !r.name.starts_with("http") && !r.name.is_empty())
+        );
+        // Inline script/style content is never parsed as JS or CSS.
+        assert!(!index.references.iter().any(|r| r.name == "inline_call"));
+        assert!(!index.skeleton.contains("color: red"));
+        // Spans: the id symbol covers the start tag.
+        let checkout = index.symbols.iter().find(|s| s.name == "checkout").unwrap();
+        assert_eq!(checkout.line_start, 11);
+        assert_eq!(checkout.line_end, 11);
+        assert!(
+            source[checkout.byte_start..checkout.byte_end].starts_with("<main id=\"checkout\"")
+        );
+        // Skeleton: doctype, title, dependencies, symbols — no prose.
+        let skeleton = &index.skeleton;
+        assert!(skeleton.contains("<!doctype html>"));
+        assert!(skeleton.contains("title Checkout page"));
+        assert!(skeleton.contains(r#"import <script src="/js/app.js">"#));
+        assert!(skeleton.contains("element checkout L11-L11"));
+        assert!(skeleton.contains("element user-profile L16-L16"));
+        assert!(!skeleton.contains("Welcome prose."));
+    }
+
+    #[test]
+    fn malformed_html_still_extracts_deterministically() {
+        let broken = "<div id=\"outer\"\n  <p>text\n  <span id=\"s\">x\n";
+        let first = extract_for(Language::Html, broken);
+        let second = extract_for(Language::Html, broken);
+        assert_eq!(first, second);
+        // Recovered structure still yields the id symbols.
+        let names = symbol_names(&first);
+        assert!(names.iter().any(|(name, _)| name == "outer"));
+    }
+
+    #[test]
+    fn htm_extension_parses_as_html() {
+        let index = extract_for(Language::Html, "<p id=\"x\">t</p>\n");
+        assert_eq!(
+            symbol_names(&index),
+            vec![("x".to_string(), SymbolKind::Element)]
+        );
+    }
+
+    #[test]
+    fn skeletons_stay_bounded_for_large_bodies() {
+        // Python: a 300-line function body collapses to one skeleton line.
+        let mut python = String::from("def big():\n");
+        for i in 0..300 {
+            python.push_str(&format!("    x{i} = compute({i})\n"));
+        }
+        python.push_str("\ndef small():\n    pass\n");
+        let index = extract_for(Language::Python, &python);
+        assert_eq!(index.skeleton.lines().count(), 2);
+        assert!(!index.skeleton.contains("compute"));
+
+        // Bash.
+        let mut bash = String::from("#!/bin/bash\nbig() {\n");
+        for i in 0..300 {
+            bash.push_str(&format!("  step_{i}\n"));
+        }
+        bash.push_str("}\n");
+        let index = extract_for(Language::Bash, &bash);
+        assert_eq!(index.skeleton.lines().count(), 2);
+        assert!(!index.skeleton.contains("step_"));
+
+        // Lua.
+        let mut lua = String::from("function big()\n");
+        for i in 0..300 {
+            lua.push_str(&format!("  local v{i} = step({i})\n"));
+        }
+        lua.push_str("end\n");
+        let index = extract_for(Language::Lua, &lua);
+        assert_eq!(index.skeleton.lines().count(), 1);
+        assert!(!index.skeleton.contains("step"));
+
+        // HTML: a huge text body disappears; ids survive.
+        let mut html = String::from("<!doctype html>\n<body>\n<div id=\"wrap\">\n");
+        for i in 0..200 {
+            html.push_str(&format!("<p>paragraph {i} with a lot of prose text</p>\n"));
+        }
+        html.push_str("</div>\n</body>\n");
+        let index = extract_for(Language::Html, &html);
+        assert!(index.skeleton.contains("element wrap L"));
+        assert!(!index.skeleton.contains("prose"));
+        assert!(index.skeleton.len() < html.len() / 10);
     }
 
     #[test]

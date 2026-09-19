@@ -1,9 +1,11 @@
 //! Source language classification for the content-addressed index.
 //!
-//! Nisse 1.0 indexes exactly seven languages (plan section 27):
-//! C, C++, C#, Dart, Rust, JavaScript, and TypeScript. Detection is a
-//! deterministic function of the repository-relative path's file extension;
-//! files without a recognized extension are not part of the source index.
+//! Nisse indexes eleven languages: C, C++, C#, Dart, Rust, JavaScript,
+//! TypeScript, Python, Bash, Lua, and HTML. Detection is a deterministic
+//! function of the repository-relative path's file extension — files
+//! without a recognized extension are only indexed when shebang
+//! recognition identifies them (see [`super::shebang`]; the first four
+//! extension groups below never need content sniffing).
 //!
 //! Deliberate disambiguation rules:
 //!
@@ -11,8 +13,13 @@
 //!   `.hh`, ...) are indexed as C++.
 //! - `.jsx` is JavaScript (the grammar includes JSX syntax); `.tsx` is
 //!   TypeScript.
+//! - `.pyi` stub files are Python; `.sh` and `.bash` are both Bash (a
+//!   POSIX `sh` shebang also indexes as `bash` — there is no separate
+//!   POSIX-sh language).
 //! - Extension matching is ASCII case-insensitive, so `LIB.RS` and
 //!   `lib.rs` classify identically.
+//! - A recognized extension always wins over contradictory content:
+//!   classification by extension never reads the file.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +42,16 @@ pub enum Language {
     JavaScript,
     /// TypeScript (`.ts`, `.mts`, `.cts`, `.tsx`).
     TypeScript,
+    /// Python (`.py`, `.pyi`; extensionless files with a Python
+    /// shebang).
+    Python,
+    /// Bash (`.sh`, `.bash`; extensionless files with a `bash` or `sh`
+    /// shebang).
+    Bash,
+    /// Lua (`.lua`; extensionless files with a Lua shebang).
+    Lua,
+    /// HTML (`.html`, `.htm`).
+    Html,
 }
 
 impl std::fmt::Display for Language {
@@ -55,13 +72,18 @@ impl Language {
             Language::Rust => "rust",
             Language::JavaScript => "javascript",
             Language::TypeScript => "typescript",
+            Language::Python => "python",
+            Language::Bash => "bash",
+            Language::Lua => "lua",
+            Language::Html => "html",
         }
     }
 
     /// Classify a repository-relative path by extension.
     ///
     /// Returns `None` for paths without a recognized extension, including
-    /// paths without any extension at all.
+    /// paths without any extension at all. Extensionless files are instead
+    /// classified through shebang recognition (see [`super::shebang`]).
     pub fn from_path(path: &str) -> Option<Self> {
         let extension = path.rsplit_once('.')?.1;
         let lowered = extension.to_ascii_lowercase();
@@ -75,13 +97,17 @@ impl Language {
             "rs" => Language::Rust,
             "js" | "mjs" | "cjs" | "jsx" => Language::JavaScript,
             "ts" | "mts" | "cts" | "tsx" => Language::TypeScript,
+            "py" | "pyi" => Language::Python,
+            "sh" | "bash" => Language::Bash,
+            "lua" => Language::Lua,
+            "html" | "htm" => Language::Html,
             _ => return None,
         };
         Some(language)
     }
 
     /// Every indexed language, in declaration order.
-    pub fn all() -> [Language; 7] {
+    pub fn all() -> [Language; 11] {
         [
             Language::C,
             Language::Cpp,
@@ -90,6 +116,10 @@ impl Language {
             Language::Rust,
             Language::JavaScript,
             Language::TypeScript,
+            Language::Python,
+            Language::Bash,
+            Language::Lua,
+            Language::Html,
         ]
     }
 }
@@ -123,6 +153,14 @@ mod tests {
             ("module.mts", Language::TypeScript),
             ("module.cts", Language::TypeScript),
             ("component.tsx", Language::TypeScript),
+            ("app/main.py", Language::Python),
+            ("stubs/protocol.pyi", Language::Python),
+            ("scripts/run.sh", Language::Bash),
+            ("scripts/run.bash", Language::Bash),
+            ("legacy/Setup.PY", Language::Python),
+            ("page/INDEX.HTML", Language::Html),
+            ("page/about.htm", Language::Html),
+            ("mod/init.lua", Language::Lua),
         ];
         for (path, expected) in cases {
             assert_eq!(
@@ -137,6 +175,7 @@ mod tests {
     fn classification_is_ascii_case_insensitive() {
         assert_eq!(Language::from_path("LIB.RS"), Some(Language::Rust));
         assert_eq!(Language::from_path("App.CS"), Some(Language::CSharp));
+        assert_eq!(Language::from_path("TOOL.SH"), Some(Language::Bash));
     }
 
     #[test]
@@ -146,10 +185,12 @@ mod tests {
             "data.json",
             "Cargo.toml",
             "Makefile",
-            "script.sh",
             "no-extension",
             ".gitignore",
             "archive.tar.gz",
+            "template.erb",
+            "config.xml",
+            "Component.vue",
         ] {
             assert_eq!(
                 Language::from_path(path),
@@ -171,7 +212,24 @@ mod tests {
 
     #[test]
     fn serde_rejects_unknown_languages() {
-        assert!(serde_json::from_str::<Language>("\"python\"").is_err());
+        assert!(serde_json::from_str::<Language>("\"kotlin\"").is_err());
         assert!(serde_json::from_str::<Language>("\"CSharp\"").is_err());
+        assert!(serde_json::from_str::<Language>("\"posix-sh\"").is_err());
+    }
+
+    #[test]
+    fn new_languages_are_part_of_the_registry() {
+        let all = Language::all();
+        assert_eq!(all.len(), 11, "eleven indexed languages");
+        for (language, label) in [
+            (Language::Python, "python"),
+            (Language::Bash, "bash"),
+            (Language::Lua, "lua"),
+            (Language::Html, "html"),
+        ] {
+            assert!(all.contains(&language), "{label} missing from all()");
+            assert_eq!(language.label(), label);
+            assert_eq!(language.to_string(), label);
+        }
     }
 }

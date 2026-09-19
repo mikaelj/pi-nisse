@@ -166,6 +166,84 @@ impl<'a> SnapshotReader<'a> {
         }
     }
 
+    /// Read at most `limit` bytes of one file from the target side.
+    ///
+    /// Membership semantics match [`SnapshotReader::read`]. The working
+    /// tree serves a genuinely bounded read (enough for, say, shebang
+    /// detection without reading whole files); Git object sides cannot
+    /// serve partial blobs through the installed `git`, so their bytes
+    /// are read and then truncated to `limit`.
+    pub fn read_prefix(&self, path: &str, limit: usize) -> Result<Option<Vec<u8>>, GitError> {
+        validate_relative_path(path)?;
+        match self.target {
+            SnapshotTarget::Working => self.read_working_prefix(path, limit),
+            SnapshotTarget::Index => Ok(self
+                .read_index(path)?
+                .map(|file| file.bytes[..file.bytes.len().min(limit)].to_vec())),
+            SnapshotTarget::Commit { .. } => Ok(self
+                .read_tree(path)?
+                .map(|file| file.bytes[..file.bytes.len().min(limit)].to_vec())),
+        }
+    }
+
+    /// Read a bounded prefix from the final working-tree state.
+    fn read_working_prefix(&self, path: &str, limit: usize) -> Result<Option<Vec<u8>>, GitError> {
+        use std::io::Read as _;
+
+        let full = self.worktree_join(path)?;
+        let metadata = match std::fs::symlink_metadata(&full) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(GitError::Read {
+                    path: PathBuf::from(path),
+                    source: err,
+                });
+            }
+        };
+        // Git stores a symlink's content as the link target string; a
+        // prefix read never follows the link.
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(&full).map_err(|err| GitError::Read {
+                path: PathBuf::from(path),
+                source: err,
+            })?;
+            let bytes = target
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned()
+                .into_bytes();
+            return Ok(Some(bytes[..bytes.len().min(limit)].to_vec()));
+        }
+        let mut file = match std::fs::File::open(&full) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(GitError::Read {
+                    path: PathBuf::from(path),
+                    source: err,
+                });
+            }
+        };
+        let mut prefix = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while prefix.len() < limit {
+            let want = (limit - prefix.len()).min(chunk.len());
+            match file.read(&mut chunk[..want]) {
+                Ok(0) => break,
+                Ok(n) => prefix.extend_from_slice(&chunk[..n]),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => {
+                    return Err(GitError::Read {
+                        path: PathBuf::from(path),
+                        source: err,
+                    });
+                }
+            }
+        }
+        Ok(Some(prefix))
+    }
+
     /// Read from the final working-tree state.
     fn read_working(&self, path: &str) -> Result<Option<SnapshotFile>, GitError> {
         let full = self.worktree_join(path)?;
@@ -463,6 +541,67 @@ mod tests {
         for entry in &listing {
             assert!(entry.blob_oid.is_some());
         }
+    }
+
+    #[test]
+    fn read_prefix_is_bounded_and_target_exact() {
+        let fixture = Fixture::repo("reader-prefix");
+        let large: String = "#!/usr/bin/env bash\n".to_string() + &"x".repeat(4096);
+        write_file(&fixture.root, "big", &large);
+        write_file(&fixture.root, "small", "tiny\n");
+        commit_all(&fixture.root, "one");
+
+        let ctx = ctx_of(&fixture);
+
+        // Working tree: bounded read of a large file.
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        assert_eq!(reader.read_prefix("big", 64).unwrap().unwrap().len(), 64);
+        assert_eq!(
+            reader
+                .read_prefix("big", usize::MAX)
+                .unwrap()
+                .unwrap()
+                .len(),
+            large.len()
+        );
+        // Short files are returned whole.
+        assert_eq!(
+            reader.read_prefix("small", 512).unwrap().unwrap(),
+            b"tiny\n"
+        );
+        // Absent paths stay absent.
+        assert_eq!(reader.read_prefix("missing", 8).unwrap(), None);
+
+        // Index and commit sides return the same bytes, truncated.
+        for spec in [
+            SnapshotSpec::Staged,
+            SnapshotSpec::Commit {
+                revision: ctx.head.clone().unwrap(),
+            },
+        ] {
+            let resolved = resolve_snapshot(&ctx, &spec).unwrap();
+            let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+            let prefix = reader.read_prefix("big", 20).unwrap().unwrap();
+            assert_eq!(prefix, b"#!/usr/bin/env bash\n".as_slice());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_prefix_of_symlink_returns_link_target() {
+        let fixture = Fixture::repo("reader-prefix-symlink");
+        write_file(&fixture.root, "real.sh", "x\n");
+        let link = fixture.root.join("linked");
+        std::os::unix::fs::symlink("real.sh", &link).unwrap();
+
+        let ctx = ctx_of(&fixture);
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        assert_eq!(
+            reader.read_prefix("linked", 512).unwrap().unwrap(),
+            b"real.sh"
+        );
     }
 
     #[test]
