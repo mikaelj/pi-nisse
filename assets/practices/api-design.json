@@ -1,0 +1,28 @@
+{
+  "id": "api-design",
+  "title": "API Design",
+  "description": "Practices for public interfaces and their stability.",
+  "tags": ["api-design", "api"],
+  "practices": [
+    {
+      "id": "api-design:no-silent-breaking",
+      "title": "No silent breaking changes",
+      "statement": "Signature, behavior, and serialization changes to public surface are called out explicitly."
+    },
+    {
+      "id": "api-design:minimal-surface",
+      "title": "Minimal surface",
+      "statement": "Export only what callers need; wide surfaces freeze accidents into contracts."
+    },
+    {
+      "id": "api-design:errors-are-contract",
+      "title": "Errors are contract",
+      "statement": "Failure modes are part of the API: documented, typed, and stable."
+    },
+    {
+      "id": "api-design:conservative-defaults",
+      "title": "Conservative defaults",
+      "statement": "Defaults choose the safe option; dangerous modes are opt-in."
+    }
+  ]
+}

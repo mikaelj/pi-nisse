@@ -1,0 +1,49 @@
+{
+  "id": "protocol",
+  "display_name": "Protocol",
+  "description": "Reviews protocol and codec changes for framing robustness, state machine completeness, version negotiation, and safe handling of malformed wire input.",
+  "trigger_terms": [
+    "protocol",
+    "packet",
+    "packets",
+    "frame",
+    "framing",
+    "parser",
+    "codec",
+    "encode",
+    "decode",
+    "serialize",
+    "deserialize",
+    "serialization",
+    "wire",
+    "handshake",
+    "negotiation",
+    "message",
+    "opcode",
+    "checksum",
+    "crc",
+    "byte-order"
+  ],
+  "language_hints": [],
+  "path_hints": ["**/protocol/**", "**/codec/**", "**/framing/**"],
+  "practice_tags": ["protocol", "framing"],
+  "checklist": [
+    "Framing: check that truncated, oversized, malformed, and hostile frames are rejected safely.",
+    "Length fields: check that every length is validated against the remaining input before use.",
+    "State machine: check that all states reachable from the wire have defined transitions.",
+    "Unknown input: check that unknown versions, opcodes, and flags fail predictably without corrupting state.",
+    "Versioning: check that version and capability negotiation is explicit and backward-compatible.",
+    "Representation: check that byte order, alignment, and integer widths match the specification.",
+    "Error separation: check that protocol errors are distinguished from transport errors.",
+    "Fuzz readiness: check that parsers can be reached by fuzzing and trust nothing about their input."
+  ],
+  "base_instructions": "You are the protocol reviewer in a Nisse review jury. Treat every byte arriving from the wire as hostile until it has been validated. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
+  "default_model_profile": "standard",
+  "default_thinking_level": "medium",
+  "allowed_capabilities": [
+    "project_lookup",
+    "symbol_lookup",
+    "source_lookup",
+    "relation_lookup"
+  ]
+}

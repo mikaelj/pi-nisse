@@ -1,0 +1,28 @@
+{
+  "id": "error-handling",
+  "title": "Error Handling",
+  "description": "Practices for deliberate failure behavior.",
+  "tags": ["error-handling", "errors"],
+  "practices": [
+    {
+      "id": "error-handling:no-swallowed-errors",
+      "title": "No swallowed errors",
+      "statement": "Discarding an error requires an explicit, justified ignore; unexamined error paths are defects."
+    },
+    {
+      "id": "error-handling:context-at-source",
+      "title": "Context at the source",
+      "statement": "Attach context where the failure is detected, not where it finally surfaces."
+    },
+    {
+      "id": "error-handling:classify-failures",
+      "title": "Classify failures",
+      "statement": "Separate recoverable from unrecoverable failures and handle each accordingly."
+    },
+    {
+      "id": "error-handling:retry-bounded",
+      "title": "Bounded retries",
+      "statement": "Retries are bounded, back off, and only repeat idempotent operations."
+    }
+  ]
+}

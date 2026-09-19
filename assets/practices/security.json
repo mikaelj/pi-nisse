@@ -1,0 +1,33 @@
+{
+  "id": "security",
+  "title": "Security",
+  "description": "Practices for defending trust boundaries and handling untrusted data.",
+  "tags": ["security"],
+  "practices": [
+    {
+      "id": "security:validate-at-boundary",
+      "title": "Validate at the boundary",
+      "statement": "Validate untrusted data once at the trust boundary, then rely on validated types."
+    },
+    {
+      "id": "security:fail-closed",
+      "title": "Fail closed",
+      "statement": "On validation or verification failure, deny by default; never fall through to a permissive path."
+    },
+    {
+      "id": "security:no-string-built-commands",
+      "title": "No string-built commands",
+      "statement": "Never build SQL, shell, or path strings from untrusted input; use parameterization and safe APIs."
+    },
+    {
+      "id": "security:secrets-stay-out",
+      "title": "Secrets stay out",
+      "statement": "Secrets never appear in source, logs, error messages, or test fixtures."
+    },
+    {
+      "id": "security:standard-crypto",
+      "title": "Standard cryptography",
+      "statement": "Use vetted crypto libraries with default modes; never design primitives."
+    }
+  ]
+}

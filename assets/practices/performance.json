@@ -1,0 +1,28 @@
+{
+  "id": "performance",
+  "title": "Performance",
+  "description": "Practices for reasoning about and preserving performance.",
+  "tags": ["performance"],
+  "practices": [
+    {
+      "id": "performance:measure-first",
+      "title": "Measure first",
+      "statement": "Require measurement or clear complexity reasoning before accepting a performance claim."
+    },
+    {
+      "id": "performance:hot-path-budget",
+      "title": "Hot path budget",
+      "statement": "Keep allocation and copying off identified hot paths."
+    },
+    {
+      "id": "performance:cache-invalidation",
+      "title": "Caches are their invalidation",
+      "statement": "A cache is correct only if its invalidation is; unbounded caches are leaks."
+    },
+    {
+      "id": "performance:batch-io",
+      "title": "Batch small I/O",
+      "statement": "Batch small I/O operations instead of rounding per item."
+    }
+  ]
+}

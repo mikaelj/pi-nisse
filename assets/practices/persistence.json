@@ -1,0 +1,33 @@
+{
+  "id": "persistence",
+  "title": "Persistence",
+  "description": "Practices for durable, crash-safe local state.",
+  "tags": ["persistence", "storage"],
+  "practices": [
+    {
+      "id": "persistence:atomic-write",
+      "title": "Atomic writes",
+      "statement": "Write to a temporary file, then atomically rename; never overwrite in place."
+    },
+    {
+      "id": "persistence:fsync-before-claim",
+      "title": "Fsync before claiming durability",
+      "statement": "Do not claim durability without fsync of the data and, where required, the containing directory."
+    },
+    {
+      "id": "persistence:crash-anywhere",
+      "title": "Design for crash anywhere",
+      "statement": "Design for recovery from interruption at every write step, then test it."
+    },
+    {
+      "id": "persistence:detect-corruption",
+      "title": "Detect corruption",
+      "statement": "Check checksums or structure on load; corrupted state is quarantined, not trusted."
+    },
+    {
+      "id": "persistence:version-your-format",
+      "title": "Version stored formats",
+      "statement": "Persisted formats carry a version and a migration path."
+    }
+  ]
+}

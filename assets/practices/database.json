@@ -1,0 +1,28 @@
+{
+  "id": "database",
+  "title": "Database",
+  "description": "Practices for schemas, queries, and migrations.",
+  "tags": ["database", "sql"],
+  "practices": [
+    {
+      "id": "database:parameterize-always",
+      "title": "Parameterize always",
+      "statement": "Use parameterized statements; string-built SQL is rejected regardless of escaping."
+    },
+    {
+      "id": "database:migration-forward-safe",
+      "title": "Forward-safe migrations",
+      "statement": "Migrations must apply to existing production data; be additive first and destructive deliberately."
+    },
+    {
+      "id": "database:index-for-query",
+      "title": "Index for query patterns",
+      "statement": "Every frequent query pattern has a supporting index; watch for N+1 loops."
+    },
+    {
+      "id": "database:transaction-boundaries",
+      "title": "Transaction boundaries",
+      "statement": "Invariants that must hold together change inside one transaction."
+    }
+  ]
+}

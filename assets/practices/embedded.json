@@ -1,0 +1,33 @@
+{
+  "id": "embedded",
+  "title": "Embedded",
+  "description": "Practices for microcontroller and resource-constrained targets.",
+  "tags": ["embedded", "mcu"],
+  "practices": [
+    {
+      "id": "embedded:isr-minimal",
+      "title": "Minimal ISRs",
+      "statement": "ISRs set flags or push to queues; they do not compute or allocate."
+    },
+    {
+      "id": "embedded:volatile-registers",
+      "title": "Correct peripheral access",
+      "statement": "Peripheral accesses are volatile with documented widths and side effects."
+    },
+    {
+      "id": "embedded:budget-check",
+      "title": "Check resource budgets",
+      "statement": "Track flash, RAM, and stack impact of every change against the target's limits."
+    },
+    {
+      "id": "embedded:init-order",
+      "title": "Respect initialization order",
+      "statement": "Hardware bring-up order follows datasheet requirements; assumptions are checked at startup."
+    },
+    {
+      "id": "embedded:no-heap-where-forbidden",
+      "title": "Static allocation where required",
+      "statement": "Use static or stack allocation only in builds where the heap is forbidden."
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "id": "networking",
+  "display_name": "Networking",
+  "description": "Reviews network-facing changes for timeout coverage, partial I/O handling, connection lifecycle, reconnect behavior, peer verification, and resource limits.",
+  "trigger_terms": [
+    "network",
+    "socket",
+    "tcp",
+    "udp",
+    "http",
+    "https",
+    "dns",
+    "client",
+    "server",
+    "listen",
+    "connect",
+    "reconnect",
+    "timeout",
+    "tls",
+    "websocket",
+    "rest",
+    "endpoint",
+    "port"
+  ],
+  "language_hints": [],
+  "path_hints": ["**/net/**", "**/network/**"],
+  "practice_tags": ["networking"],
+  "checklist": [
+    "Timeouts: check that every network operation has an explicit timeout.",
+    "Partial I/O: check that short reads and writes are handled correctly.",
+    "Connection lifecycle: check that connections are closed on all paths, including error paths.",
+    "Reconnection: check that reconnect behavior uses backoff and cannot stampede a recovering peer.",
+    "Peer identity: check that TLS verification remains enabled and identities are checked.",
+    "Limits: check that connection and in-flight request limits prevent resource exhaustion.",
+    "Shutdown: check that shutdown is graceful: in-flight work drains or fails cleanly.",
+    "Propagation: check that network errors propagate and are never silently ignored."
+  ],
+  "base_instructions": "You are the networking reviewer in a Nisse review jury. Assume the network is slow, lossy, and only partially available at all times. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
+  "default_model_profile": "standard",
+  "default_thinking_level": "medium",
+  "allowed_capabilities": [
+    "project_lookup",
+    "symbol_lookup",
+    "source_lookup",
+    "relation_lookup"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "id": "persistence",
+  "display_name": "Persistence",
+  "description": "Reviews persistence changes for durability, atomic writes, crash consistency, concurrent access, corruption detection, and format versioning.",
+  "trigger_terms": [
+    "file",
+    "write",
+    "read",
+    "save",
+    "load",
+    "persist",
+    "persistence",
+    "serialize",
+    "disk",
+    "fsync",
+    "flush",
+    "journal",
+    "atomic",
+    "corruption",
+    "recover",
+    "recovery",
+    "storage",
+    "cache",
+    "state"
+  ],
+  "language_hints": [],
+  "path_hints": ["**/storage/**", "**/store/**", "**/persist/**", "**/cache/**"],
+  "practice_tags": ["persistence", "storage"],
+  "checklist": [
+    "Durability: check that data is flushed or fsynced wherever persistence is claimed.",
+    "Atomicity: check that writes cannot leave torn or half-written state.",
+    "Crash safety: check that recovery from interruption at any write point is defined.",
+    "Concurrent access: check that concurrent writers and readers cannot corrupt each other.",
+    "Corruption: check that invalid stored data is detected rather than trusted.",
+    "Format versioning: check that stored formats carry and check a version.",
+    "Migration: check that existing data survives format changes.",
+    "Resource handling: check that files and handles are closed on all paths."
+  ],
+  "base_instructions": "You are the persistence reviewer in a Nisse review jury. Assume the process can crash between any two instructions and that stored data may be corrupted. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
+  "default_model_profile": "standard",
+  "default_thinking_level": "medium",
+  "allowed_capabilities": [
+    "project_lookup",
+    "symbol_lookup",
+    "source_lookup",
+    "relation_lookup"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "id": "error-handling",
+  "display_name": "Error Handling",
+  "description": "Reviews changes for swallowed errors, lost context, unclear failure taxonomy, unbounded retries, missing cleanup on error paths, and panics on untrusted input.",
+  "trigger_terms": [
+    "error",
+    "errors",
+    "exception",
+    "panic",
+    "panics",
+    "unwrap",
+    "expect",
+    "result",
+    "option",
+    "retry",
+    "retries",
+    "fallback",
+    "propagate",
+    "swallow",
+    "ignore"
+  ],
+  "language_hints": [],
+  "path_hints": [],
+  "practice_tags": ["error-handling", "errors"],
+  "checklist": [
+    "No swallowed errors: check that every error is either handled deliberately or propagated.",
+    "Context: check that errors carry enough context to act on at the point of failure.",
+    "Classification: check that recoverable and unrecoverable failures are distinguished.",
+    "No panics on input: check that untrusted or malformed input cannot trigger a panic or abort.",
+    "Taxonomy: check that error types are consistent with the project's existing error model.",
+    "Retries: check that retries are bounded, back off, and only repeat idempotent operations.",
+    "Cleanup: check that resources are released on error paths.",
+    "Messages: check that error messages state what failed and why."
+  ],
+  "base_instructions": "You are the error handling reviewer in a Nisse review jury. Assume every operation can fail and that a discarded error is a defect. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
+  "default_model_profile": "standard",
+  "default_thinking_level": "medium",
+  "allowed_capabilities": [
+    "project_lookup",
+    "symbol_lookup",
+    "source_lookup",
+    "relation_lookup"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "id": "protocol",
+  "title": "Protocol",
+  "description": "Practices for wire formats, framing, and protocol state machines.",
+  "tags": ["protocol", "framing"],
+  "practices": [
+    {
+      "id": "protocol:validate-length-first",
+      "title": "Validate lengths first",
+      "statement": "Check every length field against the remaining buffer before any use."
+    },
+    {
+      "id": "protocol:reject-unknown-safely",
+      "title": "Reject unknown input safely",
+      "statement": "Unknown versions, opcodes, and flags must fail predictably without corrupting state."
+    },
+    {
+      "id": "protocol:state-machine-complete",
+      "title": "Complete protocol state machines",
+      "statement": "Model the wire protocol as an explicit state machine with no undefined transitions."
+    },
+    {
+      "id": "protocol:fuzz-ready",
+      "title": "Parsers are fuzz-ready",
+      "statement": "Structure parsers so fuzzing can reach them; no parser trusts its input."
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "concurrency",
+  "title": "Concurrency",
+  "description": "Practices for shared state, cross-context communication, and synchronization.",
+  "tags": ["concurrency", "shared-state", "queues"],
+  "practices": [
+    {
+      "id": "concurrency:owns-the-data",
+      "title": "One owner per piece of mutable state",
+      "statement": "Prefer message passing: one execution context owns each piece of mutable state."
+    },
+    {
+      "id": "concurrency:queue-boundaries",
+      "title": "Complete messages at queue boundaries",
+      "statement": "Pass complete, immutable messages across context boundaries; never share partial buffers."
+    },
+    {
+      "id": "concurrency:document-ordering",
+      "title": "Justify memory ordering",
+      "statement": "Every atomic or lock-protected access needs a stated happens-before justification."
+    },
+    {
+      "id": "concurrency:no-blocking-in-hot-contexts",
+      "title": "No blocking in constrained contexts",
+      "statement": "Never block inside interrupt handlers, event loops, or single-threaded executors."
+    },
+    {
+      "id": "concurrency:lock-order-discipline",
+      "title": "Global lock order",
+      "statement": "Define a global lock order and check every nested acquisition against it."
+    }
+  ]
+}

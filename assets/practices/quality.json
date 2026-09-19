@@ -1,0 +1,33 @@
+{
+  "id": "quality",
+  "title": "Quality",
+  "description": "General correctness practices that apply to every review.",
+  "tags": ["quality"],
+  "practices": [
+    {
+      "id": "quality:evidence-over-claims",
+      "title": "Evidence over claims",
+      "statement": "Judge changes by what the supplied evidence shows, not by what names, comments, or commit messages claim."
+    },
+    {
+      "id": "quality:error-paths-first",
+      "title": "Review failure paths first",
+      "statement": "Review failure paths before happy paths; most defects hide where operations fail."
+    },
+    {
+      "id": "quality:boundary-values",
+      "title": "Check boundary values",
+      "statement": "Check empty, single, maximum, and boundary values around changed logic."
+    },
+    {
+      "id": "quality:contract-misuse",
+      "title": "Honor called contracts",
+      "statement": "Verify each call site honors the called interface's documented contract."
+    },
+    {
+      "id": "quality:change-scoped-findings",
+      "title": "Keep findings scoped to the change",
+      "statement": "Prefer findings specific to the change; flag broad problems in untouched code only when they hide concrete defects."
+    }
+  ]
+}

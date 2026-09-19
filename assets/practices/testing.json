@@ -1,0 +1,33 @@
+{
+  "id": "testing",
+  "title": "Testing",
+  "description": "Practices for tests that actually catch defects.",
+  "tags": ["testing", "tests", "coverage"],
+  "practices": [
+    {
+      "id": "testing:behavior-not-implementation",
+      "title": "Test behavior, not implementation",
+      "statement": "Test observable behavior; tests coupled to internal details break on safe refactors."
+    },
+    {
+      "id": "testing:deterministic-by-default",
+      "title": "Tests are deterministic",
+      "statement": "Tests must not depend on wall-clock time, scheduling order, randomness, or network availability."
+    },
+    {
+      "id": "testing:isolation",
+      "title": "Isolated tests",
+      "statement": "Each test sets up its own state; shared mutable fixtures cause order-dependent failures."
+    },
+    {
+      "id": "testing:regression-locks",
+      "title": "Lock in fixed defects",
+      "statement": "Every fixed defect gets a test that fails without the fix."
+    },
+    {
+      "id": "testing:meaningful-assertions",
+      "title": "Assert expected values",
+      "statement": "Assert the expected value, not merely that no error occurred."
+    }
+  ]
+}

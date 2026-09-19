@@ -1,0 +1,33 @@
+{
+  "id": "networking",
+  "title": "Networking",
+  "description": "Practices for robust network clients and servers.",
+  "tags": ["networking"],
+  "practices": [
+    {
+      "id": "networking:timeout-everything",
+      "title": "Timeout everything",
+      "statement": "Every network call has an explicit timeout; blocking forever is a defect."
+    },
+    {
+      "id": "networking:handle-partial-io",
+      "title": "Handle partial I/O",
+      "statement": "Treat short reads and writes as normal, not as errors or as completion."
+    },
+    {
+      "id": "networking:backoff-reconnect",
+      "title": "Backoff on reconnect",
+      "statement": "Reconnect with exponential backoff and jitter; never hot-loop a dead peer."
+    },
+    {
+      "id": "networking:verify-peer",
+      "title": "Verify the peer",
+      "statement": "TLS verification stays enabled; disabling it requires documented justification."
+    },
+    {
+      "id": "networking:limit-concurrency",
+      "title": "Bound concurrency",
+      "statement": "Bound connections and in-flight requests to prevent resource exhaustion."
+    }
+  ]
+}

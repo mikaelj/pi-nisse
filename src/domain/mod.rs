@@ -7,9 +7,11 @@ pub mod evidence;
 pub mod finding;
 pub mod ids;
 pub mod model;
+pub mod practice;
 pub mod records;
 pub mod report;
 pub mod review;
+pub mod reviewer;
 pub mod snapshot;
 pub mod time;
 

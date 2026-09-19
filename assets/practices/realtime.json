@@ -1,0 +1,28 @@
+{
+  "id": "realtime",
+  "title": "Realtime",
+  "description": "Practices for deadline-driven and scheduled systems.",
+  "tags": ["realtime", "timing"],
+  "practices": [
+    {
+      "id": "realtime:deadline-explicit",
+      "title": "Deadlines are explicit",
+      "statement": "Every task names its deadline and period; code without a deadline cannot be validated."
+    },
+    {
+      "id": "realtime:bounded-wcet",
+      "title": "Bounded worst-case execution",
+      "statement": "Time-critical paths have bounded worst-case execution; unbounded loops are defects."
+    },
+    {
+      "id": "realtime:priority-inheritance",
+      "title": "Protect shared priorities",
+      "statement": "Shared resources used across priorities need priority inheritance or ceiling protocols."
+    },
+    {
+      "id": "realtime:queue-overflow-policy",
+      "title": "Define queue overflow policy",
+      "statement": "Define overflow behavior for every queue under burst, including backpressure or drop policy."
+    }
+  ]
+}

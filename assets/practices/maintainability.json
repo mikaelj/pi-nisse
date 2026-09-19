@@ -1,0 +1,33 @@
+{
+  "id": "maintainability",
+  "title": "Maintainability",
+  "description": "Practices for code that stays comprehensible.",
+  "tags": ["maintainability"],
+  "practices": [
+    {
+      "id": "maintainability:name-intent",
+      "title": "Names state intent",
+      "statement": "Names state intent; a reader should not need the body to understand the call."
+    },
+    {
+      "id": "maintainability:one-responsibility",
+      "title": "One responsibility",
+      "statement": "Modules and functions do one thing; branching by unrelated concerns splits them."
+    },
+    {
+      "id": "maintainability:kill-dead-code",
+      "title": "Delete dead code",
+      "statement": "Delete unused code and abstractions instead of annotating them."
+    },
+    {
+      "id": "maintainability:dependency-direction",
+      "title": "Dependency direction",
+      "statement": "Dependencies point from specific to general; new cycles are defects."
+    },
+    {
+      "id": "maintainability:explain-why",
+      "title": "Comments explain why",
+      "statement": "Comments explain why; code explains what."
+    }
+  ]
+}

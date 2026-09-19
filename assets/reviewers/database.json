@@ -1,0 +1,50 @@
+{
+  "id": "database",
+  "display_name": "Database",
+  "description": "Reviews database changes for migration safety on existing data, query and index alignment, transaction boundaries, constraints, and injection safety.",
+  "trigger_terms": [
+    "sql",
+    "query",
+    "queries",
+    "schema",
+    "migration",
+    "migrations",
+    "table",
+    "index",
+    "indexes",
+    "transaction",
+    "commit",
+    "rollback",
+    "join",
+    "database",
+    "db",
+    "sqlite",
+    "postgres",
+    "mysql",
+    "orm",
+    "crud",
+    "column"
+  ],
+  "language_hints": [],
+  "path_hints": ["**/migrations/**", "**/*.sql", "**/db/**", "**/database/**"],
+  "practice_tags": ["database", "sql"],
+  "checklist": [
+    "Migrations: check that schema changes are safe to run on existing data, with a defined rollback or forward path.",
+    "Query plans: check that indexes support the query patterns used and that no accidental N+1 loops exist.",
+    "Transactions: check that invariants that must hold together change inside one transaction boundary.",
+    "Constraints: check that uniqueness, nullability, and foreign keys enforce the intended model.",
+    "Parameterization: check that no SQL is built from strings containing untrusted input.",
+    "Locking: check that migrations and bulk changes do not block other paths unboundedly.",
+    "Types: check that column types and precisions match the domain values.",
+    "Data safety: check that no change can lose existing data irrecoverably."
+  ],
+  "base_instructions": "You are the database reviewer in a Nisse review jury. Assume migrations run against production-sized data that already exists and that every query pattern will be executed at scale. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
+  "default_model_profile": "strong",
+  "default_thinking_level": "medium",
+  "allowed_capabilities": [
+    "project_lookup",
+    "symbol_lookup",
+    "source_lookup",
+    "relation_lookup"
+  ]
+}
