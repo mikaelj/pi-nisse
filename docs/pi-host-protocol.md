@@ -39,7 +39,7 @@ Nisse Core → host:
 
 | type | status |
 | --- | --- |
-| `host_config` | reserved (later milestone) |
+| `host_config` | active |
 | `start_review` | active |
 | `start_fact_verification` | reserved |
 | `start_fact_synthesis` | reserved |
@@ -68,6 +68,21 @@ Sending a vocabulary-but-reserved message is refused deterministically
 `unknown_message`.
 
 ## Active messages
+
+### `host_config` (core → host)
+
+```json
+{"models":{"standard":{"model":"acme/local-small","endpoint":"http://127.0.0.1:8080/v1"}}}
+```
+
+Resolved model profiles the host may use for reviewer sessions, mapped
+from trusted local configuration by the Rust core. `model` is a
+`provider/model-id` identifier resolved against the local Pi model
+catalog; `endpoint` is optional and, when present, overrides the resolved
+model's base URL (endpoint trust was already validated by the core).
+Sending `host_config` again replaces the table. Reviewer sessions never
+inherit a model: a spec whose `model_profile` is absent from the table
+fails closed (`reviewer_failed{code="model_profile_unresolved"}`).
 
 ### `host_ready` (host → core)
 
@@ -164,5 +179,64 @@ and reflects tool outcomes in its report summary.
 Environment variable `NISSE_PI_HOST_FAULT` scripts protocol faults for
 testing: `startup-hang`, `crash-on-start`, `wrong-version`,
 `ready-then-exit`, `stderr-noise`, `malformed-after-ready`, `review-hang`.
-`NISSE_FAKE_REVIEWER_FAIL_FOR=<id>,<id>` scripts per-reviewer session
-failures.
+
+Fake reviewer faults:
+
+- `NISSE_FAKE_REVIEWER_FAIL_FOR=<id>,<id>`: every session of the listed
+  reviewers fails;
+- `NISSE_FAKE_REVIEWER_FAIL_ONCE_FOR=<id>,<id>`: only the first session
+  attempt of the listed reviewers fails (exercises the retry policy);
+- `NISSE_FAKE_REVIEWER_ATTEMPTS_FILE=<path>`: every session appends one
+  JSON line `{reviewer_id, attempt}` so tests can prove how often a
+  reviewer actually ran.
+
+## Pi reviewer runtime
+
+`--runtime pi` executes constrained isolated Pi SDK sessions (plan
+section 20). Each `ReviewerExecutionSpec` is mapped onto one session
+with:
+
+- **explicit model** resolved from `host_config` (endpoint override
+  applied when configured) — never inherited from Main Pi or settings;
+- **explicit thinking level** from the spec;
+- **explicit system instructions**: reviewer instructions, the ordered
+  checklist, and the strict output contract;
+- **explicit tools**: only the spec's granted read-only lookup tools,
+  bridged to the Rust core; no built-in coding tools;
+- **explicit initial context**: the review task plus the rendered context
+  entries as the first user message;
+- **isolation**: in-memory session only; extensions, skills, prompt
+templates, AGENTS/context files, and themes are not discovered; settings
+are in-memory.
+
+Reviewer output is parsed strictly (`ReviewerReport` schema). Malformed
+output receives exactly **one constrained repair** prompt; if the repair
+is still invalid the reviewer fails
+(`reviewer_failed{code="invalid_report"}`). Sessions run under the
+spec's `timeout_ms` (`reviewer_failed{code="session_timeout"}`). The
+host stamps reviewer identity, duration, and model metadata itself — the
+model's own claims about them are never trusted.
+
+The Pi SDK is imported dynamically: where `runtime/pi-host` dependencies
+are not installed, the fake and scripted runtimes still work and real
+reviewer execution fails closed with
+`reviewer_failed{code="sdk_unavailable"}`.
+
+### Scripted mock (tests)
+
+For offline tests of the full pi pipeline, the pi runtime can run against
+scripted agent sessions instead of the SDK:
+
+- `NISSE_PI_SESSION_SCRIPT=<path>`: JSON file
+  `{"sessions":[{"steps":[{"reply":string}|{"error":string}|{"hangMs":number}]}]}`;
+  one session per reviewer session, one step per conversation turn;
+- `NISSE_PI_SESSION_RECORD=<path>`: every completed session appends one
+  JSON line `{config, prompts}` describing the exact session Nisse built
+  (model, endpoint, thinking level, system prompt, tools, isolation flags).
+
+### Retry policy (Rust core)
+
+A failed reviewer may be retried **once** by the Rust core
+(`nisse::jury::execution::execute_review`); the retry reuses the identical
+`ReviewerExecutionSpec` — model, reviewer, checklist, and capabilities are
+never silently changed.

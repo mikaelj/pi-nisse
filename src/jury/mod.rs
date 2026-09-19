@@ -10,14 +10,18 @@
 //! - [`protocol`] is the frozen JSONL protocol spoken with the Pi review
 //!   host child process (plan section 21);
 //! - [`host`] spawns and drives that child process with typed failures,
-//!   timeouts, and clean shutdown.
+//!   timeouts, and clean shutdown;
+//! - [`execution`] applies the deterministic reviewer retry policy on top
+//!   of the host exchange (plan section 36).
 
 pub mod catalog;
+pub mod execution;
 pub mod host;
 pub mod plan;
 pub mod protocol;
 
 pub use catalog::{Catalog, CatalogError};
+pub use execution::execute_review;
 pub use host::{HostError, HostProcess, PiHostLaunch, ReviewerOutcome};
 pub use plan::{
     JuryPlanError, MAX_JURY_SIZE, MAX_SELECTED_SPECIALISTS, MIN_JURY_SIZE, build_jury_plan,

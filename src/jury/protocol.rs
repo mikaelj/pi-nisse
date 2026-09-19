@@ -23,8 +23,10 @@
 //! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::domain::context::ContextBundle;
+use crate::domain::model::ModelProfile;
 use crate::domain::report::ReviewerReport;
 use crate::domain::review::ReviewKind;
 use crate::domain::reviewer::{ReviewerCapability, ReviewerExecutionSpec};
@@ -138,6 +140,60 @@ pub struct HostErrorInfo {
 pub struct HostReady {
     /// Which runtime implementation is active.
     pub runtime: HostRuntime,
+}
+
+/// `host_config` payload: the resolved model profiles the host may use.
+///
+/// Rust resolves named profiles from trusted local configuration (plan
+/// sections 10 and 11) and forwards the resolution to the host; reviewer
+/// sessions never inherit a model. Profiles may be replaced by sending
+/// `host_config` again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostModelProfile {
+    /// Resolved model identifier (`provider/model-id`).
+    pub model: String,
+    /// Optional explicit endpoint base URL, already endpoint-trust-validated
+    /// by the Rust core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+impl HostModelProfile {
+    /// Build the wire profile from a configured [`ModelProfile`].
+    ///
+    /// The profile's optional `thinking_level` is deliberately dropped: the
+    /// thinking level of a session is carried explicitly by each
+    /// [`ReviewerExecutionSpec`] (plan section 18), never by the model table.
+    pub fn from_config(profile: &ModelProfile) -> Self {
+        HostModelProfile {
+            model: profile.model.clone(),
+            endpoint: profile.endpoint.clone(),
+        }
+    }
+}
+
+/// `host_config` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostConfigPayload {
+    /// Resolved model profiles by profile name.
+    pub models: BTreeMap<String, HostModelProfile>,
+}
+
+impl HostConfigPayload {
+    /// Build the payload from configured model profiles.
+    pub fn from_config_profiles(profiles: &BTreeMap<String, ModelProfile>) -> Self {
+        HostConfigPayload {
+            models: profiles
+                .iter()
+                .map(|(name, profile)| (name.clone(), HostModelProfile::from_config(profile)))
+                .collect(),
+        }
+    }
+
+    /// Whether `profile` was supplied to the host.
+    pub fn contains(&self, profile: &str) -> bool {
+        self.models.contains_key(profile)
+    }
 }
 
 /// `start_review` payload.
@@ -555,6 +611,27 @@ fn encode_message(message_type: &str, id: &str, payload: &impl Serialize) -> Str
     serde_json::to_string(&object).expect("message lines serialize")
 }
 
+/// A Rust-to-host `host_config` message.
+#[derive(Debug, Clone)]
+pub struct HostConfigMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the model profiles the host may resolve.
+    pub payload: HostConfigPayload,
+}
+
+impl HostConfigMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: HostConfigPayload) -> Self {
+        HostConfigMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(rust_to_host::HOST_CONFIG, &self.id, &self.payload)
+    }
+}
+
 /// A Rust-to-host `start_review` message.
 #[derive(Debug, Clone)]
 pub struct StartReviewMessage {
@@ -804,6 +881,51 @@ mod tests {
         let bad = r#"{"protocol_version":1,"id":"h-1","type":"host_error","error":{"code":"","message":""}}"#;
         let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
         assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    }
+
+    #[test]
+    fn host_config_serializes_profiles_and_maps_from_config() {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "standard".to_string(),
+            ModelProfile {
+                model: "acme/local-small".to_string(),
+                endpoint: Some("http://127.0.0.1:8080/v1".to_string()),
+                thinking_level: Some(crate::domain::model::ThinkingLevel::High),
+            },
+        );
+        profiles.insert(
+            "strong".to_string(),
+            ModelProfile {
+                model: "acme/local-large".to_string(),
+                endpoint: None,
+                thinking_level: None,
+            },
+        );
+
+        let payload = HostConfigPayload::from_config_profiles(&profiles);
+        assert!(payload.contains("standard"));
+        assert!(!payload.contains("fast"));
+        // The profile's thinking level never leaks into the model table:
+        // thinking is explicit per execution spec.
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(!json.contains("thinking_level"));
+        assert!(json.contains("acme/local-small"));
+        assert!(json.contains("http://127.0.0.1:8080/v1"));
+        assert!(!json.contains("\"endpoint\":null"));
+
+        let line = HostConfigMessage::new("m-0".to_string(), payload.clone()).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["type"], "host_config");
+        assert_eq!(value["id"], "m-0");
+        assert_eq!(value["models"]["strong"]["model"], "acme/local-large");
+        assert!(value["models"]["strong"].get("endpoint").is_none());
+
+        // Strict roundtrip: wrong shape is rejected.
+        let back: HostConfigPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(back, payload);
+        assert!(serde_json::from_str::<HostConfigPayload>("{\"profiles\":{}}").is_err());
     }
 
     #[test]

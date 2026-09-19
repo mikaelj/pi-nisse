@@ -24,13 +24,21 @@ import {
   ProtocolError,
   type HostToRustType,
 } from "./protocol.ts";
-import { createReviewerSession } from "./session.ts";
+import { loadSessionScript, createScriptedAgentFactory } from "./scripted.ts";
+import {
+  createReviewerSession,
+  ReviewerSessionError,
+  type PiSessionDeps,
+  type SessionAgentFactory,
+} from "./session.ts";
 import { ToolBridge } from "./tools.ts";
 import { parseFault, type HostRuntime } from "./types.ts";
 import {
   validateCancel,
+  validateHostConfig,
   validateStartReview,
   ValidationError,
+  type HostConfig,
   type ReviewerExecutionSpec,
 } from "./structured.ts";
 
@@ -95,11 +103,37 @@ const cancelledReviews = new Set<string>();
 const startedReviews = new Set<string>();
 const bridge = new ToolBridge({ nextId, send });
 
+/** Model profiles supplied by the Rust core through `host_config`. */
+const hostModels = new Map<string, { readonly model: string; readonly endpoint?: string }>();
+
+/** Resolve the agent-session factory for the pi runtime (once per host). */
+let agentFactoryPromise: Promise<SessionAgentFactory> | undefined;
+function resolvePiAgentFactory(): Promise<SessionAgentFactory> {
+  agentFactoryPromise ??= (async () => {
+    const scriptPath = process.env["NISSE_PI_SESSION_SCRIPT"];
+    if (scriptPath !== undefined && scriptPath.length > 0) {
+      const script = loadSessionScript(scriptPath);
+      const recordPath = process.env["NISSE_PI_SESSION_RECORD"];
+      return createScriptedAgentFactory(script, recordPath);
+    }
+    return (await import("./pi-agent.ts")).piAgentFactory;
+  })();
+  return agentFactoryPromise;
+}
+
+function piSessionDeps(kind: "plan" | "code"): PiSessionDeps {
+  return { models: hostModels, kind, resolveAgent: resolvePiAgentFactory };
+}
+
 function isCancelled(reviewId: string): boolean {
   return cancelledReviews.has(reviewId);
 }
 
-async function runReviewer(reviewId: string, spec: ReviewerExecutionSpec): Promise<void> {
+async function runReviewer(
+  reviewId: string,
+  spec: ReviewerExecutionSpec,
+  kind: "plan" | "code",
+): Promise<void> {
   if (isCancelled(reviewId)) {
     return;
   }
@@ -108,7 +142,7 @@ async function runReviewer(reviewId: string, spec: ReviewerExecutionSpec): Promi
     reviewer_id: spec.reviewer_id,
   });
   try {
-    const session = createReviewerSession(options.runtime, spec);
+    const session = createReviewerSession(options.runtime, spec, piSessionDeps(kind));
     const report = await session.run({
       reviewId,
       tools: bridge,
@@ -130,7 +164,7 @@ async function runReviewer(reviewId: string, spec: ReviewerExecutionSpec): Promi
       review_id: reviewId,
       reviewer_id: spec.reviewer_id,
       error: {
-        code: "session_error",
+        code: err instanceof ReviewerSessionError ? err.code : "session_error",
         message: err instanceof Error ? err.message : String(err),
       },
     });
@@ -155,7 +189,7 @@ function handleStartReview(payload: unknown): void {
   }
   startedReviews.add(review.review_id);
   for (const spec of review.reviewers) {
-    void runReviewer(review.review_id, spec);
+    void runReviewer(review.review_id, spec, review.kind);
   }
 }
 
@@ -174,8 +208,20 @@ function handleCancel(payload: unknown): void {
   bridge.cancel(undefined);
 }
 
+function handleHostConfig(payload: unknown): void {
+  const config: HostConfig = validateHostConfig(payload);
+  hostModels.clear();
+  for (const [name, profile] of config.models) {
+    hostModels.set(name, profile);
+  }
+  log(`host_config: stored ${hostModels.size} model profile(s)`);
+}
+
 function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
   switch (message.type) {
+    case "host_config":
+      handleHostConfig(message.payload);
+      return;
     case "start_review":
       handleStartReview(message.payload);
       return;

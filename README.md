@@ -45,4 +45,6 @@ conversation, or arbitrary skills. Protocol details:
 [docs/pi-host-protocol.md](docs/pi-host-protocol.md).
 
 Host requirements: Node.js >= 23.6 (runs the TypeScript directly); `npm
-install` inside `runtime/pi-host` is only needed for `npm run typecheck`.
+install` inside `runtime/pi-host` provides the TypeScript toolchain and
+the Pi coding-agent SDK used by real reviewer sessions (the deterministic
+fake and scripted runtimes work without it).

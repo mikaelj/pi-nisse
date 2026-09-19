@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use super::protocol::{
-    self, CancelMessage, CancelPayload, HostEvent, HostReady, HostRuntime, ProtocolError,
-    StartReviewMessage, StartReviewPayload, ToolRequestPayload, ToolResponseMessage,
-    ToolResponsePayload,
+    self, CancelMessage, CancelPayload, HostConfigMessage, HostConfigPayload, HostEvent, HostReady,
+    HostRuntime, ProtocolError, StartReviewMessage, StartReviewPayload, ToolRequestPayload,
+    ToolResponseMessage, ToolResponsePayload,
 };
 use crate::domain::report::ReviewerReport;
 
@@ -173,6 +173,24 @@ pub enum ReviewerOutcome {
     Failed(protocol::HostErrorInfo),
 }
 
+impl ReviewerOutcome {
+    /// The completed report, if this outcome is a completion.
+    pub fn as_report(&self) -> Option<&ReviewerReport> {
+        match self {
+            ReviewerOutcome::Completed(report) => Some(report),
+            ReviewerOutcome::Failed(_) => None,
+        }
+    }
+
+    /// The failure info, if this outcome is a failure.
+    pub fn as_failure(&self) -> Option<&protocol::HostErrorInfo> {
+        match self {
+            ReviewerOutcome::Completed(_) => None,
+            ReviewerOutcome::Failed(info) => Some(info),
+        }
+    }
+}
+
 /// A running Pi review host child process.
 pub struct HostProcess {
     child: Child,
@@ -254,6 +272,14 @@ impl HostProcess {
             });
         }
         Ok(())
+    }
+
+    /// Send `host_config`: the resolved model profiles the host may use for
+    /// reviewer sessions.
+    pub fn send_host_config(&mut self, payload: &HostConfigPayload) -> Result<(), HostError> {
+        let id = crate::domain::ids::new_ulid();
+        let line = HostConfigMessage::new(id, payload.clone()).to_line();
+        self.write_line(&line)
     }
 
     /// Send `start_review`.

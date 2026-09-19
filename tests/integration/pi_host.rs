@@ -349,13 +349,14 @@ fn unsupported_vocabulary_messages_are_refused_deterministically() {
     let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
 
-    // `host_config` is frozen vocabulary but belongs to a later milestone.
-    host.send_raw_line(r#"{"protocol_version":1,"id":"x-2","type":"host_config"}"#)
+    // `start_fact_verification` is frozen vocabulary but belongs to a
+    // later milestone.
+    host.send_raw_line(r#"{"protocol_version":1,"id":"x-2","type":"start_fact_verification"}"#)
         .expect("write failed");
     match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
         HostEvent::HostError(info) => {
             assert_eq!(info.code, "unsupported_message");
-            assert!(info.message.contains("host_config"));
+            assert!(info.message.contains("start_fact_verification"));
         }
         other => panic!("expected host_error, got {other:?}"),
     }

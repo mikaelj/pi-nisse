@@ -251,6 +251,17 @@ export interface StartReview {
   readonly reviewers: ReviewerExecutionSpec[];
 }
 
+/** A model profile entry from the Rust core's `host_config` message. */
+export interface HostModelProfilePayload {
+  readonly model: string;
+  readonly endpoint?: string;
+}
+
+/** The `host_config` payload: resolved model profiles by name. */
+export interface HostConfig {
+  readonly models: ReadonlyMap<string, HostModelProfilePayload>;
+}
+
 export function validateContextEntry(value: unknown): ContextEntry {
   const object = requireObject(value, "context entry");
   const kind = requireEnum(object, "kind", CONTEXT_KINDS);
@@ -444,6 +455,26 @@ export function validateStartReview(value: unknown): StartReview {
     kind: requireEnum(object, "kind", REVIEW_KINDS),
     reviewers: reviewers.map(validateReviewerExecutionSpec),
   };
+}
+
+/** Validate a `host_config` payload (resolved model profiles). */
+export function validateHostConfig(value: unknown): HostConfig {
+  const object = requireObject(value, "host_config payload");
+  const models = object["models"];
+  if (!isPlainObject(models)) {
+    throw new ValidationError("`models` must be a JSON object");
+  }
+  const table = new Map<string, HostModelProfilePayload>();
+  for (const [name, entry] of Object.entries(models)) {
+    if (name.length === 0) {
+      throw new ValidationError("model profile names must be non-empty");
+    }
+    const profile = requireObject(entry, `models.${name}`);
+    const model = requireNonEmptyString(profile, "model");
+    const endpoint = requireOptionalString(profile, "endpoint");
+    table.set(name, endpoint !== undefined ? { model, endpoint } : { model });
+  }
+  return { models: table };
 }
 
 export function validateCancel(value: unknown): { review_id?: string } {
