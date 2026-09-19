@@ -4,6 +4,7 @@
 
 mod cli_binary;
 mod doctor_binary;
+mod git_env;
 
 use std::path::Path;
 use std::process::{Command, Output};
