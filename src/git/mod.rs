@@ -21,7 +21,7 @@ mod repo;
 mod runner;
 mod snapshot;
 #[cfg(test)]
-mod testutil;
+pub(crate) mod testutil;
 
 pub use diff::{DiffEntry, DiffStatus, snapshot_diff};
 pub use error::GitError;

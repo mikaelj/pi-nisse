@@ -78,7 +78,7 @@ LLMs are untrusted semantic workers, not orchestrators.
   records rather than mutating old ones.
 - **Local generated state**: SQLite under `$GIT_COMMON_DIR/nisse/` (shared
   cache) and `$GIT_DIR/nisse/` (worktree state). Fully regenerable; its loss
-  never destroys durable knowledge.
+  never destroys durable knowledge. Details: [storage.md](storage.md).
 - **Trust**: `.nisse/**` is project data and can never configure commands,
   endpoints, credentials, or extensions. Runtime/provider configuration is
   local trusted TOML configuration with frozen precedence: repository-local

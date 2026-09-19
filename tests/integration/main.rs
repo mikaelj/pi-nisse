@@ -2,6 +2,7 @@
 //!
 //! These run the compiled `nisse` binary and verify stdout/stderr behavior.
 
+mod cache_binary;
 mod cli_binary;
 mod doctor_binary;
 mod git_env;

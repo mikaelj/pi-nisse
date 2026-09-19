@@ -19,6 +19,14 @@ pub enum AppError {
     #[error("doctor found problems; see the report on stdout")]
     DoctorFailed,
 
+    /// A cache command was invoked outside a Git repository.
+    #[error("not inside a Git repository; cache commands require a repository")]
+    NotInRepository,
+
+    /// `nisse cache status` found problems; the report is printed to stdout.
+    #[error("cache status found problems; see the report on stdout")]
+    CacheUnhealthy,
+
     /// Unclassified application-boundary failure.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -60,12 +68,8 @@ impl App {
                 )),
             },
             Command::Cache { cache } => match cache {
-                crate::cli::CacheCommand::Status => {
-                    Err(AppError::NotImplemented("nisse cache status".to_string()))
-                }
-                crate::cli::CacheCommand::Clear => {
-                    Err(AppError::NotImplemented("nisse cache clear".to_string()))
-                }
+                crate::cli::CacheCommand::Status => self.run_cache_status(),
+                crate::cli::CacheCommand::Clear => self.run_cache_clear(),
             },
             Command::Eval { eval } => match eval {
                 crate::cli::EvalCommand::Routing => {
@@ -77,6 +81,61 @@ impl App {
             },
             Command::Mcp => Err(AppError::NotImplemented("nisse mcp".to_string())),
         }
+    }
+
+    /// Discover the repository/worktree of the current directory together
+    /// with its storage locations.
+    fn discover_storage(
+        &self,
+    ) -> Result<(crate::git::RepoContext, crate::storage::StoragePaths), AppError> {
+        let cwd = std::env::current_dir()
+            .map_err(|err| anyhow::anyhow!("failed to determine the current directory: {err}"))?;
+        let ctx = crate::git::RepoContext::discover(&crate::git::GitRunner::new(), &cwd).map_err(
+            |err| match err {
+                crate::git::GitError::NotARepository { .. } => AppError::NotInRepository,
+                other => AppError::Other(anyhow::anyhow!("repository discovery failed: {other}")),
+            },
+        )?;
+        let paths = crate::storage::StoragePaths::for_repo(&ctx);
+        Ok((ctx, paths))
+    }
+
+    /// Run `nisse cache status`.
+    ///
+    /// The report is written to stdout. Status never mutates a database;
+    /// corrupt or too-new caches are reported as problems.
+    fn run_cache_status(&self) -> Result<(), AppError> {
+        use crate::storage;
+
+        let (ctx, paths) = self.discover_storage()?;
+        let report = storage::status::status(&ctx.worktree_root, &paths)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("cache status failed: {err}")))?;
+        print_to_stdout(&report.render());
+        if report.has_problems() {
+            return Err(AppError::CacheUnhealthy);
+        }
+        Ok(())
+    }
+
+    /// Run `nisse cache clear`.
+    ///
+    /// Deletes both cache databases (including journal sidecars) and
+    /// recreates them empty at the current schema version.
+    fn run_cache_clear(&self) -> Result<(), AppError> {
+        use crate::storage::schema::DbKind;
+
+        let (_ctx, paths) = self.discover_storage()?;
+        let mut out = String::from("nisse cache clear\n");
+        for (path, kind) in [
+            (&paths.shared, DbKind::Shared),
+            (&paths.worktree, DbKind::Worktree),
+        ] {
+            crate::storage::db::clear(path, kind)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("cache clear failed: {err}")))?;
+            out.push_str(&format!("cleared {}: {}\n", kind.label(), path.display()));
+        }
+        print_to_stdout(&out);
+        Ok(())
     }
 
     /// Run `nisse doctor`.
@@ -98,19 +157,23 @@ impl App {
         let loaded = config::load_config(user_path.as_deref(), repo_path.as_deref());
         let resolver = SystemResolver;
         let report = config::doctor::run_doctor(git, loaded, &resolver);
-
-        {
-            use std::io::Write;
-            let mut stdout = std::io::stdout().lock();
-            let _ = write!(stdout, "{}", report.render());
-            let _ = stdout.flush();
-        }
+        print_to_stdout(&report.render());
 
         if report.has_failures() {
             return Err(AppError::DoctorFailed);
         }
         Ok(())
     }
+}
+
+/// Write a complete report to stdout.
+///
+/// stdout carries machine-readable and report output; logs go to stderr.
+fn print_to_stdout(text: &str) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    let _ = write!(stdout, "{text}");
+    let _ = stdout.flush();
 }
 
 /// Configure tracing output.
@@ -182,12 +245,6 @@ mod tests {
             },
             Command::Records {
                 records: crate::cli::RecordsCommand::Compact,
-            },
-            Command::Cache {
-                cache: crate::cli::CacheCommand::Status,
-            },
-            Command::Cache {
-                cache: crate::cli::CacheCommand::Clear,
             },
             Command::Eval {
                 eval: crate::cli::EvalCommand::Routing,
