@@ -17,22 +17,6 @@ fn version_prints_to_stdout_with_zero_exit() {
 }
 
 #[test]
-fn unimplemented_command_fails_on_stderr_only() {
-    let out = run_nisse(&["doctor"]);
-    assert!(
-        !out.status.success(),
-        "doctor must fail before milestone 02"
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert_eq!(stdout, "", "errors must not leak to stdout");
-    assert!(
-        stderr.contains("not implemented"),
-        "expected typed NotImplemented error on stderr, got: {stderr}"
-    );
-}
-
-#[test]
 fn unimplemented_review_subcommand_fails_on_stderr_only() {
     for args in [
         vec!["review", "plan", "--stdin"],

@@ -16,3 +16,19 @@ primary Pi package.
 Status: implementing the frozen plan in [PLAN.md](PLAN.md).
 
 Architecture summary: [docs/architecture-contract.md](docs/architecture-contract.md).
+
+## Configuration
+
+Nisse uses trusted local TOML configuration. Git-tracked `.nisse/**` files
+are project data and are never configuration sources.
+
+- user config: `<platform config dir>/nisse/config.toml`
+- repository config: `$GIT_COMMON_DIR/nisse/config.toml` (local machine
+  state, never committed)
+
+Precedence (highest first): repository config, user config, compiled
+defaults. Model endpoints are trusted only when they are (or resolve to)
+loopback, RFC1918 private, or IPv6 unique-local addresses, unless
+`network.allow_non_private_endpoints` is set explicitly in trusted local
+configuration. Model profiles `standard` and `strong` are required before
+reviews can run. Run `nisse doctor` to check the local setup.

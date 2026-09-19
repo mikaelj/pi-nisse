@@ -23,3 +23,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = { version = "1", features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+toml = "0.9"
+url = "2"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

@@ -81,8 +81,13 @@ LLMs are untrusted semantic workers, not orchestrators.
   never destroys durable knowledge.
 - **Trust**: `.nisse/**` is project data and can never configure commands,
   endpoints, credentials, or extensions. Runtime/provider configuration is
-  local trusted configuration. Default model endpoints are loopback/private
-  only.
+  local trusted TOML configuration with frozen precedence: repository-local
+  `$GIT_COMMON_DIR/nisse/config.toml`, then the platform-native user
+  config, then compiled defaults. Default model endpoints are loopback/
+  private only; hostnames are resolved before the trust decision, and
+  `network.allow_non_private_endpoints` is the explicit override.
+  `nisse doctor` reports Git availability, configuration validity, model
+  profiles, endpoint trust, and optional classifier status.
 
 ## CLI surface (frozen)
 

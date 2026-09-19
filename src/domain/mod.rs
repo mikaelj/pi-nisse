@@ -6,6 +6,7 @@
 pub mod evidence;
 pub mod finding;
 pub mod ids;
+pub mod model;
 pub mod report;
 pub mod review;
 pub mod snapshot;

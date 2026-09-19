@@ -15,6 +15,10 @@ pub enum AppError {
     #[error("`{0}` is not implemented yet")]
     NotImplemented(String),
 
+    /// `nisse doctor` found problems; the report is printed to stdout.
+    #[error("doctor found problems; see the report on stdout")]
+    DoctorFailed,
+
     /// Unclassified application-boundary failure.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -33,7 +37,7 @@ impl App {
     /// Run a parsed CLI command.
     pub fn run(&self, command: Command) -> Result<(), AppError> {
         match command {
-            Command::Doctor => Err(AppError::NotImplemented("nisse doctor".to_string())),
+            Command::Doctor => self.run_doctor(),
             Command::Review { review } => match review {
                 crate::cli::ReviewCommand::Plan { .. } => {
                     Err(AppError::NotImplemented("nisse review plan".to_string()))
@@ -74,6 +78,39 @@ impl App {
             Command::Mcp => Err(AppError::NotImplemented("nisse mcp".to_string())),
         }
     }
+
+    /// Run `nisse doctor`.
+    ///
+    /// The report is written to stdout; failures additionally produce a
+    /// typed error so the process exits non-zero. Doctor never performs
+    /// LLM requests.
+    fn run_doctor(&self) -> Result<(), AppError> {
+        use crate::config::{self, endpoint::SystemResolver};
+
+        let cwd = std::env::current_dir()
+            .map_err(|err| anyhow::anyhow!("failed to determine the current directory: {err}"))?;
+        let git = config::git_probe::probe_git(&cwd);
+        let user_path = config::paths::user_config_path();
+        let repo_path = git
+            .git_common_dir
+            .as_ref()
+            .map(|common_dir| config::paths::repo_config_path(common_dir));
+        let loaded = config::load_config(user_path.as_deref(), repo_path.as_deref());
+        let resolver = SystemResolver;
+        let report = config::doctor::run_doctor(git, loaded, &resolver);
+
+        {
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            let _ = write!(stdout, "{}", report.render());
+            let _ = stdout.flush();
+        }
+
+        if report.has_failures() {
+            return Err(AppError::DoctorFailed);
+        }
+        Ok(())
+    }
 }
 
 /// Configure tracing output.
@@ -99,18 +136,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn doctor_is_not_implemented() {
-        let app = App::new();
-        let err = app.run(Command::Doctor).unwrap_err();
-        assert!(matches!(err, AppError::NotImplemented(ref cmd) if cmd == "nisse doctor"));
-    }
-
-    #[test]
     fn every_frozen_command_is_typed_not_implemented() {
         let app = App::new();
 
         let cases: Vec<Command> = vec![
-            Command::Doctor,
             Command::Review {
                 review: crate::cli::ReviewCommand::Plan {
                     source: crate::cli::PlanSource {
