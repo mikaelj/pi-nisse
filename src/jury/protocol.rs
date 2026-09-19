@@ -1,0 +1,860 @@
+//! Pi review host protocol schema (plan sections 20 and 21).
+//!
+//! Nisse Core (Rust) and the Pi review host (TypeScript, `runtime/pi-host`)
+//! communicate using bidirectional JSONL over the child process's
+//! stdin/stdout. stdout carries protocol messages only; logs go to stderr.
+//!
+//! Every message is a single JSON object per line with the envelope fields
+//!
+//! ```text
+//! protocol_version  u32    (frozen at 1)
+//! id                string (unique per sender, used for correlation)
+//! type              string (frozen message vocabulary below)
+//! ```
+//!
+//! plus type-specific payload fields flattened into the same object.
+//!
+//! The vocabulary below is the complete frozen set from plan section 21.
+//! Message types belonging to later milestones are declared as constants so
+//! both sides agree on the vocabulary, but this milestone only implements
+//! the core review loop: `host_ready`, `start_review`, `reviewer_started`,
+//! `reviewer_completed`, `reviewer_failed`, `tool_request`,
+//! `tool_response`, `cancel`, and `host_error`. Receiving a
+//! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
+
+use serde::{Deserialize, Serialize};
+
+use crate::domain::context::ContextBundle;
+use crate::domain::report::ReviewerReport;
+use crate::domain::review::ReviewKind;
+use crate::domain::reviewer::{ReviewerCapability, ReviewerExecutionSpec};
+
+/// Protocol version of this build (plan section 21: version 1).
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Frozen message-type names Nisse Core may send to the host.
+pub mod rust_to_host {
+    /// Host configuration (not yet active; reserved by the frozen plan).
+    pub const HOST_CONFIG: &str = "host_config";
+    /// Start a review: execute the given reviewer specs.
+    pub const START_REVIEW: &str = "start_review";
+    /// Start an independent fact verification job (later milestone).
+    pub const START_FACT_VERIFICATION: &str = "start_fact_verification";
+    /// Start an independent fact synthesis job (later milestone).
+    pub const START_FACT_SYNTHESIS: &str = "start_fact_synthesis";
+    /// Start a constrained dynamic-domain description job (later milestone).
+    pub const START_DOMAIN_DESCRIPTION: &str = "start_domain_description";
+    /// Start a narrow finding equivalence check (later milestone).
+    pub const START_FINDING_EQUIVALENCE_CHECK: &str = "start_finding_equivalence_check";
+    /// Answer a `tool_request` from the host.
+    pub const TOOL_RESPONSE: &str = "tool_response";
+    /// Cancel one review or all pending work.
+    pub const CANCEL: &str = "cancel";
+
+    /// The complete frozen Rust-to-host vocabulary, in plan order.
+    pub const ALL: [&str; 8] = [
+        HOST_CONFIG,
+        START_REVIEW,
+        START_FACT_VERIFICATION,
+        START_FACT_SYNTHESIS,
+        START_DOMAIN_DESCRIPTION,
+        START_FINDING_EQUIVALENCE_CHECK,
+        TOOL_RESPONSE,
+        CANCEL,
+    ];
+}
+
+/// Frozen message-type names the host may send to Nisse Core.
+pub mod host_to_rust {
+    /// The host finished startup and can accept jobs.
+    pub const HOST_READY: &str = "host_ready";
+    /// One reviewer session started.
+    pub const REVIEWER_STARTED: &str = "reviewer_started";
+    /// One reviewer session produced a valid structured report.
+    pub const REVIEWER_COMPLETED: &str = "reviewer_completed";
+    /// One reviewer session failed.
+    pub const REVIEWER_FAILED: &str = "reviewer_failed";
+    /// The host needs a read-only lookup served by Rust.
+    pub const TOOL_REQUEST: &str = "tool_request";
+    /// Independent fact verification finished (later milestone).
+    pub const FACT_VERIFICATION_COMPLETED: &str = "fact_verification_completed";
+    /// Independent fact synthesis finished (later milestone).
+    pub const FACT_SYNTHESIS_COMPLETED: &str = "fact_synthesis_completed";
+    /// Constrained dynamic-domain description finished (later milestone).
+    pub const DOMAIN_DESCRIPTION_COMPLETED: &str = "domain_description_completed";
+    /// Narrow finding equivalence check finished (later milestone).
+    pub const FINDING_EQUIVALENCE_COMPLETED: &str = "finding_equivalence_completed";
+    /// The host reports a protocol-level failure.
+    pub const HOST_ERROR: &str = "host_error";
+
+    /// The complete frozen host-to-Rust vocabulary, in plan order.
+    pub const ALL: [&str; 10] = [
+        HOST_READY,
+        REVIEWER_STARTED,
+        REVIEWER_COMPLETED,
+        REVIEWER_FAILED,
+        TOOL_REQUEST,
+        FACT_VERIFICATION_COMPLETED,
+        FACT_SYNTHESIS_COMPLETED,
+        DOMAIN_DESCRIPTION_COMPLETED,
+        FINDING_EQUIVALENCE_COMPLETED,
+        HOST_ERROR,
+    ];
+}
+
+/// Host runtime implementations. `Fake` is the deterministic reviewer
+/// runtime used for protocol tests; real Pi SDK sessions are integrated in
+/// a later milestone (plan section 20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRuntime {
+    /// Deterministic fake reviewer runtime (tests, offline operation).
+    Fake,
+    /// Real Pi SDK reviewer sessions.
+    Pi,
+}
+
+impl HostRuntime {
+    /// The `--runtime` argument value selecting this runtime.
+    pub fn as_arg(self) -> &'static str {
+        match self {
+            HostRuntime::Fake => "fake",
+            HostRuntime::Pi => "pi",
+        }
+    }
+}
+
+/// A structured error reported by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostErrorInfo {
+    /// Stable machine-readable error code (e.g. `malformed_message`).
+    pub code: String,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+/// `host_ready` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostReady {
+    /// Which runtime implementation is active.
+    pub runtime: HostRuntime,
+}
+
+/// `start_review` payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StartReviewPayload {
+    /// Identifier of the review (assigned by Rust).
+    pub review_id: String,
+    /// What kind of review this is.
+    pub kind: ReviewKind,
+    /// One execution spec per juror. Rust owns jury composition; the host
+    /// executes exactly what it is given.
+    pub reviewers: Vec<ReviewerExecutionSpec>,
+}
+
+/// `tool_request` payload. The envelope `id` of this message is the
+/// `request_id` that `tool_response` must reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRequestPayload {
+    /// The review the requesting reviewer belongs to.
+    pub review_id: String,
+    /// The reviewer performing the lookup.
+    pub reviewer_id: String,
+    /// The read-only tool being invoked (plan section 22).
+    pub tool: ReviewerCapability,
+    /// Tool arguments. Their exact schemas are owned by the tool-serving
+    /// milestone; the boundary treats them as opaque JSON.
+    pub arguments: serde_json::Value,
+}
+
+/// `tool_response` payload sent by Rust in answer to a `tool_request`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResponsePayload {
+    /// The envelope `id` of the answered `tool_request`.
+    pub request_id: String,
+    /// Whether the lookup succeeded.
+    pub ok: bool,
+    /// The bounded context bundle on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<ContextBundle>,
+    /// The failure reason on error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<HostErrorInfo>,
+}
+
+impl ToolResponsePayload {
+    /// Build a successful response carrying `bundle`.
+    pub fn success(request_id: impl Into<String>, bundle: ContextBundle) -> Self {
+        ToolResponsePayload {
+            request_id: request_id.into(),
+            ok: true,
+            bundle: Some(bundle),
+            error: None,
+        }
+    }
+
+    /// Build a failed response carrying a code and message.
+    pub fn failure(request_id: impl Into<String>, code: &str, message: &str) -> Self {
+        ToolResponsePayload {
+            request_id: request_id.into(),
+            ok: false,
+            bundle: None,
+            error: Some(HostErrorInfo {
+                code: code.to_string(),
+                message: message.to_string(),
+            }),
+        }
+    }
+}
+
+/// `cancel` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelPayload {
+    /// The review to cancel, or `None` to cancel all pending work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+}
+
+impl CancelPayload {
+    /// Cancel every pending review.
+    pub fn all() -> Self {
+        CancelPayload { review_id: None }
+    }
+
+    /// Cancel one review.
+    pub fn review(review_id: impl Into<String>) -> Self {
+        CancelPayload {
+            review_id: Some(review_id.into()),
+        }
+    }
+}
+
+/// A decoded host-to-Rust message, ready for dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostEvent {
+    /// The host announced readiness.
+    HostReady(HostReady),
+    /// A reviewer session started.
+    ReviewerStarted {
+        /// The review the reviewer belongs to.
+        review_id: String,
+        /// The reviewer that started.
+        reviewer_id: String,
+    },
+    /// A reviewer session produced a structured report.
+    ReviewerCompleted {
+        /// The review the reviewer belongs to.
+        review_id: String,
+        /// The reviewer that completed.
+        reviewer_id: String,
+        /// The strict structured report.
+        report: ReviewerReport,
+    },
+    /// A reviewer session failed.
+    ReviewerFailed {
+        /// The review the reviewer belongs to.
+        review_id: String,
+        /// The reviewer that failed.
+        reviewer_id: String,
+        /// The failure reported by the host.
+        error: HostErrorInfo,
+    },
+    /// The host requested a read-only lookup.
+    ToolRequest {
+        /// Envelope id of the request; `tool_response` must echo it as
+        /// `request_id`.
+        id: String,
+        /// The request payload.
+        payload: ToolRequestPayload,
+    },
+    /// The host reported a protocol-level failure.
+    HostError(HostErrorInfo),
+}
+
+/// Errors produced while decoding host output.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ProtocolError {
+    /// The line was not a valid protocol message object.
+    #[error("malformed protocol line: {reason}")]
+    MalformedLine {
+        /// Why the line is malformed.
+        reason: String,
+    },
+    /// The envelope's protocol version does not match this build.
+    #[error("unsupported protocol version {got}; expected {expected}")]
+    UnsupportedVersion {
+        /// The version the host sent.
+        got: u64,
+        /// The version this build speaks.
+        expected: u32,
+    },
+    /// The message type is not part of the frozen vocabulary.
+    #[error("unknown host message type `{0}`")]
+    UnknownMessageType(String),
+    /// The message type is frozen vocabulary but not implemented by this
+    /// milestone's parser.
+    #[error("host message type `{0}` exists in the protocol vocabulary but is not implemented yet")]
+    UnsupportedMessageType(String),
+    /// The message type is known but the payload failed strict validation.
+    #[error("invalid `{message_type}` payload: {reason}")]
+    InvalidPayload {
+        /// The message whose payload is invalid.
+        message_type: String,
+        /// Why the payload is invalid.
+        reason: String,
+    },
+}
+
+/// A protocol envelope with the common fields extracted and the remaining
+/// payload fields kept as raw JSON.
+#[derive(Debug, Clone)]
+pub struct Envelope {
+    /// Envelope protocol version.
+    pub protocol_version: u32,
+    /// Envelope id.
+    pub id: String,
+    /// Envelope message type.
+    pub message_type: String,
+    /// Remaining payload fields.
+    pub payload: serde_json::Value,
+}
+
+impl Envelope {
+    /// Decode one JSONL line into an envelope, validating the common
+    /// envelope fields against the frozen host-to-Rust vocabulary.
+    pub fn parse_host_line(line: &str) -> Result<Envelope, ProtocolError> {
+        let value: serde_json::Value =
+            serde_json::from_str(line).map_err(|err| ProtocolError::MalformedLine {
+                reason: format!("not valid JSON: {err}"),
+            })?;
+        Self::from_value(value)
+    }
+
+    /// Decode an already-parsed JSON value into an envelope.
+    pub fn from_value(value: serde_json::Value) -> Result<Envelope, ProtocolError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "message is not a JSON object".to_string(),
+            })?;
+
+        let got_version = object
+            .get("protocol_version")
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "missing `protocol_version`".to_string(),
+            })?
+            .as_u64()
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "`protocol_version` is not a non-negative integer".to_string(),
+            })?;
+        if got_version != u64::from(PROTOCOL_VERSION) {
+            return Err(ProtocolError::UnsupportedVersion {
+                got: got_version,
+                expected: PROTOCOL_VERSION,
+            });
+        }
+
+        let id = object
+            .get("id")
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "missing `id`".to_string(),
+            })?
+            .as_str()
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "`id` is not a string".to_string(),
+            })?
+            .to_string();
+        if id.is_empty() {
+            return Err(ProtocolError::MalformedLine {
+                reason: "`id` is empty".to_string(),
+            });
+        }
+
+        let message_type = object
+            .get("type")
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "missing `type`".to_string(),
+            })?
+            .as_str()
+            .ok_or_else(|| ProtocolError::MalformedLine {
+                reason: "`type` is not a string".to_string(),
+            })?
+            .to_string();
+
+        if !host_to_rust::ALL.contains(&message_type.as_str()) {
+            return Err(ProtocolError::UnknownMessageType(message_type.to_string()));
+        }
+
+        let payload = serde_json::Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "protocol_version" | "id" | "type"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+
+        Ok(Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            id,
+            message_type: message_type.to_string(),
+            payload,
+        })
+    }
+}
+
+/// Decode an envelope into a typed [`HostEvent`].
+pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> {
+    let ty = envelope.message_type.clone();
+    let invalid = move |reason: String| ProtocolError::InvalidPayload {
+        message_type: ty.clone(),
+        reason,
+    };
+
+    match envelope.message_type.as_str() {
+        host_to_rust::HOST_READY => {
+            let ready: HostReady =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            Ok(HostEvent::HostReady(ready))
+        }
+        host_to_rust::REVIEWER_STARTED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                review_id: String,
+                reviewer_id: String,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.review_id, "review_id", &invalid)?;
+            require_non_empty(&payload.reviewer_id, "reviewer_id", &invalid)?;
+            Ok(HostEvent::ReviewerStarted {
+                review_id: payload.review_id,
+                reviewer_id: payload.reviewer_id,
+            })
+        }
+        host_to_rust::REVIEWER_COMPLETED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                review_id: String,
+                reviewer_id: String,
+                report: ReviewerReport,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.review_id, "review_id", &invalid)?;
+            require_non_empty(&payload.reviewer_id, "reviewer_id", &invalid)?;
+            if payload.report.reviewer_id != payload.reviewer_id {
+                return Err(invalid(format!(
+                    "report reviewer_id `{}` does not match message reviewer_id `{}`",
+                    payload.report.reviewer_id, payload.reviewer_id
+                )));
+            }
+            Ok(HostEvent::ReviewerCompleted {
+                review_id: payload.review_id,
+                reviewer_id: payload.reviewer_id,
+                report: payload.report,
+            })
+        }
+        host_to_rust::REVIEWER_FAILED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                review_id: String,
+                reviewer_id: String,
+                error: HostErrorInfo,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.review_id, "review_id", &invalid)?;
+            require_non_empty(&payload.reviewer_id, "reviewer_id", &invalid)?;
+            require_valid_error(&payload.error, &invalid)?;
+            Ok(HostEvent::ReviewerFailed {
+                review_id: payload.review_id,
+                reviewer_id: payload.reviewer_id,
+                error: payload.error,
+            })
+        }
+        host_to_rust::TOOL_REQUEST => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                review_id: String,
+                reviewer_id: String,
+                tool: ReviewerCapability,
+                arguments: serde_json::Value,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.review_id, "review_id", &invalid)?;
+            require_non_empty(&payload.reviewer_id, "reviewer_id", &invalid)?;
+            if !payload.arguments.is_object() {
+                return Err(invalid("`arguments` must be a JSON object".to_string()));
+            }
+            Ok(HostEvent::ToolRequest {
+                id: envelope.id,
+                payload: ToolRequestPayload {
+                    review_id: payload.review_id,
+                    reviewer_id: payload.reviewer_id,
+                    tool: payload.tool,
+                    arguments: payload.arguments,
+                },
+            })
+        }
+        host_to_rust::HOST_ERROR => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                error: HostErrorInfo,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_valid_error(&payload.error, &invalid)?;
+            Ok(HostEvent::HostError(payload.error))
+        }
+        other => Err(ProtocolError::UnsupportedMessageType(other.to_string())),
+    }
+}
+
+fn require_non_empty(
+    value: &str,
+    field: &str,
+    invalid: &dyn Fn(String) -> ProtocolError,
+) -> Result<(), ProtocolError> {
+    if value.is_empty() {
+        return Err(invalid(format!("`{field}` must be non-empty")));
+    }
+    Ok(())
+}
+
+fn require_valid_error(
+    error: &HostErrorInfo,
+    invalid: &dyn Fn(String) -> ProtocolError,
+) -> Result<(), ProtocolError> {
+    if error.code.is_empty() || error.message.is_empty() {
+        return Err(invalid(
+            "error `code` and `message` must be non-empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Serialize one complete Rust-to-host message line: envelope fields merged
+/// with the flattened payload fields.
+fn encode_message(message_type: &str, id: &str, payload: &impl Serialize) -> String {
+    let mut object = serde_json::to_value(payload).expect("message payloads serialize");
+    let map = object
+        .as_object_mut()
+        .expect("message payloads serialize to objects");
+    map.insert(
+        "protocol_version".to_string(),
+        serde_json::json!(PROTOCOL_VERSION),
+    );
+    map.insert("id".to_string(), serde_json::json!(id));
+    map.insert("type".to_string(), serde_json::json!(message_type));
+    serde_json::to_string(&object).expect("message lines serialize")
+}
+
+/// A Rust-to-host `start_review` message.
+#[derive(Debug, Clone)]
+pub struct StartReviewMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the review to execute.
+    pub payload: StartReviewPayload,
+}
+
+impl StartReviewMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: StartReviewPayload) -> Self {
+        StartReviewMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(rust_to_host::START_REVIEW, &self.id, &self.payload)
+    }
+}
+
+/// A Rust-to-host `tool_response` message.
+#[derive(Debug, Clone)]
+pub struct ToolResponseMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the answer to one `tool_request`.
+    pub payload: ToolResponsePayload,
+}
+
+impl ToolResponseMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: ToolResponsePayload) -> Self {
+        ToolResponseMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(rust_to_host::TOOL_RESPONSE, &self.id, &self.payload)
+    }
+}
+
+/// A Rust-to-host `cancel` message.
+#[derive(Debug, Clone)]
+pub struct CancelMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: what to cancel.
+    pub payload: CancelPayload,
+}
+
+impl CancelMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: CancelPayload) -> Self {
+        CancelMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(rust_to_host::CANCEL, &self.id, &self.payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_version_is_frozen_at_one() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn vocabularies_match_the_frozen_plan_section_21() {
+        assert_eq!(
+            rust_to_host::ALL,
+            [
+                "host_config",
+                "start_review",
+                "start_fact_verification",
+                "start_fact_synthesis",
+                "start_domain_description",
+                "start_finding_equivalence_check",
+                "tool_response",
+                "cancel",
+            ]
+        );
+        assert_eq!(
+            host_to_rust::ALL,
+            [
+                "host_ready",
+                "reviewer_started",
+                "reviewer_completed",
+                "reviewer_failed",
+                "tool_request",
+                "fact_verification_completed",
+                "fact_synthesis_completed",
+                "domain_description_completed",
+                "finding_equivalence_completed",
+                "host_error",
+            ]
+        );
+    }
+
+    #[test]
+    fn envelope_parses_host_ready() {
+        let line = r#"{"protocol_version":1,"id":"h-1","type":"host_ready","runtime":"fake"}"#;
+        let envelope = Envelope::parse_host_line(line).unwrap();
+        assert_eq!(envelope.protocol_version, 1);
+        assert_eq!(envelope.id, "h-1");
+        assert_eq!(envelope.message_type, "host_ready");
+        let event = parse_host_event(envelope).unwrap();
+        assert_eq!(
+            event,
+            HostEvent::HostReady(HostReady {
+                runtime: HostRuntime::Fake
+            })
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_malformed_lines() {
+        for line in ["", "not json", "[]", "42", "\"text\"", "{\"id\":\"x\"}"] {
+            let err = Envelope::parse_host_line(line).unwrap_err();
+            assert!(
+                matches!(err, ProtocolError::MalformedLine { .. }),
+                "expected MalformedLine for {line:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_rejects_wrong_versions_and_bad_common_fields() {
+        let err = Envelope::parse_host_line(
+            r#"{"protocol_version":2,"id":"h-1","type":"host_ready","runtime":"fake"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ProtocolError::UnsupportedVersion {
+                got: 2,
+                expected: 1
+            }
+        );
+
+        let err = Envelope::parse_host_line(
+            r#"{"protocol_version":1,"type":"host_ready","runtime":"fake"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProtocolError::MalformedLine { .. }));
+
+        let err = Envelope::parse_host_line(
+            r#"{"protocol_version":1,"id":"","type":"host_ready","runtime":"fake"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProtocolError::MalformedLine { .. }));
+
+        let err = Envelope::parse_host_line(
+            r#"{"protocol_version":"1","id":"h-1","type":"host_ready","runtime":"fake"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProtocolError::MalformedLine { .. }));
+    }
+
+    #[test]
+    fn unknown_and_unsupported_types_are_typed_errors() {
+        let err = Envelope::parse_host_line(
+            r#"{"protocol_version":1,"id":"h-1","type":"banana","runtime":"fake"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err, ProtocolError::UnknownMessageType("banana".to_string()));
+
+        let envelope = Envelope::parse_host_line(
+            r#"{"protocol_version":1,"id":"h-1","type":"fact_verification_completed"}"#,
+        )
+        .unwrap();
+        let err = parse_host_event(envelope).unwrap_err();
+        assert_eq!(
+            err,
+            ProtocolError::UnsupportedMessageType("fact_verification_completed".to_string())
+        );
+    }
+
+    #[test]
+    fn reviewer_completed_requires_matching_report_identity() {
+        let report = serde_json::json!({
+            "reviewer_id": "quality",
+            "summary": "ok",
+            "findings": [],
+            "candidate_project_facts": [],
+            "model_metadata": {},
+            "duration_ms": 10
+        });
+        let line = format!(
+            r#"{{"protocol_version":1,"id":"h-1","type":"reviewer_completed","review_id":"r","reviewer_id":"quality","report":{report}}}"#
+        );
+        let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
+        match event {
+            HostEvent::ReviewerCompleted {
+                review_id,
+                reviewer_id,
+                report,
+            } => {
+                assert_eq!(review_id, "r");
+                assert_eq!(reviewer_id, "quality");
+                assert_eq!(report.reviewer_id, "quality");
+            }
+            other => panic!("expected ReviewerCompleted, got {other:?}"),
+        }
+
+        // Report identity must match the message identity.
+        let mismatched = line.replace(
+            "\"reviewer_id\":\"quality\",\"report",
+            "\"reviewer_id\":\"security\",\"report",
+        );
+        let envelope = Envelope::parse_host_line(&mismatched).unwrap();
+        let err = parse_host_event(envelope).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    }
+
+    #[test]
+    fn tool_request_parses_and_rejects_unknown_tools() {
+        let line = r#"{"protocol_version":1,"id":"t-1","type":"tool_request","review_id":"r","reviewer_id":"quality","tool":"source_lookup","arguments":{"path":"src/main.rs"}}"#;
+        let event = parse_host_event(Envelope::parse_host_line(line).unwrap()).unwrap();
+        match event {
+            HostEvent::ToolRequest { id, payload } => {
+                assert_eq!(id, "t-1");
+                assert_eq!(payload.review_id, "r");
+                assert_eq!(payload.reviewer_id, "quality");
+                assert_eq!(payload.tool, ReviewerCapability::SourceLookup);
+                assert!(payload.arguments.is_object());
+            }
+            other => panic!("expected ToolRequest, got {other:?}"),
+        }
+
+        let bad = r#"{"protocol_version":1,"id":"t-1","type":"tool_request","review_id":"r","reviewer_id":"quality","tool":"shell","arguments":{}}"#;
+        let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    }
+
+    #[test]
+    fn empty_identifiers_and_errors_are_rejected() {
+        let bad = r#"{"protocol_version":1,"id":"h-1","type":"reviewer_started","review_id":"","reviewer_id":"quality"}"#;
+        let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+
+        let bad = r#"{"protocol_version":1,"id":"h-1","type":"host_error","error":{"code":"","message":""}}"#;
+        let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    }
+
+    #[test]
+    fn outbound_messages_carry_envelope_and_payload() {
+        let payload = StartReviewPayload {
+            review_id: "01J8Z".to_string(),
+            kind: ReviewKind::Plan,
+            reviewers: Vec::new(),
+        };
+        let line = StartReviewMessage::new("m-1".to_string(), payload).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["type"], "start_review");
+        assert_eq!(value["id"], "m-1");
+        assert_eq!(value["review_id"], "01J8Z");
+        assert_eq!(value["kind"], "plan");
+        assert!(value["reviewers"].is_array());
+        assert!(!line.contains('\n'), "messages must be single lines");
+
+        let line = CancelMessage::new("m-2".to_string(), CancelPayload::all()).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "cancel");
+        assert!(
+            value.get("review_id").is_none(),
+            "cancel-all must omit review_id"
+        );
+
+        let line = CancelMessage::new(
+            "m-3".to_string(),
+            CancelPayload::review("01J8Z".to_string()),
+        )
+        .to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["review_id"], "01J8Z");
+    }
+
+    #[test]
+    fn tool_response_payload_is_wellformed_by_construction() {
+        let bundle = ContextBundle::empty();
+        let ok = ToolResponsePayload::success("t-1", bundle);
+        let json = serde_json::to_string(&ok).unwrap();
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"bundle\""));
+        assert!(!json.contains("\"error\""));
+        let back: ToolResponsePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ok);
+
+        let err = ToolResponsePayload::failure("t-2", "denied", "not granted");
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"ok\":false"));
+        assert!(json.contains("\"code\":\"denied\""));
+        assert!(!json.contains("\"bundle\""));
+    }
+}

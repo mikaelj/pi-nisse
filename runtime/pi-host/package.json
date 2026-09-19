@@ -1,0 +1,18 @@
+{
+  "name": "@nisse/pi-host",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Nisse Pi review host: isolated reviewer sessions driven by the Rust core over a strict JSONL protocol on stdin/stdout.",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

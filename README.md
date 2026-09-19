@@ -32,3 +32,17 @@ loopback, RFC1918 private, or IPv6 unique-local addresses, unless
 `network.allow_non_private_endpoints` is set explicitly in trusted local
 configuration. Model profiles `standard` and `strong` are required before
 reviews can run. Run `nisse doctor` to check the local setup.
+
+## Pi review host
+
+Reviewer sessions run in a TypeScript child process (`runtime/pi-host`),
+not inside the Rust core. The core spawns the host, drives it with the
+frozen JSONL protocol on stdin/stdout, and disposes it after the semantic
+work completes — it is not a daemon. Reviewer sessions receive explicit
+instructions, checklists, model profiles, thinking levels, context, and
+read-only tools; they never inherit the Rust process, Main Pi's
+conversation, or arbitrary skills. Protocol details:
+[docs/pi-host-protocol.md](docs/pi-host-protocol.md).
+
+Host requirements: Node.js >= 23.6 (runs the TypeScript directly); `npm
+install` inside `runtime/pi-host` is only needed for `npm run typecheck`.

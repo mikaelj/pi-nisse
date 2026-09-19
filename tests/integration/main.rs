@@ -6,6 +6,7 @@ mod cache_binary;
 mod cli_binary;
 mod doctor_binary;
 mod git_env;
+mod pi_host;
 mod query_binary;
 mod records_binary;
 
