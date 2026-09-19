@@ -4,6 +4,9 @@ This document describes Nisse's regenerable local SQLite storage. The
 authoritative specification is [PLAN.md](../PLAN.md) (sections 24 and 29);
 where the two disagree, PLAN.md wins.
 
+Durable project records (`.nisse/**`) are **not** SQLite and are not
+described here; see [record-format.md](record-format.md).
+
 ## Purpose and guarantees
 
 All SQLite state is a **disposable local cache**. It holds the source

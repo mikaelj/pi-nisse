@@ -75,7 +75,8 @@ LLMs are untrusted semantic workers, not orchestrators.
 - **Durable shared knowledge**: Git-tracked `.nisse/**` immutable JSON records
   (observations, facts, lessons) with ULID IDs, UTC RFC3339 timestamps, and
   schema version 1. Records preserve provenance; new knowledge creates new
-  records rather than mutating old ones.
+  records rather than mutating old ones. Details:
+  [record-format.md](record-format.md).
 - **Local generated state**: SQLite under `$GIT_COMMON_DIR/nisse/` (shared
   cache) and `$GIT_DIR/nisse/` (worktree state). Fully regenerable; its loss
   never destroys durable knowledge. Details: [storage.md](storage.md).

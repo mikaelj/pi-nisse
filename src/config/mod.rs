@@ -44,9 +44,18 @@
 //! enabled = true
 //! ```
 
+/// Check a contributor ID against the frozen slug pattern.
+///
+/// The canonical implementation lives with the record schemas
+/// ([`crate::domain::records::is_valid_contributor_id`]); it is
+/// re-exported here because contributor identity lives in user
+/// configuration.
+pub use crate::domain::records::is_valid_contributor_id;
+
 pub mod doctor;
 pub mod endpoint;
 pub mod git_probe;
+pub mod identity;
 pub mod paths;
 
 use std::collections::BTreeMap;
@@ -160,21 +169,6 @@ pub struct LearningConfig {
 pub struct ContributorIdentity {
     /// Contributor ID matching `[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}`.
     pub id: String,
-}
-
-/// Check a contributor ID against the frozen slug pattern.
-pub fn is_valid_contributor_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    match bytes.first() {
-        Some(first) if first.is_ascii_alphanumeric() => {}
-        _ => return false,
-    }
-    if bytes.len() > 64 {
-        return false;
-    }
-    bytes[1..]
-        .iter()
-        .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Names from [`REQUIRED_PROFILE_NAMES`] missing from `config`.

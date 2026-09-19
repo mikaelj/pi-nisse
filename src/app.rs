@@ -19,8 +19,9 @@ pub enum AppError {
     #[error("doctor found problems; see the report on stdout")]
     DoctorFailed,
 
-    /// A cache command was invoked outside a Git repository.
-    #[error("not inside a Git repository; cache commands require a repository")]
+    /// A command requiring repository context was invoked outside a
+    /// Git repository.
+    #[error("not inside a Git repository; this command requires a repository")]
     NotInRepository,
 
     /// `nisse cache status` found problems; the report is printed to stdout.
@@ -57,9 +58,7 @@ impl App {
             Command::Query { .. } => Err(AppError::NotImplemented("nisse query".to_string())),
             Command::Feedback { .. } => Err(AppError::NotImplemented("nisse feedback".to_string())),
             Command::Records { records } => match records {
-                crate::cli::RecordsCommand::List => {
-                    Err(AppError::NotImplemented("nisse records list".to_string()))
-                }
+                crate::cli::RecordsCommand::List => self.run_records_list(),
                 crate::cli::RecordsCommand::Pending => Err(AppError::NotImplemented(
                     "nisse records pending".to_string(),
                 )),
@@ -98,6 +97,23 @@ impl App {
         )?;
         let paths = crate::storage::StoragePaths::for_repo(&ctx);
         Ok((ctx, paths))
+    }
+
+    /// Run `nisse records list`.
+    ///
+    /// Lists the durable records of the current worktree. Loading is
+    /// strict: an invalid `.nisse` tree fails loudly with the offending
+    /// path instead of silently skipping records.
+    fn run_records_list(&self) -> Result<(), AppError> {
+        use crate::storage::records::{RecordStore, render_listing};
+
+        let (ctx, _paths) = self.discover_storage()?;
+        let store = RecordStore::new(&ctx.worktree_root);
+        let records = store
+            .load()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("records list failed: {err}")))?;
+        print_to_stdout(&render_listing(&store.nisse_dir(), &records));
+        Ok(())
     }
 
     /// Run `nisse cache status`.
@@ -236,9 +252,6 @@ mod tests {
                     accepted: false,
                     dismissed: false,
                 },
-            },
-            Command::Records {
-                records: crate::cli::RecordsCommand::List,
             },
             Command::Records {
                 records: crate::cli::RecordsCommand::Pending,

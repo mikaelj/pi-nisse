@@ -1,28 +1,39 @@
-//! Regenerable local SQLite storage (plan section 29).
+//! Storage of Nisse state.
 //!
-//! Two databases hold all generated local state:
+//! Two fundamentally different kinds of state live here:
 //!
-//! - **shared**: `$GIT_COMMON_DIR/nisse/cache.sqlite` — content-addressed
-//!   artifacts, symbols, references, chunks, embeddings, review history,
-//!   and pending learning, reusable across worktrees and branches;
-//! - **worktree**: `$GIT_DIR/nisse/worktree.sqlite` — the per-worktree
-//!   manifest, path/content keys, record index, and refresh statistics.
+//! 1. **Durable project records** ([`records`], plan sections 39–48):
+//!    immutable, Git-tracked JSON files under the worktree's `.nisse/`
+//!    tree. They are authoritative shared knowledge, preserve
+//!    provenance, and survive any cache loss. Observations, facts, and
+//!    lessons never depend on SQLite.
+//! 2. **Regenerable local caches** ([`db`], [`schema`], [`status`]; plan
+//!    section 29): SQLite under `$GIT_COMMON_DIR/nisse/` and
+//!    `$GIT_DIR/nisse/`. Everything in them can be rebuilt from Git and
+//!    the durable records; their loss never destroys durable knowledge
+//!    (permanent invariant 4).
 //!
-//! SQLite state is a disposable cache. Durable project knowledge lives in
-//! Git-tracked `.nisse/**` records and survives cache loss (permanent
-//! invariant 4). Databases are created on demand — no init command exists —
-//! and are rebuilt automatically when corrupt (see [`db::open_or_recover`]).
+//! [`fsutil`] provides the atomic filesystem primitives used for
+//! durable writes.
 //!
-//! Schema evolution is forward-only via [`schema`] migrations recorded in
-//! each database's `user_version`. A database written by a newer Nisse is
-//! never opened or destroyed by an older one.
+//! Schema evolution of the SQLite caches is forward-only via [`schema`]
+//! migrations recorded in each database's `user_version`. A database
+//! written by a newer Nisse is never opened or destroyed by an older
+//! one. See [storage.md](../../docs/storage.md) and
+//! [record-format.md](../../docs/record-format.md) for details.
 
 pub mod db;
+pub mod fsutil;
 pub mod paths;
+pub mod records;
 pub mod schema;
 pub mod status;
 
 pub use db::{OpenedCache, ProbeData, ProbeOutcome, StorageError, clear, open_or_recover, probe};
 pub use paths::StoragePaths;
+pub use records::{
+    RecordLocation, RecordStore, RecordStoreError, StoredRecord, active_records, render_listing,
+    superseded_ids,
+};
 pub use schema::{DbKind, Migration, supported_version};
 pub use status::{CacheDbStatus, CacheStatus};

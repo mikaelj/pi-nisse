@@ -22,7 +22,8 @@ fn unimplemented_review_subcommand_fails_on_stderr_only() {
         vec!["review", "plan", "--stdin"],
         vec!["review", "code", "--working"],
         vec!["query", "queues"],
-        vec!["records", "list"],
+        vec!["records", "pending"],
+        vec!["records", "compact"],
         vec!["eval", "routing"],
         vec!["mcp"],
     ] {
