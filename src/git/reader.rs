@@ -28,7 +28,21 @@ pub struct SnapshotFile {
     pub bytes: Vec<u8>,
     /// Blob object ID when the content comes from the Git object database
     /// (index or tree targets). `None` for working-tree content; the
-    /// content-index milestone introduces content keys for that side.
+    /// content index derives `sha256:` content keys for that side.
+    pub blob_oid: Option<String>,
+}
+
+/// One listed file of a snapshot's target side, with its Git blob object
+/// ID when the side defines one.
+///
+/// Index and commit targets know their blob object IDs from Git listings;
+/// working-tree content has none (its content key is computed by hashing
+/// the actual bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotListing {
+    /// Repository-relative path.
+    pub path: String,
+    /// Blob object ID when this side is defined by Git objects.
     pub blob_oid: Option<String>,
 }
 
@@ -98,6 +112,43 @@ impl<'a> SnapshotReader<'a> {
             }
             SnapshotTarget::Index => Ok(self.index.keys().cloned().collect()),
             SnapshotTarget::Commit { .. } => Ok(self.tree.keys().cloned().collect()),
+        }
+    }
+
+    /// List all paths of the target side together with their Git blob
+    /// object IDs, sorted and deduplicated.
+    ///
+    /// Membership semantics match [`SnapshotReader::list_files`]. Index and
+    /// commit targets carry the blob object ID of every file (submodule
+    /// gitlinks have no readable blob and are excluded); working-tree files
+    /// carry `None` because their authoritative content is the file bytes.
+    pub fn list_files_with_oids(&self) -> Result<Vec<SnapshotListing>, GitError> {
+        match self.target {
+            SnapshotTarget::Working => Ok(self
+                .list_files()?
+                .into_iter()
+                .map(|path| SnapshotListing {
+                    path,
+                    blob_oid: None,
+                })
+                .collect()),
+            SnapshotTarget::Index => Ok(self
+                .index
+                .values()
+                .map(|entry| SnapshotListing {
+                    path: entry.path.clone(),
+                    blob_oid: Some(entry.oid.clone()),
+                })
+                .collect()),
+            SnapshotTarget::Commit { .. } => Ok(self
+                .tree
+                .values()
+                .filter(|entry| entry.kind == ObjectKind::Blob)
+                .map(|entry| SnapshotListing {
+                    path: entry.path.clone(),
+                    blob_oid: Some(entry.oid.clone()),
+                })
+                .collect()),
         }
     }
 
@@ -364,6 +415,54 @@ mod tests {
         // Directories themselves are not files.
         assert_eq!(reader.read("deep").unwrap(), None);
         assert_eq!(reader.read("deep/nested").unwrap(), None);
+    }
+
+    #[test]
+    fn list_files_with_oids_reports_git_oids_for_object_sides_only() {
+        let fixture = Fixture::repo("reader-list-oids");
+        write_file(&fixture.root, "a.txt", "committed\n");
+        write_file(&fixture.root, "deep/b.txt", "b\n");
+        let first = commit_all(&fixture.root, "one");
+        // Stage different content for the index target.
+        write_file(&fixture.root, "a.txt", "staged\n");
+        git_in(&fixture.root, &["add", "a.txt"]);
+        // Working-only content stays outside both object sides.
+        write_file(&fixture.root, "fresh.txt", "untracked\n");
+
+        let ctx = ctx_of(&fixture);
+
+        // Working target: paths present, no object IDs.
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        let listing = reader.list_files_with_oids().unwrap();
+        let paths: Vec<&str> = listing.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "deep/b.txt", "fresh.txt"]);
+        assert!(listing.iter().all(|l| l.blob_oid.is_none()));
+
+        // Index target: staged object IDs.
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Staged).unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        let listing = reader.list_files_with_oids().unwrap();
+        let a = listing.iter().find(|l| l.path == "a.txt").unwrap();
+        assert!(a.blob_oid.is_some());
+        let listed = stdout_trimmed(git_in(&fixture.root, &["ls-files", "--stage", "a.txt"]));
+        assert!(listed.contains(a.blob_oid.as_deref().unwrap()));
+        assert!(!listing.iter().any(|l| l.path == "fresh.txt"));
+
+        // Commit target: historical object IDs, excluding gitlinks.
+        let resolved = resolve_snapshot(
+            &ctx,
+            &SnapshotSpec::Commit {
+                revision: first.clone(),
+            },
+        )
+        .unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        let listing = reader.list_files_with_oids().unwrap();
+        assert_eq!(listing.len(), 2);
+        for entry in &listing {
+            assert!(entry.blob_oid.is_some());
+        }
     }
 
     #[test]

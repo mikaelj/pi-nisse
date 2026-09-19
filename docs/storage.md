@@ -95,3 +95,34 @@ All subsystems open caches through one code path:
 Concurrent short-lived Nisse processes coordinate through the SQLite busy
 timeout; the shared cache is the only database two worktrees open
 together.
+
+## Source index refresh
+
+The source index (plan sections 27–28) is refreshed lazily by normal
+operations; no init or refresh command exists. One refresh enumerates
+exactly one review snapshot through the snapshot reader — Git decides
+membership, so cache presence never proves snapshot membership.
+
+Content keys are a pure function of content, never of paths:
+
+| Key                | Content                                                       |
+| ------------------ | ------------------------------------------------------------- |
+| `git:<blob-oid>`   | Content that exists as a Git blob (index and commit-tree sides, and clean working-tree files whose bytes hash to their index blob OID) |
+| `sha256:<hex>`     | Dirty or untracked working-tree content                        |
+
+Parsed artifacts are cached in the **shared** cache keyed by
+`(content_key, language, parser_version)` — identical bytes always
+produce the same artifact, which is what lets artifacts be reused across
+branches and worktrees. Derived `symbol`, `reference`, and `text_chunk`
+skeleton rows are written when an artifact is first parsed.
+
+The **worktree** `manifest` maps the paths of the last refresh; a refresh
+reuses artifacts whose keys are already cached (manifest hit or shared
+cache hit), parses only uncached content, and prunes manifest rows for
+paths absent from the target snapshot. `refresh_state` records the
+statistics of the last refresh (`files_seen`, `files_reused`,
+`files_parsed`, `files_removed`, duration).
+
+Indexed languages (tree-sitter): C, C++, C#, Dart, Rust, JavaScript,
+TypeScript. Files without a recognized extension, or whose content is not
+valid UTF-8, are not indexed.

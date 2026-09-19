@@ -10,6 +10,30 @@ use std::path::{Path, PathBuf};
 use super::error::GitError;
 use super::runner::{GitOutput, GitRunner};
 
+/// Object-hash format of a repository, decided by `git rev-parse
+/// --show-object-format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFormat {
+    /// SHA-1 object IDs (40 hex characters). Git's default.
+    Sha1,
+    /// SHA-256 object IDs (64 hex characters).
+    Sha256,
+}
+
+impl ObjectFormat {
+    /// Parse the `--show-object-format` output.
+    fn parse(text: &str) -> Result<Self, GitError> {
+        match text.trim() {
+            "sha1" => Ok(ObjectFormat::Sha1),
+            "sha256" => Ok(ObjectFormat::Sha256),
+            other => Err(GitError::UnexpectedOutput {
+                command: "rev-parse --show-object-format".to_string(),
+                message: format!("unknown object format `{other}`"),
+            }),
+        }
+    }
+}
+
 /// Kind of object listed by `git ls-tree`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
@@ -208,6 +232,15 @@ impl RepoContext {
     pub fn empty_tree_oid(&self) -> Result<String, GitError> {
         let output = self.run(&["mktree"])?;
         Ok(output.stdout_trimmed().to_owned())
+    }
+
+    /// Object-hash format of this repository.
+    ///
+    /// Decided by the installed Git; content keys for working-tree files
+    /// are derived from it so they agree with Git's own blob object IDs.
+    pub fn object_format(&self) -> Result<ObjectFormat, GitError> {
+        let output = self.run(&["rev-parse", "--show-object-format"])?;
+        ObjectFormat::parse(&output.stdout)
     }
 
     /// Paths tracked in the index, relative to the worktree root and sorted
@@ -618,6 +651,23 @@ mod tests {
         // obtains it from Git, so SHA-256 repositories keep working.
         assert_eq!(empty, "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
         assert!(ctx.list_tree(&empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn object_format_matches_the_installed_git() {
+        let fixture = Fixture::repo("objformat");
+        write_file(&fixture.root, "a.txt", "a\n");
+        commit_all(&fixture.root, "one");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        let format = ctx.object_format().unwrap();
+        // The runner builds SHA-1 fixtures; whatever Git reports must match
+        // the OID length Git itself prints for HEAD.
+        let head = ctx.head.unwrap();
+        match format {
+            ObjectFormat::Sha1 => assert_eq!(head.len(), 40),
+            ObjectFormat::Sha256 => assert_eq!(head.len(), 64),
+        }
     }
 
     #[test]

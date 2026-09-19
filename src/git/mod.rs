@@ -25,8 +25,8 @@ pub(crate) mod testutil;
 
 pub use diff::{DiffEntry, DiffStatus, snapshot_diff};
 pub use error::GitError;
-pub use reader::{SnapshotFile, SnapshotReader};
-pub use repo::{IndexEntry, ObjectKind, RepoContext, TreeEntry};
+pub use reader::{SnapshotFile, SnapshotListing, SnapshotReader};
+pub use repo::{IndexEntry, ObjectFormat, ObjectKind, RepoContext, TreeEntry};
 pub use runner::{DEFAULT_TIMEOUT, GitOutput, GitRunner};
 pub use snapshot::{
     ResolvedSnapshot, SnapshotBase, SnapshotSpec, SnapshotTarget, resolve_snapshot,
