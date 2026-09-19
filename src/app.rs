@@ -55,7 +55,7 @@ impl App {
                     Err(AppError::NotImplemented("nisse review code".to_string()))
                 }
             },
-            Command::Query { .. } => Err(AppError::NotImplemented("nisse query".to_string())),
+            Command::Query { query, json } => self.run_query(query, json),
             Command::Feedback { .. } => Err(AppError::NotImplemented("nisse feedback".to_string())),
             Command::Records { records } => match records {
                 crate::cli::RecordsCommand::List => self.run_records_list(),
@@ -97,6 +97,58 @@ impl App {
         )?;
         let paths = crate::storage::StoragePaths::for_repo(&ctx);
         Ok((ctx, paths))
+    }
+
+    /// Run `nisse query`.
+    ///
+    /// Queries the durable project knowledge and the source index of
+    /// the current working-tree snapshot. The index is refreshed
+    /// lazily on demand (plan section 28); retrieval is deterministic
+    /// and never requires embeddings or an LLM.
+    fn run_query(&self, query: String, json: bool) -> Result<(), AppError> {
+        use crate::git::{SnapshotSpec, resolve_snapshot};
+        use crate::index::refresh_index;
+        use crate::jury::catalog::Catalog;
+        use crate::retrieval::{RetrievalQuery, Retriever, render_json, render_text};
+        use crate::storage::records::RecordStore;
+
+        let (ctx, paths) = self.discover_storage()?;
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).map_err(|err| {
+            AppError::Other(anyhow::anyhow!(
+                "failed to resolve the working-tree snapshot: {err}"
+            ))
+        })?;
+        refresh_index(&ctx, &resolved, &paths)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+
+        let records = RecordStore::new(&ctx.worktree_root)
+            .load()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+        let catalog = Catalog::bundled()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+
+        let retriever = Retriever::open(&resolved, &paths)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+        retriever
+            .sync_records(&records)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+        retriever
+            .sync_practices(&catalog)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+
+        let retrieval_query = RetrievalQuery::from_text(query.clone());
+        let bundle = retriever
+            .lookup(&retrieval_query)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+
+        let rendered = if json {
+            render_json(&query, &resolved.descriptor, &bundle)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?
+        } else {
+            render_text(&query, &resolved.descriptor, &bundle)
+        };
+        print_to_stdout(&rendered);
+        Ok(())
     }
 
     /// Run `nisse records list`.
@@ -239,10 +291,6 @@ mod tests {
                     },
                     json: false,
                 },
-            },
-            Command::Query {
-                query: "queues".into(),
-                json: false,
             },
             Command::Feedback {
                 review_id: "01J8Z".into(),

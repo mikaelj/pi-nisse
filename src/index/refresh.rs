@@ -272,7 +272,7 @@ pub fn refresh_index(
     persist_worktree(&worktree.conn, &paths.worktree, &current, &removed)?;
 
     stats.duration = started.elapsed();
-    persist_refresh_state(&worktree.conn, &paths.worktree, stats)?;
+    persist_refresh_state(&worktree.conn, &paths.worktree, stats, &resolved.descriptor)?;
     Ok(stats)
 }
 
@@ -441,6 +441,11 @@ fn persist_shared(
                 rusqlite::params![artifact.content_key, entry.path, artifact.skeleton],
             )
             .map_err(query_error(db_path))?;
+            tx.execute(
+                "INSERT INTO text_chunk_fts (text, content_key, path) VALUES (?1, ?2, ?3)",
+                rusqlite::params![artifact.skeleton, artifact.content_key, entry.path],
+            )
+            .map_err(query_error(db_path))?;
         }
     }
     tx.commit().map_err(query_error(db_path))?;
@@ -496,11 +501,17 @@ fn persist_worktree(
     Ok(())
 }
 
-/// Record the last refresh statistics.
+/// Record the last refresh statistics and the snapshot binding of the
+/// refreshed membership tables.
+///
+/// The binding lets later retrieval refuse to answer with membership
+/// data of a different snapshot (plan section 26): cache presence never
+/// proves snapshot membership.
 fn persist_refresh_state(
     conn: &Connection,
     db_path: &Path,
     stats: RefreshStats,
+    descriptor: &crate::domain::snapshot::SnapshotDescriptor,
 ) -> Result<(), IndexError> {
     conn.execute(
         "INSERT INTO refresh_state \
@@ -521,6 +532,13 @@ fn persist_refresh_state(
         ],
     )
     .map_err(query_error(db_path))?;
+    let binding = serde_json::to_string(descriptor).expect("snapshot descriptors serialize");
+    crate::storage::meta::meta_set(
+        conn,
+        db_path,
+        crate::storage::meta::META_LAST_REFRESH_SNAPSHOT,
+        &binding,
+    )?;
     Ok(())
 }
 

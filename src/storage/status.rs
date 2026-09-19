@@ -256,7 +256,7 @@ mod tests {
         else {
             panic!("expected ready shared cache");
         };
-        assert_eq!(*version, 1);
+        assert_eq!(*version, 2);
         let content = tables
             .iter()
             .find(|(name, _)| *name == "content_artifact")
@@ -265,7 +265,7 @@ mod tests {
 
         let text = report.render();
         assert!(text.contains("status: ok"));
-        assert!(text.contains("schema version: 1"));
+        assert!(text.contains("schema version: 2"));
         assert!(text.contains("integrity: ok"));
         assert!(text.contains("content_artifact: 1 rows"));
         assert!(text.contains("manifest: 0 rows"));

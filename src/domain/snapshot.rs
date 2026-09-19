@@ -40,6 +40,20 @@ pub struct SnapshotDescriptor {
     pub head_tree: Option<String>,
 }
 
+impl SnapshotDescriptor {
+    /// Short human-readable label of the mode that selected this
+    /// snapshot.
+    pub fn mode_label(&self) -> &'static str {
+        match self.mode {
+            SnapshotMode::Working => "working",
+            SnapshotMode::Staged => "staged",
+            SnapshotMode::Commit => "commit",
+            SnapshotMode::Range => "range",
+            SnapshotMode::Branch => "branch",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

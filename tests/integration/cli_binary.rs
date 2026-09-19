@@ -21,7 +21,6 @@ fn unimplemented_review_subcommand_fails_on_stderr_only() {
     for args in [
         vec!["review", "plan", "--stdin"],
         vec!["review", "code", "--working"],
-        vec!["query", "queues"],
         vec!["records", "pending"],
         vec!["records", "compact"],
         vec!["eval", "routing"],

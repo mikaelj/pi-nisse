@@ -404,6 +404,10 @@ mod tests {
         (dir, path)
     }
 
+    /// FTS5 virtual tables of the current schemas; each creates shadow
+    /// tables named `<fts>_<suffix>` that are implementation detail.
+    const FTS_TABLES: &[&str] = &["text_chunk_fts", "record_fts", "practice_fts"];
+
     fn table_names(conn: &Connection) -> Vec<String> {
         let mut stmt = conn
             .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
@@ -413,25 +417,46 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        // The one internal table SQLite creates for statement journals.
         names
             .into_iter()
-            .filter(|name| !name.starts_with("sqlite_"))
+            .filter(|name| {
+                !name.starts_with("sqlite_")
+                    && !FTS_TABLES
+                        .iter()
+                        .any(|fts| name.starts_with(&format!("{fts}_")))
+            })
             .collect()
     }
 
+    /// Expected physical tables of a database kind: the required plan
+    /// tables plus the full-text/meta tables of the current schema.
+    fn expected_tables(kind: DbKind) -> Vec<&'static str> {
+        let mut expected: Vec<&str> = kind.tables().to_vec();
+        match kind {
+            DbKind::Shared => expected.push("text_chunk_fts"),
+            DbKind::Worktree => {
+                expected.push("record_fts");
+                expected.push("practice_fts");
+                expected.push("meta");
+            }
+        }
+        expected.sort_unstable();
+        expected
+    }
+
     #[test]
-    fn fresh_open_creates_all_required_tables_at_version_one() {
+    fn fresh_open_creates_all_tables_at_current_version() {
         for kind in [DbKind::Shared, DbKind::Worktree] {
             let (_dir, path) = temp_path("fresh", kind.file_name());
             let opened = open_or_recover(&path, kind).unwrap();
             assert!(!opened.recovered);
-            assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 1);
+            assert_eq!(
+                read_user_version(&opened.conn, &path).unwrap(),
+                supported_version(kind)
+            );
             let mut names = table_names(&opened.conn);
             names.sort_unstable();
-            let mut expected: Vec<&str> = kind.tables().to_vec();
-            expected.sort_unstable();
-            assert_eq!(names, expected, "tables for {kind:?}");
+            assert_eq!(names, expected_tables(kind), "tables for {kind:?}");
         }
     }
 
@@ -451,7 +476,10 @@ mod tests {
         }
         let reopened = open_or_recover(&path, DbKind::Shared).unwrap();
         assert!(!reopened.recovered);
-        assert_eq!(read_user_version(&reopened.conn, &path).unwrap(), 1);
+        assert_eq!(
+            read_user_version(&reopened.conn, &path).unwrap(),
+            supported_version(DbKind::Shared)
+        );
         let count = reopened
             .conn
             .query_row("SELECT count(*) FROM review_feedback", [], |row| {
@@ -475,7 +503,10 @@ mod tests {
         }
         let opened = open_or_recover(&path, DbKind::Worktree).unwrap();
         assert!(!opened.recovered);
-        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 1);
+        assert_eq!(
+            read_user_version(&opened.conn, &path).unwrap(),
+            supported_version(DbKind::Worktree)
+        );
         // Required tables now exist.
         assert!(table_exists(&opened.conn, &path, "manifest").unwrap());
     }
@@ -485,15 +516,15 @@ mod tests {
         let (_dir, path) = temp_path("toonew", "cache.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
-            conn.pragma_update(None, "user_version", 2_i64).unwrap();
+            conn.pragma_update(None, "user_version", 3_i64).unwrap();
         }
         let err = open_or_recover(&path, DbKind::Shared).unwrap_err();
         assert!(
             matches!(
                 err,
                 StorageError::SchemaTooNew {
-                    found: 2,
-                    supported: 1,
+                    found: 3,
+                    supported: 2,
                     ..
                 }
             ),
@@ -506,8 +537,8 @@ mod tests {
         assert!(matches!(
             probe(&path, DbKind::Shared).unwrap(),
             ProbeOutcome::TooNew {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             }
         ));
         assert!(path.is_file());
@@ -515,7 +546,7 @@ mod tests {
         // Explicit clear is allowed to rebuild it.
         clear(&path, DbKind::Shared).unwrap();
         let opened = open_or_recover(&path, DbKind::Shared).unwrap();
-        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 1);
+        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 2);
     }
 
     #[test]
@@ -525,7 +556,10 @@ mod tests {
 
         let opened = open_or_recover(&path, DbKind::Shared).unwrap();
         assert!(opened.recovered, "garbage file must be rebuilt");
-        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 1);
+        assert_eq!(
+            read_user_version(&opened.conn, &path).unwrap(),
+            supported_version(DbKind::Shared)
+        );
         let count = opened
             .conn
             .query_row("SELECT count(*) FROM content_artifact", [], |row| {
@@ -589,7 +623,10 @@ mod tests {
         clear(&path, DbKind::Shared).unwrap();
         let opened = open_or_recover(&path, DbKind::Shared).unwrap();
         assert!(!opened.recovered);
-        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 1);
+        assert_eq!(
+            read_user_version(&opened.conn, &path).unwrap(),
+            supported_version(DbKind::Shared)
+        );
         let count = opened
             .conn
             .query_row("SELECT count(*) FROM content_artifact", [], |row| {
@@ -606,7 +643,10 @@ mod tests {
         clear(&path, DbKind::Worktree).unwrap();
         assert!(path.is_file());
         let opened = open_or_recover(&path, DbKind::Worktree).unwrap();
-        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 1);
+        assert_eq!(
+            read_user_version(&opened.conn, &path).unwrap(),
+            supported_version(DbKind::Worktree)
+        );
     }
 
     #[test]
@@ -624,8 +664,8 @@ mod tests {
         let ProbeOutcome::Valid(data) = probe(&path, DbKind::Shared).unwrap() else {
             panic!("expected valid probe");
         };
-        assert_eq!(data.version, 1);
-        assert_eq!(data.supported, 1);
+        assert_eq!(data.version, supported_version(DbKind::Shared));
+        assert_eq!(data.supported, supported_version(DbKind::Shared));
         assert!(data.integrity_ok, "detail: {}", data.integrity_detail);
         assert_eq!(data.tables.len(), SHARED_TABLES.len());
         assert!(data.tables.iter().all(|(_, rows)| *rows == Some(0)));

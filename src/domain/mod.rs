@@ -3,6 +3,7 @@
 //! Types defined here are shared across the Nisse core. All serialized forms
 //! are strict: unknown enum variants and malformed values are rejected.
 
+pub mod context;
 pub mod evidence;
 pub mod finding;
 pub mod ids;

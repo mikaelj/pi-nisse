@@ -82,11 +82,11 @@ pub const SHARED_TABLES: &[&str] = &[
 /// Worktree-cache tables (plan section 29).
 pub const WORKTREE_TABLES: &[&str] = &["manifest", "path_content", "record_index", "refresh_state"];
 
-/// Schema version of the initial shared cache schema.
-pub const SHARED_SCHEMA_VERSION: u32 = 1;
+/// Schema version of the current shared cache schema.
+pub const SHARED_SCHEMA_VERSION: u32 = 2;
 
-/// Schema version of the initial worktree cache schema.
-pub const WORKTREE_SCHEMA_VERSION: u32 = 1;
+/// Schema version of the current worktree cache schema.
+pub const WORKTREE_SCHEMA_VERSION: u32 = 2;
 
 /// Highest schema version understood for a database kind.
 pub fn supported_version(kind: DbKind) -> u32 {
@@ -96,9 +96,10 @@ pub fn supported_version(kind: DbKind) -> u32 {
         .unwrap_or(0)
 }
 
-const SHARED_MIGRATIONS: &[Migration] = &[Migration {
-    version: SHARED_SCHEMA_VERSION,
-    sql: r#"
+const SHARED_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: r#"
 CREATE TABLE content_artifact (
     content_key TEXT PRIMARY KEY,
     byte_len    INTEGER NOT NULL,
@@ -180,11 +181,28 @@ CREATE TABLE pending_learning (
     created_at TEXT    NOT NULL
 );
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        sql: r#"
+-- Full-text index over the text chunks used for baseline retrieval
+-- (plan section 30). Kept in sync by index refresh; backfilled here
+-- from any chunks written by schema version 1.
+CREATE VIRTUAL TABLE text_chunk_fts USING fts5(
+    text,
+    content_key UNINDEXED,
+    path       UNINDEXED
+);
+INSERT INTO text_chunk_fts (rowid, text, content_key, path)
+    SELECT id, text, content_key, path FROM text_chunk;
+"#,
+    },
+];
 
-const WORKTREE_MIGRATIONS: &[Migration] = &[Migration {
-    version: WORKTREE_SCHEMA_VERSION,
-    sql: r#"
+const WORKTREE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: r#"
 CREATE TABLE manifest (
     path        TEXT PRIMARY KEY,
     content_key TEXT NOT NULL,
@@ -217,7 +235,41 @@ CREATE TABLE refresh_state (
     last_refresh_at TEXT
 );
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        sql: r#"
+-- Full-text index over durable project records (facts and lessons)
+-- used for baseline retrieval (plan section 30). Populated on demand
+-- from the .nisse tree; observations are raw learning data and are
+-- not retrieved as project knowledge.
+CREATE VIRTUAL TABLE record_fts USING fts5(
+    subject,
+    text,
+    tags,
+    record_id UNINDEXED,
+    kind      UNINDEXED,
+    state     UNINDEXED
+);
+
+-- Full-text index over the bundled practice packs.
+CREATE VIRTUAL TABLE practice_fts USING fts5(
+    title,
+    statement,
+    tags,
+    practice_id UNINDEXED,
+    pack_id     UNINDEXED
+);
+
+-- Small key-value metadata (for example the snapshot binding of the
+-- last refresh and the indexed practice-catalog version).
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"#,
+    },
+];
 
 #[cfg(test)]
 mod tests {
@@ -241,8 +293,46 @@ mod tests {
     fn supported_versions_are_current() {
         assert_eq!(supported_version(DbKind::Shared), SHARED_SCHEMA_VERSION);
         assert_eq!(supported_version(DbKind::Worktree), WORKTREE_SCHEMA_VERSION);
-        assert_eq!(supported_version(DbKind::Shared), 1);
-        assert_eq!(supported_version(DbKind::Worktree), 1);
+        assert_eq!(supported_version(DbKind::Shared), 2);
+        assert_eq!(supported_version(DbKind::Worktree), 2);
+    }
+
+    #[test]
+    fn version_one_databases_migrate_forward_with_backfill() {
+        use super::super::db::read_user_version;
+        use rusqlite::Connection;
+
+        // Build a shared version-1 database holding one text chunk, as
+        // written by Nisse at schema version 1.
+        let dir = tempfile::Builder::new()
+            .prefix("nisse-schema-migrate-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("cache.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SHARED_MIGRATIONS[0].sql).unwrap();
+            conn.pragma_update(None, "user_version", 1_i64).unwrap();
+            conn.execute(
+                "INSERT INTO text_chunk (content_key, path, chunk_index, text) \
+                 VALUES ('git:abc', 'src/lib.rs', 0, 'fn alpha L1-L2')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let opened = super::super::db::open_or_recover(&path, DbKind::Shared).unwrap();
+        assert!(!opened.recovered);
+        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 2);
+        let fts_rows: i64 = opened
+            .conn
+            .query_row(
+                "SELECT count(*) FROM text_chunk_fts WHERE text_chunk_fts MATCH 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_rows, 1, "v1 chunks must be backfilled into FTS");
     }
 
     #[test]

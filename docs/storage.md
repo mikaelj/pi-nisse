@@ -46,6 +46,7 @@ Shared cache:
 | `symbol` | Definitions extracted from parsed artifacts |
 | `reference` | Identifier references extracted from parsed artifacts |
 | `text_chunk` | Text chunks used for retrieval |
+| `text_chunk_fts` | FTS5 index over `text_chunk` (source skeletons) for baseline retrieval |
 | `embedding` | Optional cached embedding vectors |
 | `review_event` | Local review history (request, snapshot, routing, results) |
 | `review_feedback` | Locally recorded finding outcomes |
@@ -56,9 +57,15 @@ Worktree cache:
 | Table | Contents |
 | ------- | -------- |
 | `manifest` | Current path → content-key mapping used by lazy refresh |
-| `path_content` | Per-path content-key history and metadata |
+| `path_content` | Per-path content-key history and metadata; the snapshot-membership authority for retrieval |
 | `record_index` | Index of durable `.nisse/**` records for retrieval |
+| `record_fts` | FTS5 index over active facts and lessons |
+| `practice_fts` | FTS5 index over the bundled practice packs |
 | `refresh_state` | Statistics of the last index refresh |
+| `meta` | Small key-value markers: the snapshot binding of the last refresh and the indexed practice-catalog version |
+
+FTS5 shadow tables (for example `text_chunk_fts_data`) are SQLite
+implementation detail, not part of the contract.
 
 ## Schema versioning and migrations
 
@@ -121,7 +128,24 @@ reuses artifacts whose keys are already cached (manifest hit or shared
 cache hit), parses only uncached content, and prunes manifest rows for
 paths absent from the target snapshot. `refresh_state` records the
 statistics of the last refresh (`files_seen`, `files_reused`,
-`files_parsed`, `files_removed`, duration).
+`files_parsed`, `files_removed`, duration), and `meta` records the
+snapshot descriptor the refresh ran for, so later retrieval can refuse
+to answer with membership data of a different snapshot (cache presence
+never proves snapshot membership).
+
+## Baseline retrieval
+
+Retrieval (plan sections 30–31) works without embeddings and without
+LLMs. Signals: exact symbol lookup, the reference (relation) graph,
+FTS5 over source skeletons (`text_chunk_fts`), FTS5 over active durable
+facts/lessons (`record_fts`), FTS5 over bundled practices
+(`practice_fts`), and changed-symbol/changed-path/module-proximity
+boosts. Ranking is deterministic; conflicting facts are marked and
+downranked, superseded records are not retrieved as current knowledge,
+and every source entry is filtered through the target snapshot's
+membership (`path_content`) before it can enter a result. `nisse query`
+refreshes the working-tree snapshot lazily and prints a bounded,
+ranked context bundle (`--json` for machine-readable output).
 
 Indexed languages (tree-sitter): C, C++, C#, Dart, Rust, JavaScript,
 TypeScript, Python, Bash, Lua, HTML. Files whose content is not valid

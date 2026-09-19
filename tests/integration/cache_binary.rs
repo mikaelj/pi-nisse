@@ -143,7 +143,7 @@ fn clear_creates_empty_caches_and_status_reports_them() {
         2,
         "both caches must be healthy after clear"
     );
-    assert_eq!(stdout.matches("schema version: 1").count(), 2);
+    assert_eq!(stdout.matches("schema version: 2").count(), 2);
     assert_eq!(stdout.matches("integrity: ok").count(), 2);
     for table in [
         "content_artifact",

@@ -24,6 +24,7 @@
 
 pub mod db;
 pub mod fsutil;
+pub mod meta;
 pub mod paths;
 pub mod records;
 pub mod schema;

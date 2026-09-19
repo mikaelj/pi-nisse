@@ -6,6 +6,7 @@ mod cache_binary;
 mod cli_binary;
 mod doctor_binary;
 mod git_env;
+mod query_binary;
 mod records_binary;
 
 use std::path::Path;
