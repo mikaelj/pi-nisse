@@ -94,6 +94,47 @@ pub enum GitError {
         /// Description of the parse failure.
         message: String,
     },
+
+    /// The index contains unresolved conflict entries, so neither the
+    /// working tree nor the index is a well-defined review target.
+    #[error("repository has unresolved conflicts in {} path(s)", paths.len())]
+    UnmergedPaths {
+        /// Paths with conflict stages in the index.
+        paths: Vec<String>,
+    },
+
+    /// A `<base>..<head>` range specification was malformed.
+    #[error("invalid range specification `{spec}`: {reason}")]
+    InvalidRangeSpec {
+        /// The offending range specification.
+        spec: String,
+        /// Why it was rejected.
+        reason: String,
+    },
+
+    /// A repository-relative path escaped the snapshot or was malformed.
+    #[error("invalid snapshot path `{path}`")]
+    InvalidPath {
+        /// The offending path.
+        path: String,
+    },
+
+    /// An object ID did not have the shape of a full Git object ID.
+    #[error("invalid object id `{oid}`")]
+    InvalidOid {
+        /// The offending object ID.
+        oid: String,
+    },
+
+    /// Reading snapshot content from the working tree failed.
+    #[error("failed to read `{path}`: {source}")]
+    Read {
+        /// The repository-relative path that could not be read.
+        path: std::path::PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Render an optional exit code for error messages.

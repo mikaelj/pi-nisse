@@ -161,6 +161,11 @@ impl RepoContext {
         })
     }
 
+    /// The runner used for all Git invocations of this context.
+    pub fn runner(&self) -> &GitRunner {
+        &self.runner
+    }
+
     /// Resolve a commit-ish (revision, branch, tag, OID, suffixes) to a full
     /// commit object ID.
     ///
@@ -300,6 +305,86 @@ impl RepoContext {
             });
         }
         Ok(entries)
+    }
+
+    /// Resolve the tree object ID of a commit.
+    pub fn commit_tree(&self, commit: &str) -> Result<String, GitError> {
+        let peeled = format!("{commit}^{{tree}}");
+        let output = self.run(&["rev-parse", "--verify", "--end-of-options", &peeled])?;
+        Ok(output.stdout_trimmed().to_owned())
+    }
+
+    /// First parent of a commit; `None` for a root commit.
+    ///
+    /// Uses `rev-list --parents` because it fails for unresolvable
+    /// revisions instead of silently falling back to HEAD.
+    pub fn first_parent(&self, commit: &str) -> Result<Option<String>, GitError> {
+        let output = match self.run(&[
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            "--end-of-options",
+            commit,
+        ]) {
+            Ok(output) => output,
+            Err(GitError::Execution { .. }) => {
+                return Err(GitError::RevisionNotFound {
+                    spec: commit.to_string(),
+                });
+            }
+            Err(err) => return Err(err),
+        };
+        let mut tokens = output.stdout_trimmed().split_whitespace();
+        let resolved = tokens.next().unwrap_or_default();
+        Self::validate_oid(resolved)?;
+        match tokens.next() {
+            Some(parent) => {
+                Self::validate_oid(parent)?;
+                Ok(Some(parent.to_owned()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Read the full content of a blob object.
+    pub fn read_blob(&self, oid: &str) -> Result<Vec<u8>, GitError> {
+        Self::validate_oid(oid)?;
+        let output = self.run(&["cat-file", "blob", oid])?;
+        Ok(output.stdout.into_bytes())
+    }
+
+    /// Paths that currently have conflict stages (stage 1–3) in the index.
+    ///
+    /// Each conflicted path is listed once, sorted.
+    pub fn unmerged_paths(&self) -> Result<Vec<String>, GitError> {
+        let mut paths: Vec<String> = self
+            .index_entries()?
+            .into_iter()
+            .filter(|entry| entry.stage != 0)
+            .map(|entry| entry.path)
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    /// Check that `oid` is a full hex Git object ID (SHA-1 or SHA-256).
+    ///
+    /// Object IDs are validated before they are passed back to Git so a
+    /// crafted value can never be interpreted as a Git option.
+    pub fn validate_oid(oid: &str) -> Result<(), GitError> {
+        let valid = (oid.len() == 40 || oid.len() == 64)
+            && oid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if valid {
+            Ok(())
+        } else {
+            Err(GitError::InvalidOid {
+                oid: oid.to_owned(),
+            })
+        }
     }
 
     /// Run a Git command from the worktree root, requiring success.
@@ -621,5 +706,104 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} missing from index", entry.path));
             assert_eq!(entry.oid, index_entry.oid);
         }
+    }
+
+    #[test]
+    fn commit_tree_resolves_the_tree_of_a_commit() {
+        let fixture = Fixture::repo("commit-tree");
+        write_file(&fixture.root, "a.txt", "a\n");
+        let commit = commit_all(&fixture.root, "one");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        let tree = ctx.commit_tree(&commit).unwrap();
+        assert_eq!(
+            tree,
+            stdout_trimmed(git_in(&fixture.root, &["rev-parse", "HEAD^{tree}"]))
+        );
+    }
+
+    #[test]
+    fn first_parent_returns_first_parent_and_none_for_root() {
+        let fixture = Fixture::repo("first-parent");
+        write_file(&fixture.root, "a.txt", "a\n");
+        let root = commit_all(&fixture.root, "root");
+        git_in(&fixture.root, &["checkout", "--quiet", "-b", "side"]);
+        write_file(&fixture.root, "side.txt", "side\n");
+        let side = commit_all(&fixture.root, "side");
+        git_in(
+            &fixture.root,
+            &["checkout", "--quiet", &fixture.branch_name],
+        );
+        write_file(&fixture.root, "main.txt", "main\n");
+        let main_tip = commit_all(&fixture.root, "main");
+        git_in(
+            &fixture.root,
+            &["merge", "--quiet", "--no-ff", "-m", "merge", "side"],
+        );
+        let merge = stdout_trimmed(git_in(&fixture.root, &["rev-parse", "HEAD"]));
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        // A merge commit's first parent is the pre-merge HEAD.
+        assert_eq!(
+            ctx.first_parent(&merge).unwrap().as_deref(),
+            Some(main_tip.as_str())
+        );
+        // Ordinary commits have exactly one parent.
+        assert_eq!(
+            ctx.first_parent(&side).unwrap().as_deref(),
+            Some(root.as_str())
+        );
+        // Root commits have none.
+        assert_eq!(ctx.first_parent(&root).unwrap(), None);
+        // Unknown revisions fail typed.
+        assert!(matches!(
+            ctx.first_parent("no-such-rev"),
+            Err(GitError::RevisionNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn read_blob_returns_exact_content_and_validates_oids() {
+        let fixture = Fixture::repo("read-blob");
+        write_file(&fixture.root, "a.txt", "exact content\n");
+        commit_all(&fixture.root, "one");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        let oid = stdout_trimmed(git_in(&fixture.root, &["rev-parse", "HEAD:a.txt"]));
+        assert_eq!(ctx.read_blob(&oid).unwrap(), b"exact content\n");
+        // Non-hex or truncated OIDs are rejected before reaching Git.
+        assert!(matches!(
+            ctx.read_blob("--exec=evil"),
+            Err(GitError::InvalidOid { .. })
+        ));
+        assert!(matches!(
+            ctx.read_blob("abc123"),
+            Err(GitError::InvalidOid { .. })
+        ));
+    }
+
+    #[test]
+    fn unmerged_paths_lists_conflicted_entries() {
+        let fixture = Fixture::repo("unmerged-paths");
+        write_file(&fixture.root, "a.txt", "base\n");
+        commit_all(&fixture.root, "base");
+        git_in(&fixture.root, &["checkout", "--quiet", "-b", "side"]);
+        write_file(&fixture.root, "a.txt", "side\n");
+        commit_all(&fixture.root, "side");
+        git_in(
+            &fixture.root,
+            &["checkout", "--quiet", &fixture.branch_name],
+        );
+        write_file(&fixture.root, "a.txt", "main\n");
+        commit_all(&fixture.root, "main");
+        let _ = std::process::Command::new("git")
+            .args(["merge", "--no-ff", "side"])
+            .current_dir(&fixture.root)
+            .env("LC_ALL", "C")
+            .output()
+            .expect("failed to spawn git");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        assert_eq!(ctx.unmerged_paths().unwrap(), vec!["a.txt".to_string()]);
     }
 }
