@@ -7,12 +7,14 @@ pub mod context;
 pub mod evidence;
 pub mod finding;
 pub mod ids;
+pub mod jury;
 pub mod model;
 pub mod practice;
 pub mod records;
 pub mod report;
 pub mod review;
 pub mod reviewer;
+pub mod routing;
 pub mod snapshot;
 pub mod time;
 

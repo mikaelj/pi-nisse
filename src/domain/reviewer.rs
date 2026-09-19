@@ -62,8 +62,10 @@ pub struct ReviewerProfile {
     pub display_name: String,
     /// What this reviewer covers and how it participates in juries.
     pub description: String,
-    /// Terms that raise this reviewer's routing score when they appear in
-    /// request descriptors, changed symbols, or lessons.
+    /// Terms that raise this reviewer's routing score when they appear
+    /// in the request descriptors or changed symbols of a routing
+    /// input. Lesson wording never influences routing (plan section
+    /// 51); lessons boost scores only through their routing hints.
     pub trigger_terms: Vec<String>,
     /// Languages from the supported set that strengthen this reviewer's
     /// score when they appear in the change.
