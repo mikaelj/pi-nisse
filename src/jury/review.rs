@@ -36,7 +36,11 @@
 //! 16. consolidate through the synthesis pipeline;
 //! 17. construct the [`ReviewResult`];
 //! 18. persist the local review event in the shared cache (plan
-//!     section 57).
+//!     section 57);
+//! 19. validate/verify fact candidates through independent Pi verifier
+//!     sessions and deterministic checks (plan section 47);
+//! 20. persist supported facts — only with a contributor identity — or
+//!     retain the candidates as pending local state.
 //!
 //! [`run_code_review`] executes the same frozen pipeline for a code
 //! review (plan section 60) over any of the five snapshot modes: the
@@ -246,6 +250,12 @@ pub struct PlanReviewOptions {
     /// Optional embedding provider reranking retrieval results (plan
     /// sections 30 and 34). Failures degrade to the baseline ranking.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// Contributor identity for durable knowledge created by the
+    /// review (plan section 44). Reviews are noninteractive: when no
+    /// identity is configured, learning remains pending locally.
+    pub contributor_id: Option<String>,
+    /// Bounds of the fact-candidate pipeline (plan section 47).
+    pub fact_processing: crate::learning::facts::FactProcessingOptions,
 }
 
 impl PlanReviewOptions {
@@ -258,6 +268,8 @@ impl PlanReviewOptions {
             model_profiles: BTreeMap::new(),
             routing_provider: None,
             embedding_provider: None,
+            contributor_id: None,
+            fact_processing: crate::learning::facts::FactProcessingOptions::default(),
         }
     }
 }
@@ -521,6 +533,24 @@ pub fn run_plan_review(
         source: &source,
     };
     persist_review_event(paths, &event).map_err(PlanReviewError::Cache)?;
+
+    // 19./20. Validate/verify fact candidates; persist supported facts
+    // or pending candidates (plan sections 47 and 58). Reviews are
+    // noninteractive: without a contributor identity, learning remains
+    // pending locally (plan section 44), and every verifier failure
+    // degrades to pending state — never a failed review.
+    let fact_summary = crate::learning::facts::process_fact_candidates(
+        &mut host,
+        ctx,
+        paths,
+        &validation_context,
+        &review_id,
+        &reports,
+        &records,
+        options.contributor_id.as_deref(),
+        &options.fact_processing,
+    );
+    diagnostics.extend(fact_summary.diagnostics);
 
     let _ = host.shutdown(Duration::from_secs(5));
 
@@ -905,6 +935,12 @@ pub struct CodeReviewOptions {
     /// Optional embedding provider reranking retrieval results (plan
     /// sections 30 and 34). Failures degrade to the baseline ranking.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// Contributor identity for durable knowledge created by the
+    /// review (plan section 44). Reviews are noninteractive: when no
+    /// identity is configured, learning remains pending locally.
+    pub contributor_id: Option<String>,
+    /// Bounds of the fact-candidate pipeline (plan section 47).
+    pub fact_processing: crate::learning::facts::FactProcessingOptions,
 }
 
 impl CodeReviewOptions {
@@ -917,6 +953,8 @@ impl CodeReviewOptions {
             model_profiles: BTreeMap::new(),
             routing_provider: None,
             embedding_provider: None,
+            contributor_id: None,
+            fact_processing: crate::learning::facts::FactProcessingOptions::default(),
         }
     }
 }
@@ -1200,6 +1238,24 @@ pub fn run_code_review(
         source: &source,
     };
     persist_review_event(paths, &event).map_err(CodeReviewError::Cache)?;
+
+    // 19./20. Validate/verify fact candidates; persist supported facts
+    // or pending candidates (plan sections 47 and 58). Reviews are
+    // noninteractive: without a contributor identity, learning remains
+    // pending locally (plan section 44), and every verifier failure
+    // degrades to pending state — never a failed review.
+    let fact_summary = crate::learning::facts::process_fact_candidates(
+        &mut host,
+        ctx,
+        paths,
+        &validation_context,
+        &review_id,
+        &reports,
+        &records,
+        options.contributor_id.as_deref(),
+        &options.fact_processing,
+    );
+    diagnostics.extend(fact_summary.diagnostics);
 
     let _ = host.shutdown(Duration::from_secs(5));
 

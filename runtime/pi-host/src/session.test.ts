@@ -19,6 +19,7 @@ import {
   buildReviewerTools,
   buildSystemPrompt,
   extractReportJson,
+  fakeCandidateFacts,
   parseReviewerReport,
   PiReviewerSession,
   ReviewerSessionError,
@@ -440,4 +441,73 @@ test("scripted step errors fail the session (turn errors are not repairs)", asyn
     () => session.run(sessionContext()),
     /model exploded/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Scripted fake candidate facts (plan section 46)
+// ---------------------------------------------------------------------------
+
+test("fake candidate facts are env-scripted and snapshot-grounded", () => {
+  const restore = (key: string, value: string | undefined) => {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  };
+  const claim = process.env["NISSE_FAKE_REVIEWER_FACT_CLAIM"];
+  const subject = process.env["NISSE_FAKE_REVIEWER_FACT_SUBJECT"];
+  const confidence = process.env["NISSE_FAKE_REVIEWER_FACT_CONFIDENCE"];
+
+  try {
+    // No claim scripted: no candidates.
+    delete process.env["NISSE_FAKE_REVIEWER_FACT_CLAIM"];
+    assert.deepEqual(fakeCandidateFacts([contextEntry("fn enqueue()")]), []);
+
+    // A scripted claim derives source evidence from the first
+    // source-ish context entry with a path.
+    process.env["NISSE_FAKE_REVIEWER_FACT_CLAIM"] = "The queue is bounded.";
+    const candidates = fakeCandidateFacts([
+      {
+        kind: "diff",
+        title: "diff: src/queue.rs (modified)",
+        path: "src/queue.rs",
+        text: "+ fn enqueue()",
+        score: 1,
+      },
+      contextEntry("pub fn enqueue(&mut self, item: T)"),
+    ]);
+    assert.equal(candidates.length, 1);
+    const candidate = candidates[0]!;
+    assert.equal(candidate.claim, "The queue is bounded.");
+    assert.equal(candidate.subject, "fake fact subject");
+    assert.equal(candidate.confidence, 0.95);
+    assert.deepEqual(candidate.tags, ["fake"]);
+    // The diff entry is skipped in favor of grounded source content.
+    assert.equal(candidate.evidence[0]?.kind, "source");
+    assert.equal(candidate.evidence[0]?.path, "src/queue.rs");
+    assert.equal(candidate.evidence[0]?.excerpt, "pub fn enqueue(&mut self, item: T)");
+
+    // Subject and confidence are overridable.
+    process.env["NISSE_FAKE_REVIEWER_FACT_SUBJECT"] = "queue";
+    process.env["NISSE_FAKE_REVIEWER_FACT_CONFIDENCE"] = "0.5";
+    const tuned = fakeCandidateFacts([contextEntry("fn enqueue()")])[0]!;
+    assert.equal(tuned.subject, "queue");
+    assert.equal(tuned.confidence, 0.5);
+
+    // Without any path-bearing entry the candidate carries path-less
+    // evidence (which deterministic validation will reject).
+    const bare = fakeCandidateFacts([
+      { kind: "plan", title: "review input", text: "the plan", score: 1 },
+    ])[0]!;
+    assert.equal(bare.evidence[0]?.path, undefined);
+
+    // Whitespace-only claims produce no candidates.
+    process.env["NISSE_FAKE_REVIEWER_FACT_CLAIM"] = "   ";
+    assert.deepEqual(fakeCandidateFacts([contextEntry("fn")]), []);
+  } finally {
+    restore("NISSE_FAKE_REVIEWER_FACT_CLAIM", claim);
+    restore("NISSE_FAKE_REVIEWER_FACT_SUBJECT", subject);
+    restore("NISSE_FAKE_REVIEWER_FACT_CONFIDENCE", confidence);
+  }
 });

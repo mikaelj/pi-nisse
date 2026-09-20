@@ -21,15 +21,19 @@
 //! `reviewer_completed`, `reviewer_failed`, `tool_request`,
 //! `tool_response`, `cancel`, `host_error`), the narrow
 //! `start_finding_equivalence_check` / `finding_equivalence_completed`
-//! exchange of finding consolidation (plan section 38), and the constrained
+//! exchange of finding consolidation (plan section 38), the constrained
 //! `start_domain_description` / `domain_description_completed` exchange of
-//! the dynamic domain expert (plan section 19). Receiving a
+//! the dynamic domain expert (plan section 19), and the independent
+//! `start_fact_verification` / `fact_verification_completed` exchange of
+//! fact persistence (plan section 47). Receiving a
 //! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::domain::context::ContextBundle;
+use crate::domain::evidence::EvidenceRef;
+use crate::domain::facts::FactVerificationVerdict;
 use crate::domain::finding::ReviewerFinding;
 use crate::domain::model::ModelProfile;
 use crate::domain::report::ReviewerReport;
@@ -347,6 +351,17 @@ pub enum HostEvent {
         /// the caller must fall back to the plain static reviewer template.
         description: Option<DynamicDomainDescription>,
         /// Why the description fell back, when its session failed.
+        error: Option<HostErrorInfo>,
+    },
+    /// An independent fact-verification job finished (plan section 47).
+    FactVerificationCompleted {
+        /// Correlation identifier of the answered verification job.
+        verification_id: String,
+        /// The verdict. A failed session always reports `insufficient`
+        /// plus an `error` (uncertainty never persists a fact).
+        verdict: FactVerificationVerdict,
+        /// Why the verifier could not decide, when its session failed;
+        /// only permitted with the `insufficient` verdict.
         error: Option<HostErrorInfo>,
     },
     /// The host reported a protocol-level failure.
@@ -673,6 +688,32 @@ pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> 
                 error: payload.error,
             })
         }
+        host_to_rust::FACT_VERIFICATION_COMPLETED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                verification_id: String,
+                verdict: FactVerificationVerdict,
+                #[serde(default)]
+                error: Option<HostErrorInfo>,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.verification_id, "verification_id", &invalid)?;
+            if let Some(error) = &payload.error {
+                require_valid_error(error, &invalid)?;
+                if payload.verdict != FactVerificationVerdict::Insufficient {
+                    return Err(invalid(
+                        "`error` is only permitted with the `insufficient` verdict".to_string(),
+                    ));
+                }
+            }
+            Ok(HostEvent::FactVerificationCompleted {
+                verification_id: payload.verification_id,
+                verdict: payload.verdict,
+                error: payload.error,
+            })
+        }
         other => Err(ProtocolError::UnsupportedMessageType(other.to_string())),
     }
 }
@@ -810,6 +851,53 @@ pub struct DomainDescriptionOutcome {
     pub description: Option<DynamicDomainDescription>,
     /// Why the description fell back, when its session failed.
     pub error: Option<HostErrorInfo>,
+}
+
+/// `start_fact_verification` payload (plan section 47 step 2): the
+/// exact claim and the exact evidence excerpts one fresh verifier
+/// session must judge, plus the explicit bounds of that session.
+/// Rust owns the job identity, the model selection, and the timeout;
+/// the verifier is always a separate session from the reviewer that
+/// proposed the candidate, and it receives no tools.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactVerificationPayload {
+    /// Correlation identifier of this job (assigned by Rust).
+    pub verification_id: String,
+    /// Session timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Explicitly configured model profile for the session.
+    pub model_profile: String,
+    /// Explicit thinking level for the session.
+    pub thinking_level: crate::domain::model::ThinkingLevel,
+    /// The exact claim under verification.
+    pub claim: String,
+    /// The exact evidence excerpts backing the claim.
+    pub evidence: Vec<EvidenceRef>,
+}
+
+/// A Rust-to-host `start_fact_verification` message.
+#[derive(Debug, Clone)]
+pub struct StartFactVerificationMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the verification job to execute.
+    pub payload: FactVerificationPayload,
+}
+
+impl StartFactVerificationMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: FactVerificationPayload) -> Self {
+        StartFactVerificationMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(
+            rust_to_host::START_FACT_VERIFICATION,
+            &self.id,
+            &self.payload,
+        )
+    }
 }
 
 /// A Rust-to-host `start_domain_description` message.
@@ -1056,13 +1144,13 @@ mod tests {
         assert_eq!(err, ProtocolError::UnknownMessageType("banana".to_string()));
 
         let envelope = Envelope::parse_host_line(
-            r#"{"protocol_version":1,"id":"h-1","type":"fact_verification_completed"}"#,
+            r#"{"protocol_version":1,"id":"h-1","type":"fact_synthesis_completed"}"#,
         )
         .unwrap();
         let err = parse_host_event(envelope).unwrap_err();
         assert_eq!(
             err,
-            ProtocolError::UnsupportedMessageType("fact_verification_completed".to_string())
+            ProtocolError::UnsupportedMessageType("fact_synthesis_completed".to_string())
         );
     }
 
@@ -1354,6 +1442,92 @@ mod tests {
         ] {
             let err = parse_host_event(Envelope::parse_host_line(&bad).unwrap()).unwrap_err();
             assert!(matches!(err, ProtocolError::InvalidPayload { .. }), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn fact_verification_messages_roundtrip_strictly() {
+        let evidence = serde_json::json!({
+            "kind": "source",
+            "path": "src/queue.rs",
+            "line_start": 1,
+            "line_end": 3,
+            "excerpt": "pub struct Queue {"
+        });
+        let payload = FactVerificationPayload {
+            verification_id: "ver-1".to_string(),
+            timeout_ms: 120_000,
+            model_profile: "standard".to_string(),
+            thinking_level: crate::domain::model::ThinkingLevel::Medium,
+            claim: "The sensor queue is bounded to 32 slots.".to_string(),
+            evidence: vec![serde_json::from_value(evidence).unwrap()],
+        };
+        let line = StartFactVerificationMessage::new("m-6".to_string(), payload.clone()).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["type"], "start_fact_verification");
+        assert_eq!(value["id"], "m-6");
+        assert_eq!(value["verification_id"], "ver-1");
+        assert_eq!(value["timeout_ms"], 120_000);
+        assert_eq!(value["model_profile"], "standard");
+        assert_eq!(value["thinking_level"], "medium");
+        assert_eq!(value["claim"], "The sensor queue is bounded to 32 slots.");
+        assert_eq!(value["evidence"][0]["path"], "src/queue.rs");
+        assert!(!line.contains('\n'), "messages must be single lines");
+        let back: FactVerificationPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(back, payload);
+
+        // Completions parse for every verdict without an error.
+        for (verdict, name) in [
+            (FactVerificationVerdict::Supported, "supported"),
+            (FactVerificationVerdict::Contradicted, "contradicted"),
+            (FactVerificationVerdict::Insufficient, "insufficient"),
+        ] {
+            let line = format!(
+                r#"{{"protocol_version":1,"id":"h-11","type":"fact_verification_completed","verification_id":"ver-1","verdict":"{name}"}}"#
+            );
+            let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
+            assert_eq!(
+                event,
+                HostEvent::FactVerificationCompleted {
+                    verification_id: "ver-1".to_string(),
+                    verdict,
+                    error: None,
+                }
+            );
+        }
+
+        // An error is only permitted with the insufficient verdict (a
+        // failed verifier session must never look like support or
+        // contradiction).
+        let failed = r#"{"protocol_version":1,"id":"h-11","type":"fact_verification_completed","verification_id":"ver-1","verdict":"insufficient","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let event = parse_host_event(Envelope::parse_host_line(failed).unwrap()).unwrap();
+        assert!(matches!(
+            event,
+            HostEvent::FactVerificationCompleted { error: Some(_), .. }
+        ));
+        for corrupted in [
+            failed.replace("\"insufficient\"", "\"supported\""),
+            failed.replace("\"insufficient\"", "\"contradicted\""),
+        ] {
+            let err = parse_host_event(Envelope::parse_host_line(&corrupted).unwrap()).unwrap_err();
+            assert!(
+                matches!(err, ProtocolError::InvalidPayload { .. }),
+                "{err:?}"
+            );
+        }
+
+        // Unknown verdicts and empty ids are rejected.
+        for bad in [
+            r#"{"protocol_version":1,"id":"h","type":"fact_verification_completed","verification_id":"v","verdict":"uncertain"}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_verification_completed","verification_id":"","verdict":"supported"}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_verification_completed","verification_id":"v","verdict":"supported","extra":1}"#,
+        ] {
+            let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
+            assert!(
+                matches!(err, ProtocolError::InvalidPayload { .. }),
+                "{err:?}"
+            );
         }
     }
 

@@ -22,6 +22,10 @@ import {
   type DomainDescriptionDeps,
 } from "./domain.ts";
 import {
+  runFactVerification,
+  type FactVerificationDeps,
+} from "./verify.ts";
+import {
   decodeIncomingMessage,
   encodeMessage,
   ERROR_CODES,
@@ -41,11 +45,13 @@ import { parseFault, type HostRuntime } from "./types.ts";
 import {
   validateCancel,
   validateDomainDescriptionRequest,
+  validateFactVerificationRequest,
   validateFindingEquivalenceCheck,
   validateHostConfig,
   validateStartReview,
   ValidationError,
   type DomainDescriptionRequest,
+  type FactVerificationRequest,
   type FindingEquivalenceCheck,
   type HostConfig,
   type ReviewerExecutionSpec,
@@ -141,6 +147,11 @@ function equivalenceDeps(): EquivalenceDeps {
 
 /** Dependencies of pi-runtime domain-description sessions. */
 function domainDescriptionDeps(): DomainDescriptionDeps {
+  return { models: hostModels, resolveAgent: resolvePiAgentFactory };
+}
+
+/** Dependencies of pi-runtime fact-verification sessions. */
+function factVerificationDeps(): FactVerificationDeps {
   return { models: hostModels, resolveAgent: resolvePiAgentFactory };
 }
 
@@ -282,6 +293,27 @@ async function runDomainDescriptionJob(request: DomainDescriptionRequest): Promi
   }
 }
 
+/** Execute one fact-verification job: a completed result always answers
+ * the job, with `insufficient` plus an error when the session failed. */
+async function runFactVerificationJob(request: FactVerificationRequest): Promise<void> {
+  try {
+    const result = await runFactVerification(options.runtime, request, factVerificationDeps());
+    send("fact_verification_completed", nextId(), {
+      verification_id: request.verification_id,
+      verdict: result.verdict,
+      ...(result.error !== undefined ? { error: result.error } : {}),
+    });
+  } catch (err) {
+    // Unexpected internal failures are protocol-level host errors.
+    sendHostError(
+      ERROR_CODES.internal,
+      `fact verification \`${request.verification_id}\` failed unexpectedly: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
   switch (message.type) {
     case "host_config":
@@ -298,6 +330,11 @@ function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
     case "start_domain_description": {
       const request = validateDomainDescriptionRequest(message.payload);
       void runDomainDescriptionJob(request);
+      return;
+    }
+    case "start_fact_verification": {
+      const request = validateFactVerificationRequest(message.payload);
+      void runFactVerificationJob(request);
       return;
     }
     case "tool_response":

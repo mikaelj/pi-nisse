@@ -60,9 +60,7 @@ impl App {
             Command::Feedback { .. } => Err(AppError::NotImplemented("nisse feedback".to_string())),
             Command::Records { records } => match records {
                 crate::cli::RecordsCommand::List => self.run_records_list(),
-                crate::cli::RecordsCommand::Pending => Err(AppError::NotImplemented(
-                    "nisse records pending".to_string(),
-                )),
+                crate::cli::RecordsCommand::Pending => self.run_records_pending(),
                 crate::cli::RecordsCommand::Compact => Err(AppError::NotImplemented(
                     "nisse records compact".to_string(),
                 )),
@@ -144,6 +142,11 @@ impl App {
             .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
         let mut options = PlanReviewOptions::new(launch);
         options.model_profiles = loaded.config.model_profiles.clone();
+        options.contributor_id = loaded
+            .config
+            .contributor
+            .as_ref()
+            .map(|contributor| contributor.id.clone());
         let providers = optional_providers(&loaded.config);
         options.routing_provider = providers.routing;
         options.embedding_provider = providers.embeddings;
@@ -216,6 +219,11 @@ impl App {
             .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
         let mut options = CodeReviewOptions::new(launch);
         options.model_profiles = loaded.config.model_profiles.clone();
+        options.contributor_id = loaded
+            .config
+            .contributor
+            .as_ref()
+            .map(|contributor| contributor.id.clone());
         let providers = optional_providers(&loaded.config);
         options.routing_provider = providers.routing;
         options.embedding_provider = providers.embeddings;
@@ -313,6 +321,23 @@ impl App {
             .load()
             .map_err(|err| AppError::Other(anyhow::anyhow!("records list failed: {err}")))?;
         print_to_stdout(&render_listing(&store.nisse_dir(), &records));
+        Ok(())
+    }
+
+    /// Run `nisse records pending`.
+    ///
+    /// Lists the local pending-learning state of the shared cache:
+    /// fact candidates that were not persisted as durable facts —
+    /// pending ones (insufficient verification, verifier failure,
+    /// missing contributor identity) and rejected ones (deterministic
+    /// rejection or contradiction) — plus any other pending-learning
+    /// kinds later milestones add. Pending state is regenerable local
+    /// cache, never durable project knowledge.
+    fn run_records_pending(&self) -> Result<(), AppError> {
+        let (_ctx, paths) = self.discover_storage()?;
+        let rows = crate::learning::facts::load_pending(&paths)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("records pending failed: {err}")))?;
+        print_to_stdout(&crate::learning::facts::render_pending(&rows));
         Ok(())
     }
 
@@ -520,9 +545,6 @@ mod tests {
                     accepted: false,
                     dismissed: false,
                 },
-            },
-            Command::Records {
-                records: crate::cli::RecordsCommand::Pending,
             },
             Command::Records {
                 records: crate::cli::RecordsCommand::Compact,

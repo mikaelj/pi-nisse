@@ -26,6 +26,7 @@ import {
   REVIEW_KINDS,
   REVIEWER_TOOLS,
   validateReviewerReport,
+  type CandidateProjectFact,
   type ContextEntry,
   type EvidenceRef,
   type ReviewerExecutionSpec,
@@ -556,6 +557,62 @@ function toolParameters(name: ReviewerTool): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Scripted fake candidate project facts (plan section 46).
+ *
+ * Deterministic, env-controlled so Rust tests can exercise the whole
+ * fact-candidate pipeline offline:
+ *
+ * - `NISSE_FAKE_REVIEWER_FACT_CLAIM`: when set to non-empty text, every
+ *   fake reviewer proposes exactly one candidate fact carrying it;
+ * - `NISSE_FAKE_REVIEWER_FACT_SUBJECT`: subject override (default
+ *   `fake fact subject`);
+ * - `NISSE_FAKE_REVIEWER_FACT_CONFIDENCE`: confidence override
+ *   (default `0.95`).
+ *
+ * The candidate's evidence is derived from the first source-ish initial
+ * context entry with a path, so it validates against the snapshot.
+ */
+export function fakeCandidateFacts(
+  contextEntries: readonly ContextEntry[],
+): CandidateProjectFact[] {
+  const claim = process.env["NISSE_FAKE_REVIEWER_FACT_CLAIM"];
+  if (claim === undefined || claim.trim().length === 0) {
+    return [];
+  }
+  const subject = process.env["NISSE_FAKE_REVIEWER_FACT_SUBJECT"] ?? "fake fact subject";
+  const rawConfidence = Number(process.env["NISSE_FAKE_REVIEWER_FACT_CONFIDENCE"] ?? "0.95");
+  const confidence = Number.isFinite(rawConfidence) ? rawConfidence : 0.95;
+  const entry =
+    contextEntries.find(
+      (candidate) =>
+        (candidate.kind === "source" ||
+          candidate.kind === "source_skeleton" ||
+          candidate.kind === "symbol_definition") &&
+        candidate.path !== undefined,
+    ) ?? contextEntries.find((candidate) => candidate.path !== undefined);
+  const evidence: EvidenceRef =
+    entry === undefined
+      ? { kind: "source", excerpt: "fake runtime: no initial context entries were supplied" }
+      : {
+          kind: "source",
+          ...(entry.path !== undefined ? { path: entry.path } : {}),
+          ...(entry.symbol !== undefined ? { symbol: entry.symbol } : {}),
+          ...(entry.line_start !== undefined ? { line_start: entry.line_start } : {}),
+          ...(entry.line_end !== undefined ? { line_end: entry.line_end } : {}),
+          excerpt: Array.from(entry.text).slice(0, 800).join(""),
+        };
+  return [
+    {
+      subject,
+      claim,
+      tags: ["fake"],
+      evidence: [evidence],
+      confidence,
+    },
+  ];
+}
+
+/**
  * Deterministic fake reviewer.
  *
  * Behavior is fully determined by the execution spec and two optional
@@ -656,7 +713,7 @@ export class FakeReviewerSession implements ReviewerSession {
           evidence: [evidence],
         },
       ],
-      candidate_project_facts: [],
+      candidate_project_facts: fakeCandidateFacts(this.spec.initial_context),
       model_metadata: {
         runtime: "fake",
         model: resolveFakeModel(this.spec.model_profile).model,

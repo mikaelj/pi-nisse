@@ -331,8 +331,10 @@ fn shape_error(finding: &ReviewerFinding) -> Option<String> {
 
 /// Validate one evidence entry against the target snapshot.
 ///
-/// Returns `Err(reason)` when the entry must be excluded.
-fn validate_evidence(
+/// Returns `Err(reason)` when the entry must be excluded. Shared by
+/// finding validation and deterministic fact-candidate validation
+/// (plan sections 37 and 47).
+pub(crate) fn validate_evidence(
     context: &ValidationContext<'_>,
     evidence: &EvidenceRef,
 ) -> Result<(), String> {

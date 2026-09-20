@@ -46,7 +46,7 @@ Nisse Core → host:
 | --- | --- |
 | `host_config` | active |
 | `start_review` | active |
-| `start_fact_verification` | reserved |
+| `start_fact_verification` | active |
 | `start_fact_synthesis` | reserved |
 | `start_domain_description` | active |
 | `start_finding_equivalence_check` | active |
@@ -62,7 +62,7 @@ Host → Nisse Core:
 | `reviewer_completed` | active |
 | `reviewer_failed` | active |
 | `tool_request` | active |
-| `fact_verification_completed` | reserved |
+| `fact_verification_completed` | active |
 | `fact_synthesis_completed` | reserved |
 | `domain_description_completed` | active |
 | `finding_equivalence_completed` | active |
@@ -257,6 +257,61 @@ Fake-runtime fault:
   error (exercises the static-template fallback). Without the fault the
   fake derives a deterministic description from the first descriptor.
 
+### `start_fact_verification` / `fact_verification_completed` (plan section 47)
+
+Independent verification of one proposed project fact. Reviewers may
+propose `candidate_project_facts`, but reviewer output can never create
+durable knowledge directly: after the Rust core's deterministic checks
+(confidence ≥ 0.90, bounds, snapshot-proven source evidence, secret
+filtering, near-duplicate rejection) pass, one fresh verifier session —
+always a separate session from the proposing reviewer — judges the
+exact claim against the exact evidence excerpts. The core sends one
+job per candidate (correlation by `verification_id`):
+
+```json
+{
+  "verification_id": "<id>", "timeout_ms": 120000,
+  "model_profile": "standard", "thinking_level": "medium",
+  "claim": "The sensor queue is bounded to 32 slots.",
+  "evidence": [<EvidenceRef>]
+}
+```
+
+`evidence` is non-empty and holds at most 16 entries. The host runs one
+isolated non-juror session (identity `fact-verifier`): the model profile
+and thinking level come explicitly from the payload, no tools are
+granted, and the output must be exactly
+
+```json
+{"verdict": "supported" | "contradicted" | "insufficient"}
+```
+
+parsed strictly with exactly one constrained repair attempt under the
+payload timeout. Every job is answered:
+
+```json
+{"verification_id": "<id>", "verdict": "supported"}
+{"verification_id": "<id>", "verdict": "insufficient", "error": {"code": "…", "message": "…"}}
+```
+
+A session that failed (timeout, unresolved model profile, output that
+stayed malformed after the repair) completes with the forced
+`insufficient` verdict plus an `error` — an `error` is only permitted
+with `insufficient`. The deterministic consequences belong entirely to
+the core: only `supported` plus every deterministic check plus a
+contributor identity creates a durable supported fact; `contradicted`
+rejects the candidate; `insufficient` (including every verifier
+failure) keeps it as pending local state. Uncertainty never persists a
+fact.
+
+Fake-runtime faults:
+
+- `NISSE_FAKE_FACT_VERIFICATION_VERDICTS=supported,contradicted`:
+  verdicts consumed in order (one per job); missing, unknown, or
+  exhausted entries answer `insufficient` (the fail-safe verdict);
+- `NISSE_FAKE_FACT_VERIFICATION_FAIL=1`: every job completes with
+  `insufficient` plus a scripted error (exercises the pending path).
+
 ### `cancel` (core → host)
 
 `{"review_id":"<id>"}` cancels one review; `{}` cancels everything. The
@@ -314,7 +369,13 @@ Fake reviewer faults:
   attempt of the listed reviewers fails (exercises the retry policy);
 - `NISSE_FAKE_REVIEWER_ATTEMPTS_FILE=<path>`: every session appends one
   JSON line `{reviewer_id, attempt}` so tests can prove how often a
-  reviewer actually ran.
+  reviewer actually ran;
+- `NISSE_FAKE_REVIEWER_FACT_CLAIM=<text>`: every fake reviewer proposes
+  exactly one candidate project fact carrying the claim (plan section
+  46), with `NISSE_FAKE_REVIEWER_FACT_SUBJECT` (default `fake fact
+  subject`) and `NISSE_FAKE_REVIEWER_FACT_CONFIDENCE` (default `0.95`)
+  overrides; the candidate's evidence derives from the first
+  snapshot-grounded initial-context entry with a path.
 
 Fake equivalence-check faults:
 

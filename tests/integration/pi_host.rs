@@ -13,11 +13,14 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use nisse::domain::context::{ContextBundle, ContextEntry, ContextKind};
+use nisse::domain::facts::FactVerificationVerdict;
 use nisse::domain::model::ThinkingLevel;
 use nisse::domain::review::ReviewKind;
 use nisse::domain::reviewer::{ReviewerCapability, ReviewerExecutionSpec};
 use nisse::jury::host::{HostError, HostProcess, PiHostLaunch};
-use nisse::jury::protocol::{HostEvent, HostRuntime, StartReviewPayload, ToolResponsePayload};
+use nisse::jury::protocol::{
+    FactVerificationPayload, HostEvent, HostRuntime, StartReviewPayload, ToolResponsePayload,
+};
 
 fn host_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/pi-host/src/main.ts")
@@ -349,14 +352,14 @@ fn unsupported_vocabulary_messages_are_refused_deterministically() {
     let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
 
-    // `start_fact_verification` is frozen vocabulary but belongs to a
+    // `start_fact_synthesis` is frozen vocabulary but belongs to a
     // later milestone.
-    host.send_raw_line(r#"{"protocol_version":1,"id":"x-2","type":"start_fact_verification"}"#)
+    host.send_raw_line(r#"{"protocol_version":1,"id":"x-2","type":"start_fact_synthesis"}"#)
         .expect("write failed");
     match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
         HostEvent::HostError(info) => {
             assert_eq!(info.code, "unsupported_message");
-            assert!(info.message.contains("start_fact_verification"));
+            assert!(info.message.contains("start_fact_synthesis"));
         }
         other => panic!("expected host_error, got {other:?}"),
     }
@@ -549,4 +552,137 @@ fn stdout_carries_protocol_messages_only() {
         rx.recv_timeout(Duration::from_millis(500)).is_err(),
         "no further stdout traffic may follow stdin close"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Independent fact verification (plan section 47)
+// ---------------------------------------------------------------------------
+
+fn verification_payload(verification_id: &str, claim: &str) -> FactVerificationPayload {
+    use nisse::domain::evidence::{EvidenceKind, EvidenceRef};
+    FactVerificationPayload {
+        verification_id: verification_id.to_string(),
+        timeout_ms: 5_000,
+        model_profile: "standard".to_string(),
+        thinking_level: ThinkingLevel::Medium,
+        claim: claim.to_string(),
+        evidence: vec![EvidenceRef {
+            kind: EvidenceKind::Source,
+            path: Some("src/queue.rs".to_string()),
+            symbol: None,
+            line_start: Some(1),
+            line_end: Some(3),
+            content_key: None,
+            plan_section: None,
+            record_id: None,
+            excerpt: "pub struct Queue { slots: [u8; 32] }".to_string(),
+        }],
+    }
+}
+
+#[test]
+fn fact_verification_roundtrips_through_the_host() {
+    let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+
+    // Default fake verdict: insufficient (the fail-safe verdict).
+    let payload = verification_payload("ver-default", "The queue is bounded.");
+    host.start_fact_verification(&payload).expect("send failed");
+    let result = host
+        .complete_fact_verification("ver-default", REVIEW_TIMEOUT)
+        .expect("completion failed");
+    assert_eq!(result.verification_id, "ver-default");
+    assert_eq!(result.verdict, FactVerificationVerdict::Insufficient);
+    assert!(result.failure.is_none());
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+#[test]
+fn fact_verification_honors_scripted_fake_verdicts_and_faults() {
+    let mut host = HostProcess::spawn(&fake_launch(
+        None,
+        &[(
+            "NISSE_FAKE_FACT_VERIFICATION_VERDICTS",
+            "supported,contradicted",
+        )],
+    ))
+    .expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+
+    for expected in [
+        FactVerificationVerdict::Supported,
+        FactVerificationVerdict::Contradicted,
+        // Exhausted script falls back to insufficient.
+        FactVerificationVerdict::Insufficient,
+    ] {
+        let id = format!("ver-{expected:?}");
+        let payload = verification_payload(&id, "The queue is bounded.");
+        host.start_fact_verification(&payload).expect("send failed");
+        let result = host
+            .complete_fact_verification(&id, REVIEW_TIMEOUT)
+            .expect("completion failed");
+        assert_eq!(result.verdict, expected);
+        assert!(result.failure.is_none());
+    }
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+
+    // The scripted failure forces insufficient plus an error.
+    let mut host = HostProcess::spawn(&fake_launch(
+        None,
+        &[("NISSE_FAKE_FACT_VERIFICATION_FAIL", "1")],
+    ))
+    .expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+    let payload = verification_payload("ver-fail", "The queue is bounded.");
+    host.start_fact_verification(&payload).expect("send failed");
+    let result = host
+        .complete_fact_verification("ver-fail", REVIEW_TIMEOUT)
+        .expect("completion failed");
+    assert_eq!(result.verdict, FactVerificationVerdict::Insufficient);
+    assert!(
+        result
+            .failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("scripted_fake_failure")),
+        "failure: {:?}",
+        result.failure
+    );
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+#[test]
+fn fact_verification_mismatched_ids_are_typed_errors() {
+    let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+
+    let payload = verification_payload("ver-real", "The queue is bounded.");
+    host.start_fact_verification(&payload).expect("send failed");
+    let err = host
+        .complete_fact_verification("ver-other", REVIEW_TIMEOUT)
+        .expect_err("mismatched id must fail");
+    assert!(
+        matches!(err, HostError::UnexpectedHostMessage { ref reason } if reason.contains("ver-real")),
+        "{err:?}"
+    );
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+#[test]
+fn fact_verification_rejects_malformed_payloads() {
+    let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+
+    // Missing evidence: the payload never reaches a session.
+    host.send_raw_line(
+        r#"{"protocol_version":1,"id":"x-9","type":"start_fact_verification","verification_id":"v","timeout_ms":5000,"model_profile":"standard","thinking_level":"medium","claim":"c","evidence":[]}"#,
+    )
+    .expect("write failed");
+    match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
+        HostEvent::HostError(info) => {
+            assert_eq!(info.code, "invalid_payload");
+            assert!(info.message.contains("evidence"), "{info:?}");
+        }
+        other => panic!("expected host_error, got {other:?}"),
+    }
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
 }

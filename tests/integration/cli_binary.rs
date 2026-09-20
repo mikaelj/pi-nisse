@@ -18,9 +18,10 @@ fn version_prints_to_stdout_with_zero_exit() {
 
 #[test]
 fn unimplemented_review_subcommand_fails_on_stderr_only() {
+    // `records pending` is implemented (milestone 18); every remaining
+    // future command must fail with a typed NotImplemented error.
     for args in [
         vec!["feedback", "01J8Z", "01J8Y", "--fixed"],
-        vec!["records", "pending"],
         vec!["records", "compact"],
         vec!["eval", "routing"],
         vec!["mcp"],

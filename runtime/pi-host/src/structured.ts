@@ -178,6 +178,18 @@ export const EQUIVALENCE_VERDICTS = ["same", "different", "uncertain"] as const;
 
 export type EquivalenceVerdict = (typeof EQUIVALENCE_VERDICTS)[number];
 
+/** Verdicts of independent fact verification (plan section 47). */
+export const FACT_VERIFICATION_VERDICTS = [
+  "supported",
+  "contradicted",
+  "insufficient",
+] as const;
+
+export type FactVerificationVerdict = (typeof FACT_VERIFICATION_VERDICTS)[number];
+
+/** Maximum evidence entries of one `start_fact_verification` payload. */
+export const MAX_FACT_EVIDENCE_ENTRIES = 16;
+
 export type ReviewerTool = (typeof REVIEWER_TOOLS)[number];
 
 export interface ContextEntry {
@@ -315,6 +327,41 @@ export interface DomainDescriptionRequest {
 /** The `host_config` payload: resolved model profiles by name. */
 export interface HostConfig {
   readonly models: ReadonlyMap<string, HostModelProfilePayload>;
+}
+
+/** The `start_fact_verification` payload (plan section 47 step 2):
+ * one exact claim plus the exact evidence excerpts a fresh verifier
+ * session must judge. */
+export interface FactVerificationRequest {
+  readonly verification_id: string;
+  readonly timeout_ms: number;
+  readonly model_profile: string;
+  readonly thinking_level: (typeof THINKING_LEVELS)[number];
+  readonly claim: string;
+  readonly evidence: readonly EvidenceRef[];
+}
+
+/** Validate a `start_fact_verification` payload. */
+export function validateFactVerificationRequest(value: unknown): FactVerificationRequest {
+  const object = requireObject(value, "start_fact_verification payload");
+  const evidence = object["evidence"];
+  if (!Array.isArray(evidence)) {
+    throw new ValidationError("`evidence` must be an array");
+  }
+  if (evidence.length === 0) {
+    throw new ValidationError("`evidence` must not be empty");
+  }
+  if (evidence.length > MAX_FACT_EVIDENCE_ENTRIES) {
+    throw new ValidationError(`\`evidence\` exceeds ${MAX_FACT_EVIDENCE_ENTRIES} entries`);
+  }
+  return {
+    verification_id: requireNonEmptyString(object, "verification_id"),
+    timeout_ms: requirePositiveInteger(object, "timeout_ms"),
+    model_profile: requireNonEmptyString(object, "model_profile"),
+    thinking_level: requireEnum(object, "thinking_level", THINKING_LEVELS),
+    claim: requireNonEmptyString(object, "claim"),
+    evidence: evidence.map(validateEvidenceRef),
+  };
 }
 
 export function validateContextEntry(value: unknown): ContextEntry {
