@@ -11,8 +11,10 @@ use crate::jury::review::MAX_PLAN_BYTES;
 /// Typed application errors.
 #[derive(Debug, Error)]
 pub enum AppError {
-    /// The command is part of the frozen CLI contract but its implementation
-    /// belongs to a later milestone.
+    /// A frozen command whose implementation belongs to a later
+    /// milestone. Since milestone 26 completed the frozen CLI surface
+    /// (plan section 61) no command produces this error; it stays part
+    /// of the typed error surface for boundary callers.
     #[error("`{0}` is not implemented yet")]
     NotImplemented(String),
 
@@ -80,7 +82,9 @@ impl App {
                 crate::cli::EvalCommand::Routing => self.run_eval_routing(),
                 crate::cli::EvalCommand::Retrieval => self.run_eval_retrieval(),
             },
-            Command::Mcp => Err(AppError::NotImplemented("nisse mcp".to_string())),
+            // The MCP stdio server is a long-running operation: it owns
+            // the process stdio until the client disconnects.
+            Command::Mcp => crate::mcp::run_server().map_err(AppError::from),
         }
     }
 
@@ -103,23 +107,78 @@ impl App {
 
     /// Run `nisse review plan` (plan sections 58 and 59).
     ///
-    /// Executes the complete plan-review pipeline against the current
-    /// working-tree snapshot and prints the result (text, or the strict
-    /// `ReviewResult` JSON with `--json`). The local review event is
-    /// persisted in the shared cache. Optional providers (plan section
-    /// 34) improve routing and retrieval when configured; every
-    /// provider failure degrades to the deterministic behavior, so
-    /// reviews never require Needle, embeddings, or network access in
-    /// the deterministic runtimes.
+    /// Thin CLI wrapper around [`App::plan_review_operation`]: read the
+    /// plan input, run the shared operation, and print the result (text,
+    /// or the strict `ReviewResult` JSON with `--json`).
     fn run_review_plan(&self, source: crate::cli::PlanSource, json: bool) -> Result<(), AppError> {
-        use crate::config;
-        use crate::git::{SnapshotSpec, resolve_snapshot};
-        use crate::jury::review::{
-            PlanInput, PlanReviewOptions, host_launch_from_env, render_review_text, run_plan_review,
-        };
+        use crate::jury::review::render_review_text;
 
         let (text, file) = read_plan_source(&source)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
+
+        // The plan file participates in the working snapshot when it
+        // lives inside the worktree (untracked non-ignored content is
+        // part of the target); compute its repository-relative path so
+        // evidence can cite it.
+        let plan_path = file
+            .as_deref()
+            .and_then(|file| self.plan_path_in_repo(file));
+        let plan = crate::jury::review::PlanInput {
+            text,
+            path: plan_path,
+        };
+
+        let result = self.plan_review_operation(plan)?;
+
+        let rendered = if json {
+            serde_json::to_string(&result)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?
+        } else {
+            render_review_text(&result)
+        };
+        print_to_stdout(&rendered);
+        Ok(())
+    }
+
+    /// Run `nisse review code` (plan sections 58 and 60).
+    ///
+    /// Thin CLI wrapper around [`App::code_review_operation`]: map the
+    /// CLI scope flags to the snapshot specification, run the shared
+    /// operation, and print the result (text, or the strict
+    /// `ReviewResult` JSON with `--json`).
+    fn run_review_code(&self, scope: crate::cli::CodeScope, json: bool) -> Result<(), AppError> {
+        use crate::jury::review::render_review_text;
+
+        let spec = code_scope_spec(&scope)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+
+        let result = self.code_review_operation(spec)?;
+
+        let rendered = if json {
+            serde_json::to_string(&result)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?
+        } else {
+            render_review_text(&result)
+        };
+        print_to_stdout(&rendered);
+        Ok(())
+    }
+
+    /// The complete plan-review operation shared by the CLI and the
+    /// MCP adapter (plan section 67): execute the plan-review pipeline
+    /// against the current working-tree snapshot and return the strict
+    /// `ReviewResult`. The local review event is persisted in the
+    /// shared cache. Optional providers (plan section 34) improve
+    /// routing and retrieval when configured; every provider failure
+    /// degrades to the deterministic behavior, so reviews never
+    /// require Needle, embeddings, or network access in the
+    /// deterministic runtimes.
+    pub(crate) fn plan_review_operation(
+        &self,
+        plan: crate::jury::review::PlanInput,
+    ) -> Result<crate::domain::review::ReviewResult, AppError> {
+        use crate::git::{SnapshotSpec, resolve_snapshot};
+        use crate::jury::review::{PlanReviewOptions, run_plan_review};
 
         let (ctx, paths) = self.discover_storage()?;
         let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).map_err(|err| {
@@ -128,75 +187,30 @@ impl App {
             ))
         })?;
 
-        // Trusted local configuration supplies the model profiles the
-        // host may use; reviewer sessions never inherit a model. The
-        // optional classifier/embedding providers come from the same
-        // trusted configuration.
-        let user_path = config::paths::user_config_path();
-        let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
-        let loaded =
-            config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
-                AppError::Other(anyhow::anyhow!(
-                    "review plan failed to load configuration: {err}"
-                ))
-            })?;
-
-        let launch = host_launch_from_env()
-            .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
-        let mut options = PlanReviewOptions::new(launch);
-        options.model_profiles = loaded.config.model_profiles.clone();
-        options.contributor_id = loaded
-            .config
-            .contributor
-            .as_ref()
-            .map(|contributor| contributor.id.clone());
-        let providers = optional_providers(&loaded.config);
-        options.routing_provider = providers.routing;
-        options.embedding_provider = providers.embeddings;
-
-        // The plan file participates in the working snapshot when it
-        // lives inside the worktree (untracked non-ignored content is
-        // part of the target); compute its repository-relative path so
-        // evidence can cite it.
-        let plan_path = file.as_deref().and_then(|file| repo_relative(&ctx, file));
-        let plan = PlanInput {
-            text,
-            path: plan_path,
-        };
+        let environment = self.review_environment(&ctx, "review plan")?;
+        let mut options = PlanReviewOptions::new(environment.launch);
+        options.model_profiles = environment.model_profiles;
+        options.contributor_id = environment.contributor_id;
+        options.routing_provider = environment.routing_provider;
+        options.embedding_provider = environment.embedding_provider;
 
         let outcome = run_plan_review(&ctx, &resolved, &paths, &plan, &options)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
-
-        let rendered = if json {
-            serde_json::to_string(&outcome.result)
-                .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?
-        } else {
-            render_review_text(&outcome.result)
-        };
-        print_to_stdout(&rendered);
-        Ok(())
+        Ok(outcome.result)
     }
 
-    /// Run `nisse review code` (plan sections 58 and 60).
-    ///
-    /// Executes the complete code-review pipeline for the selected
-    /// snapshot mode (`--working`, `--staged`, `--commit`, `--range`,
-    /// `--branch`) and prints the result (text, or the strict
-    /// `ReviewResult` JSON with `--json`). The local review event is
-    /// persisted in the shared cache. Optional providers (plan section
-    /// 34) improve routing and retrieval when configured; every
-    /// provider failure degrades to the deterministic behavior, so
-    /// reviews never require Needle, embeddings, or network access in
-    /// the deterministic runtimes.
-    fn run_review_code(&self, scope: crate::cli::CodeScope, json: bool) -> Result<(), AppError> {
-        use crate::config;
+    /// The complete code-review operation shared by the CLI and the
+    /// MCP adapter (plan section 67): execute the code-review pipeline
+    /// for the given snapshot mode and return the strict
+    /// `ReviewResult`. The local review event is persisted in the
+    /// shared cache. Provider semantics are those of
+    /// [`App::plan_review_operation`].
+    pub(crate) fn code_review_operation(
+        &self,
+        spec: crate::git::SnapshotSpec,
+    ) -> Result<crate::domain::review::ReviewResult, AppError> {
         use crate::git::resolve_snapshot;
-        use crate::jury::review::{
-            CodeReviewOptions, host_launch_from_env, render_review_text, run_code_review,
-        };
-
-        let spec = code_scope_spec(&scope)
-            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+        use crate::jury::review::{CodeReviewOptions, run_code_review};
 
         let (ctx, paths) = self.discover_storage()?;
         let resolved = resolve_snapshot(&ctx, &spec).map_err(|err| {
@@ -205,58 +219,95 @@ impl App {
             ))
         })?;
 
-        // Trusted local configuration supplies the model profiles the
-        // host may use; reviewer sessions never inherit a model. The
-        // optional classifier/embedding providers come from the same
-        // trusted configuration.
+        let environment = self.review_environment(&ctx, "review code")?;
+        let mut options = CodeReviewOptions::new(environment.launch);
+        options.model_profiles = environment.model_profiles;
+        options.contributor_id = environment.contributor_id;
+        options.routing_provider = environment.routing_provider;
+        options.embedding_provider = environment.embedding_provider;
+
+        let outcome = run_code_review(&ctx, &resolved, &paths, &options)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+        Ok(outcome.result)
+    }
+
+    /// The trusted review environment shared by both review
+    /// operations: host launch selection, model profiles, contributor
+    /// identity, and the optional classifier/embedding providers
+    /// (plan sections 10 and 34). Reviewer sessions never inherit a
+    /// model; the optional providers come from trusted local
+    /// configuration.
+    fn review_environment(
+        &self,
+        ctx: &crate::git::RepoContext,
+        operation: &str,
+    ) -> Result<ReviewEnvironment, AppError> {
+        use crate::config;
+        use crate::jury::review::host_launch_from_env;
+
         let user_path = config::paths::user_config_path();
         let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
             config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
                 AppError::Other(anyhow::anyhow!(
-                    "review code failed to load configuration: {err}"
+                    "{operation} failed to load configuration: {err}"
                 ))
             })?;
-
-        let launch = host_launch_from_env()
-            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
-        let mut options = CodeReviewOptions::new(launch);
-        options.model_profiles = loaded.config.model_profiles.clone();
-        options.contributor_id = loaded
-            .config
-            .contributor
-            .as_ref()
-            .map(|contributor| contributor.id.clone());
         let providers = optional_providers(&loaded.config);
-        options.routing_provider = providers.routing;
-        options.embedding_provider = providers.embeddings;
+        Ok(ReviewEnvironment {
+            launch: host_launch_from_env()
+                .map_err(|err| AppError::Other(anyhow::anyhow!("{operation} failed: {err}")))?,
+            model_profiles: loaded.config.model_profiles.clone(),
+            contributor_id: loaded
+                .config
+                .contributor
+                .as_ref()
+                .map(|contributor| contributor.id.clone()),
+            routing_provider: providers.routing,
+            embedding_provider: providers.embeddings,
+        })
+    }
 
-        let outcome = run_code_review(&ctx, &resolved, &paths, &options)
-            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+    /// Repository-relative form of a plan file inside the worktree,
+    /// or `None` (a failed discovery is surfaced by the operation that
+    /// follows).
+    fn plan_path_in_repo(&self, file: &std::path::Path) -> Option<String> {
+        let (ctx, _) = self.discover_storage().ok()?;
+        repo_relative(&ctx, file)
+    }
 
+    /// Run `nisse query`.
+    ///
+    /// Thin CLI wrapper around [`App::query_operation`]: run the
+    /// shared retrieval pipeline and print the result (text, or the
+    /// strict report JSON with `--json`).
+    fn run_query(&self, query: String, json: bool) -> Result<(), AppError> {
+        use crate::retrieval::{render_json, render_text};
+
+        let outcome = self.query_operation(query)?;
         let rendered = if json {
-            serde_json::to_string(&outcome.result)
-                .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?
+            render_json(&outcome.query, &outcome.snapshot, &outcome.bundle)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?
         } else {
-            render_review_text(&outcome.result)
+            render_text(&outcome.query, &outcome.snapshot, &outcome.bundle)
         };
         print_to_stdout(&rendered);
         Ok(())
     }
 
-    /// Run `nisse query`.
-    ///
-    /// Queries the durable project knowledge and the source index of
-    /// the current working-tree snapshot. The index is refreshed
-    /// lazily on demand (plan section 28); retrieval is deterministic
-    /// and never requires an LLM. A configured embedding provider
-    /// (plan section 34) reranks the bounded candidate set; provider
-    /// failures degrade to the baseline ranking.
-    fn run_query(&self, query: String, json: bool) -> Result<(), AppError> {
+    /// The complete project-query operation shared by the CLI and the
+    /// MCP adapter (plan section 67): lazily refresh the source index
+    /// of the current working-tree snapshot, load the durable records
+    /// and built-in practices, mark potentially stale facts (plan
+    /// section 48), and run the deterministic retrieval. An optional
+    /// embedding provider (plan section 34) reranks the bounded
+    /// candidate set; provider failures degrade to the baseline
+    /// ranking. No LLM is involved.
+    pub(crate) fn query_operation(&self, query: String) -> Result<QueryOutcome, AppError> {
         use crate::git::{SnapshotSpec, resolve_snapshot};
         use crate::index::refresh_index;
         use crate::jury::catalog::Catalog;
-        use crate::retrieval::{RetrievalQuery, Retriever, render_json, render_text};
+        use crate::retrieval::{RetrievalQuery, Retriever};
         use crate::storage::records::RecordStore;
 
         let (ctx, paths) = self.discover_storage()?;
@@ -314,14 +365,11 @@ impl App {
             .lookup(&retrieval_query)
             .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
 
-        let rendered = if json {
-            render_json(&query, &resolved.descriptor, &bundle)
-                .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?
-        } else {
-            render_text(&query, &resolved.descriptor, &bundle)
-        };
-        print_to_stdout(&rendered);
-        Ok(())
+        Ok(QueryOutcome {
+            query,
+            snapshot: resolved.descriptor,
+            bundle,
+        })
     }
 
     /// Run `nisse records list`.
@@ -360,14 +408,12 @@ impl App {
 
     /// Run `nisse feedback` (plan sections 49 and 50).
     ///
-    /// Records a known outcome for one finding of a stored review as
-    /// immutable durable observations. Rust constructs every
-    /// authoritative observation field from the stored review, the
-    /// stored finding, the explicit outcome, and the review's snapshot
-    /// descriptors; LLMs construct nothing. Submission is idempotent,
-    /// outcomes are immutable, and without a contributor identity the
-    /// outcome remains pending locally (plan section 44) while the
-    /// command fails explicitly.
+    /// Thin CLI wrapper around [`App::feedback_operation`]: record a
+    /// known outcome for one finding of a stored review and print the
+    /// confirmation. Rust constructs every authoritative observation
+    /// field from the stored review, the stored finding, the explicit
+    /// outcome, and the review's snapshot descriptors; LLMs construct
+    /// nothing.
     fn run_feedback(
         &self,
         review_id: String,
@@ -381,6 +427,30 @@ impl App {
                 "exactly one feedback outcome flag is required"
             )));
         };
+
+        let recording = self.feedback_operation(&review_id, &finding_id, outcome)?;
+        print_to_stdout(&feedback::render_feedback(
+            &review_id,
+            &finding_id,
+            outcome,
+            &recording,
+        ));
+        Ok(())
+    }
+
+    /// The feedback operation shared by the CLI and the MCP adapter
+    /// (plan section 67): record a known outcome for one finding of a
+    /// stored review as immutable durable observations. Submission is
+    /// idempotent, outcomes are immutable, and without a contributor
+    /// identity the outcome remains pending locally (plan section 44)
+    /// while the operation fails explicitly.
+    pub(crate) fn feedback_operation(
+        &self,
+        review_id: &str,
+        finding_id: &str,
+        outcome: crate::domain::records::FeedbackOutcome,
+    ) -> Result<crate::learning::feedback::FeedbackRecording, AppError> {
+        use crate::learning::feedback;
 
         let (ctx, paths) = self.discover_storage()?;
 
@@ -400,23 +470,15 @@ impl App {
             .as_ref()
             .map(|contributor| contributor.id.clone());
 
-        let recording = feedback::record_feedback(
+        feedback::record_feedback(
             &ctx,
             &paths,
-            &review_id,
-            &finding_id,
+            review_id,
+            finding_id,
             outcome,
             contributor.as_deref(),
         )
-        .map_err(|err| AppError::Other(anyhow::anyhow!("feedback failed: {err}")))?;
-
-        print_to_stdout(&feedback::render_feedback(
-            &review_id,
-            &finding_id,
-            outcome,
-            &recording,
-        ));
-        Ok(())
+        .map_err(|err| AppError::Other(anyhow::anyhow!("feedback failed: {err}")))
     }
 
     /// Run `nisse records compact` (plan sections 52–56).
@@ -744,6 +806,35 @@ struct OptionalProviders {
     embeddings: Option<std::sync::Arc<dyn crate::providers::EmbeddingProvider>>,
 }
 
+/// The trusted review environment shared by the CLI and the MCP
+/// adapter (see [`App::review_environment`]). (Not `Debug`: the
+/// optional provider handles are opaque trait objects.)
+struct ReviewEnvironment {
+    /// How to launch the Pi review host child process.
+    launch: crate::jury::host::PiHostLaunch,
+    /// Model profiles the host may use, from trusted local
+    /// configuration.
+    model_profiles: std::collections::BTreeMap<String, crate::domain::model::ModelProfile>,
+    /// Contributor identity for durable knowledge created by the
+    /// review (plan section 44).
+    contributor_id: Option<String>,
+    /// Optional routing classifier blended into the rules decision.
+    routing_provider: Option<std::sync::Arc<dyn crate::providers::RoutingClassifierProvider>>,
+    /// Optional embedding provider reranking retrieval results.
+    embedding_provider: Option<std::sync::Arc<dyn crate::providers::EmbeddingProvider>>,
+}
+
+/// The result of the shared query operation: everything the text and
+/// JSON renderers need.
+pub(crate) struct QueryOutcome {
+    /// The original query text.
+    pub(crate) query: String,
+    /// The working-tree snapshot the answer was retrieved from.
+    pub(crate) snapshot: crate::domain::snapshot::SnapshotDescriptor,
+    /// The bounded retrieval bundle.
+    pub(crate) bundle: crate::domain::context::ContextBundle,
+}
+
 /// Read the plan input from `--file <path>` or `--stdin` (exactly one
 /// is set; the CLI enforces it). The input is bounded to
 /// [`MAX_PLAN_BYTES`](crate::jury::review::MAX_PLAN_BYTES).
@@ -820,22 +911,11 @@ pub fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn every_frozen_command_is_typed_not_implemented() {
-        let app = App::new();
-
-        // Evaluation commands are implemented (milestone 23); the MCP
-        // server remains a future milestone.
-        let cases: Vec<Command> = vec![Command::Mcp];
-
-        for command in cases {
-            let err = app.run(command).unwrap_err();
-            assert!(
-                matches!(err, AppError::NotImplemented(_)),
-                "expected NotImplemented, got {err:?}"
-            );
-        }
-    }
+    // The complete frozen command surface (plan section 61) dispatches
+    // to real implementations since milestone 26: `nisse mcp` was the
+    // last remaining `NotImplemented` arm. `AppError::NotImplemented`
+    // stays part of the typed error surface, but no frozen command
+    // produces it; dispatch behavior is proven by the binary-level
+    // integration tests (`tests/integration/`), including the MCP
+    // server lifecycle in `mcp_binary.rs`.
 }

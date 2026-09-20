@@ -17,22 +17,36 @@ fn version_prints_to_stdout_with_zero_exit() {
 }
 
 #[test]
-fn unimplemented_review_subcommand_fails_on_stderr_only() {
-    // `eval routing` and `eval retrieval` (milestone 23) are
-    // implemented; the MCP server remains a future command and must
-    // fail with a typed NotImplemented error.
-    let out = run_nisse(&["mcp"]);
-    assert!(!out.status.success(), "mcp must fail before its milestone");
+fn mcp_with_immediate_stdin_eof_exits_cleanly_and_silently() {
+    // `nisse mcp` is implemented (milestone 26). With no client
+    // connected (stdin at immediate EOF), the server must start,
+    // shut down cleanly, and write nothing to either stream: stdout
+    // is reserved for protocol messages and there was no exchange,
+    // logs belong to stderr (RUST_LOG=off here). The full protocol
+    // lifecycle is covered by `mcp_binary.rs`.
+    use std::process::Stdio;
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nisse"));
+    command
+        .arg("mcp")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("RUST_LOG", "off");
+    let out = command.output().expect("spawn nisse mcp");
+    assert!(
+        out.status.success(),
+        "the server must exit cleanly on stdin EOF: {out:?}"
+    );
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         "",
-        "mcp must not write to stdout"
+        "no protocol messages were exchanged, so stdout must be empty"
     );
-    assert!(
-        String::from_utf8(out.stderr)
-            .unwrap()
-            .contains("not implemented"),
-        "mcp must report a typed NotImplemented error on stderr"
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "",
+        "the server must not log without a reason"
     );
 }
 
