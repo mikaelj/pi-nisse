@@ -14,18 +14,19 @@
 //!
 //! plus type-specific payload fields flattened into the same object.
 //!
-//! The vocabulary below is the complete frozen set from plan section 21.
-//! Message types belonging to later milestones are declared as constants so
-//! both sides agree on the vocabulary. This milestone implements the core
-//! review loop (`host_ready`, `start_review`, `reviewer_started`,
-//! `reviewer_completed`, `reviewer_failed`, `tool_request`,
-//! `tool_response`, `cancel`, `host_error`), the narrow
+//! The vocabulary below is the complete frozen set from plan section 21;
+//! every entry is implemented by this build. The implemented exchanges
+//! are the core review loop (`host_ready`, `start_review`,
+//! `reviewer_started`, `reviewer_completed`, `reviewer_failed`,
+//! `tool_request`, `tool_response`, `cancel`, `host_error`), the narrow
 //! `start_finding_equivalence_check` / `finding_equivalence_completed`
 //! exchange of finding consolidation (plan section 38), the constrained
 //! `start_domain_description` / `domain_description_completed` exchange of
-//! the dynamic domain expert (plan section 19), and the independent
+//! the dynamic domain expert (plan section 19), the independent
 //! `start_fact_verification` / `fact_verification_completed` exchange of
-//! fact persistence (plan section 47). Receiving a
+//! fact persistence (plan section 47), and the fresh
+//! `start_fact_synthesis` / `fact_synthesis_completed` exchange of
+//! knowledge consolidation (plan section 54). Receiving a
 //! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
 
 use serde::{Deserialize, Serialize};
@@ -51,13 +52,14 @@ pub mod rust_to_host {
     pub const HOST_CONFIG: &str = "host_config";
     /// Start a review: execute the given reviewer specs.
     pub const START_REVIEW: &str = "start_review";
-    /// Start an independent fact verification job (later milestone).
+    /// Start an independent fact verification job (plan section 47).
     pub const START_FACT_VERIFICATION: &str = "start_fact_verification";
-    /// Start an independent fact synthesis job (later milestone).
+    /// Start a fresh fact synthesis job (plan section 54).
     pub const START_FACT_SYNTHESIS: &str = "start_fact_synthesis";
-    /// Start a constrained dynamic-domain description job (later milestone).
+    /// Start a constrained dynamic-domain description job (plan
+    /// section 19).
     pub const START_DOMAIN_DESCRIPTION: &str = "start_domain_description";
-    /// Start a narrow finding equivalence check (later milestone).
+    /// Start a narrow finding equivalence check (plan section 38).
     pub const START_FINDING_EQUIVALENCE_CHECK: &str = "start_finding_equivalence_check";
     /// Answer a `tool_request` from the host.
     pub const TOOL_RESPONSE: &str = "tool_response";
@@ -89,13 +91,14 @@ pub mod host_to_rust {
     pub const REVIEWER_FAILED: &str = "reviewer_failed";
     /// The host needs a read-only lookup served by Rust.
     pub const TOOL_REQUEST: &str = "tool_request";
-    /// Independent fact verification finished (later milestone).
+    /// Independent fact verification finished (plan section 47).
     pub const FACT_VERIFICATION_COMPLETED: &str = "fact_verification_completed";
-    /// Independent fact synthesis finished (later milestone).
+    /// Fresh fact synthesis finished (plan section 54).
     pub const FACT_SYNTHESIS_COMPLETED: &str = "fact_synthesis_completed";
-    /// Constrained dynamic-domain description finished (later milestone).
+    /// Constrained dynamic-domain description finished (plan section
+    /// 19).
     pub const DOMAIN_DESCRIPTION_COMPLETED: &str = "domain_description_completed";
-    /// Narrow finding equivalence check finished (later milestone).
+    /// Narrow finding equivalence check finished (plan section 38).
     pub const FINDING_EQUIVALENCE_COMPLETED: &str = "finding_equivalence_completed";
     /// The host reports a protocol-level failure.
     pub const HOST_ERROR: &str = "host_error";
@@ -362,6 +365,17 @@ pub enum HostEvent {
         verdict: FactVerificationVerdict,
         /// Why the verifier could not decide, when its session failed;
         /// only permitted with the `insufficient` verdict.
+        error: Option<HostErrorInfo>,
+    },
+    /// A fresh fact-synthesis job finished (plan section 54 step 5).
+    FactSynthesisCompleted {
+        /// Correlation identifier of the answered synthesis job.
+        synthesis_id: String,
+        /// The synthesis result: the merged candidate statement, a
+        /// refusal to merge, or `None` when the session failed.
+        result: Option<FactSynthesisResult>,
+        /// Why the session failed, when it did; only permitted without
+        /// a `result`.
         error: Option<HostErrorInfo>,
     },
     /// The host reported a protocol-level failure.
@@ -714,6 +728,63 @@ pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> 
                 error: payload.error,
             })
         }
+        host_to_rust::FACT_SYNTHESIS_COMPLETED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                synthesis_id: String,
+                #[serde(default)]
+                candidate: Option<String>,
+                #[serde(default)]
+                cannot_merge: Option<bool>,
+                #[serde(default)]
+                error: Option<HostErrorInfo>,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.synthesis_id, "synthesis_id", &invalid)?;
+            let present = [
+                payload.candidate.is_some(),
+                payload.cannot_merge.unwrap_or(false),
+                payload.error.is_some(),
+            ]
+            .iter()
+            .filter(|flag| **flag)
+            .count();
+            if present != 1 {
+                return Err(invalid(
+                    "exactly one of `candidate`, `cannot_merge`, or `error` must be present"
+                        .to_string(),
+                ));
+            }
+            if let Some(error) = &payload.error {
+                require_valid_error(error, &invalid)?;
+            }
+            if let Some(false) = payload.cannot_merge {
+                return Err(invalid("`cannot_merge` must be `true`".to_string()));
+            }
+            let result = if let Some(candidate) = payload.candidate {
+                if candidate.trim().is_empty() {
+                    return Err(invalid("`candidate` must be non-empty".to_string()));
+                }
+                if candidate.len() > crate::domain::records::MAX_TEXT_BYTES {
+                    return Err(invalid(format!(
+                        "`candidate` exceeds {} bytes",
+                        crate::domain::records::MAX_TEXT_BYTES
+                    )));
+                }
+                Some(FactSynthesisResult::Merged { candidate })
+            } else if payload.cannot_merge == Some(true) {
+                Some(FactSynthesisResult::CannotMerge)
+            } else {
+                None
+            };
+            Ok(HostEvent::FactSynthesisCompleted {
+                synthesis_id: payload.synthesis_id,
+                result,
+                error: payload.error,
+            })
+        }
         other => Err(ProtocolError::UnsupportedMessageType(other.to_string())),
     }
 }
@@ -814,6 +885,18 @@ pub struct FindingEquivalenceOutcome {
     pub error: Option<HostErrorInfo>,
 }
 
+/// The resolved outcome of one fact-synthesis job (plan section 54
+/// step 5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactSynthesisOutcome {
+    /// Correlation identifier of the job.
+    pub synthesis_id: String,
+    /// The synthesis result; `None` when the session failed.
+    pub result: Option<FactSynthesisResult>,
+    /// Why the session failed, when it did.
+    pub error: Option<HostErrorInfo>,
+}
+
 /// Maximum number of entries each list of a
 /// [`DynamicDomainDescription`] may carry on the wire.
 pub const MAX_DOMAIN_DESCRIPTION_TERMS: usize = 16;
@@ -897,6 +980,124 @@ impl StartFactVerificationMessage {
             &self.id,
             &self.payload,
         )
+    }
+}
+
+/// Maximum recorded facts of one `start_fact_synthesis` payload.
+pub const MAX_FACT_SYNTHESIS_FACTS: usize = 16;
+
+/// One recorded fact of a synthesis job (plan section 54 step 5): its
+/// exact statement plus the exact evidence excerpts backing it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactSynthesisInput {
+    /// The fact statement.
+    pub text: String,
+    /// The evidence excerpts backing the statement.
+    pub evidence: Vec<EvidenceRef>,
+}
+
+/// `start_fact_synthesis` payload (plan section 54 step 5): the
+/// subject and the recorded facts one fresh synthesis session must
+/// try to merge into *the narrowest statement supported by the
+/// supplied facts and their evidence*, plus the explicit bounds of
+/// that session. Rust owns the job identity, the model selection, and
+/// the timeout; the synthesizer receives no tools, can never invent
+/// provenance, and must refuse (`CANNOT_MERGE`) rather than
+/// compromise when the supplied facts disagree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactSynthesisPayload {
+    /// Correlation identifier of this job (assigned by Rust).
+    pub synthesis_id: String,
+    /// Session timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Explicitly configured model profile for the session.
+    pub model_profile: String,
+    /// Explicit thinking level for the session.
+    pub thinking_level: crate::domain::model::ThinkingLevel,
+    /// The subject the supplied facts are about.
+    pub subject: String,
+    /// The recorded facts (statement plus evidence each).
+    pub facts: Vec<FactSynthesisInput>,
+}
+
+impl FactSynthesisPayload {
+    /// Validate the deterministic construction bounds: a non-empty
+    /// bounded fact list whose entries carry non-empty bounded
+    /// statements and non-empty bounded evidence.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.subject.trim().is_empty() {
+            return Err("`subject` must be non-empty".to_string());
+        }
+        if self.subject.len() > crate::domain::records::MAX_SUBJECT_BYTES {
+            return Err(format!(
+                "`subject` exceeds {} bytes",
+                crate::domain::records::MAX_SUBJECT_BYTES
+            ));
+        }
+        if self.facts.is_empty() {
+            return Err("`facts` must not be empty".to_string());
+        }
+        if self.facts.len() > MAX_FACT_SYNTHESIS_FACTS {
+            return Err(format!(
+                "`facts` exceeds {MAX_FACT_SYNTHESIS_FACTS} entries"
+            ));
+        }
+        for fact in &self.facts {
+            if fact.text.trim().is_empty() {
+                return Err("`facts[].text` must be non-empty".to_string());
+            }
+            if fact.text.len() > crate::domain::records::MAX_TEXT_BYTES {
+                return Err(format!(
+                    "`facts[].text` exceeds {} bytes",
+                    crate::domain::records::MAX_TEXT_BYTES
+                ));
+            }
+            if fact.evidence.is_empty() {
+                return Err("`facts[].evidence` must not be empty".to_string());
+            }
+            if fact.evidence.len() > crate::learning::facts::MAX_FACT_EVIDENCE {
+                return Err(format!(
+                    "`facts[].evidence` exceeds {} entries",
+                    crate::learning::facts::MAX_FACT_EVIDENCE
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The result of one fact-synthesis job (plan section 54 step 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactSynthesisResult {
+    /// The narrowest statement supported by the supplied facts and
+    /// their evidence.
+    Merged {
+        /// The merged candidate statement.
+        candidate: String,
+    },
+    /// No safe merge exists: the supplied facts disagree or diverge,
+    /// and no compromise may be invented.
+    CannotMerge,
+}
+
+/// A Rust-to-host `start_fact_synthesis` message.
+#[derive(Debug, Clone)]
+pub struct StartFactSynthesisMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the synthesis job to execute.
+    pub payload: FactSynthesisPayload,
+}
+
+impl StartFactSynthesisMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: FactSynthesisPayload) -> Self {
+        StartFactSynthesisMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(rust_to_host::START_FACT_SYNTHESIS, &self.id, &self.payload)
     }
 }
 
@@ -1136,22 +1337,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_unsupported_types_are_typed_errors() {
+    fn unknown_types_are_typed_errors_and_every_vocabulary_type_parses() {
         let err = Envelope::parse_host_line(
             r#"{"protocol_version":1,"id":"h-1","type":"banana","runtime":"fake"}"#,
         )
         .unwrap_err();
         assert_eq!(err, ProtocolError::UnknownMessageType("banana".to_string()));
 
+        // Every frozen host-to-rust vocabulary entry is implemented by
+        // this build: a bare `fact_synthesis_completed` envelope now
+        // fails strict payload validation (not as an unsupported type).
         let envelope = Envelope::parse_host_line(
             r#"{"protocol_version":1,"id":"h-1","type":"fact_synthesis_completed"}"#,
         )
         .unwrap();
         let err = parse_host_event(envelope).unwrap_err();
-        assert_eq!(
-            err,
-            ProtocolError::UnsupportedMessageType("fact_synthesis_completed".to_string())
-        );
+        assert!(matches!(err, ProtocolError::InvalidPayload { .. }), "{err}");
     }
 
     #[test]
@@ -1529,6 +1730,169 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    #[test]
+    fn fact_synthesis_messages_roundtrip_strictly() {
+        let evidence = serde_json::json!({
+            "kind": "source",
+            "path": "src/queue.rs",
+            "line_start": 1,
+            "line_end": 3,
+            "excerpt": "pub struct Queue {"
+        });
+        let payload = FactSynthesisPayload {
+            synthesis_id: "syn-1".to_string(),
+            timeout_ms: 120_000,
+            model_profile: "standard".to_string(),
+            thinking_level: crate::domain::model::ThinkingLevel::Medium,
+            subject: "queue capacity".to_string(),
+            facts: vec![
+                FactSynthesisInput {
+                    text: "The sensor queue is bounded to 32 slots.".to_string(),
+                    evidence: vec![serde_json::from_value(evidence.clone()).unwrap()],
+                },
+                FactSynthesisInput {
+                    text: "The queue capacity is guarded by a mutex.".to_string(),
+                    evidence: vec![serde_json::from_value(evidence).unwrap()],
+                },
+            ],
+        };
+        payload.validate().unwrap();
+        let line = StartFactSynthesisMessage::new("m-7".to_string(), payload.clone()).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["type"], "start_fact_synthesis");
+        assert_eq!(value["id"], "m-7");
+        assert_eq!(value["synthesis_id"], "syn-1");
+        assert_eq!(value["subject"], "queue capacity");
+        assert_eq!(value["facts"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            value["facts"][0]["text"],
+            "The sensor queue is bounded to 32 slots."
+        );
+        assert!(!line.contains('\n'), "messages must be single lines");
+        let back: FactSynthesisPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(back, payload);
+
+        // A merged completion carries the candidate.
+        let merged = r#"{"protocol_version":1,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","candidate":"The sensor queue is bounded to 32 slots and guarded by a mutex."}"#;
+        let event = parse_host_event(Envelope::parse_host_line(merged).unwrap()).unwrap();
+        assert_eq!(
+            event,
+            HostEvent::FactSynthesisCompleted {
+                synthesis_id: "syn-1".to_string(),
+                result: Some(FactSynthesisResult::Merged {
+                    candidate: "The sensor queue is bounded to 32 slots and guarded by a mutex."
+                        .to_string(),
+                }),
+                error: None,
+            }
+        );
+
+        // A refusal carries `cannot_merge` and nothing else.
+        let refused = r#"{"protocol_version":1,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","cannot_merge":true}"#;
+        let event = parse_host_event(Envelope::parse_host_line(refused).unwrap()).unwrap();
+        assert_eq!(
+            event,
+            HostEvent::FactSynthesisCompleted {
+                synthesis_id: "syn-1".to_string(),
+                result: Some(FactSynthesisResult::CannotMerge),
+                error: None,
+            }
+        );
+
+        // A failed session carries an error and no result.
+        let failed = r#"{"protocol_version":1,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let event = parse_host_event(Envelope::parse_host_line(failed).unwrap()).unwrap();
+        assert_eq!(
+            event,
+            HostEvent::FactSynthesisCompleted {
+                synthesis_id: "syn-1".to_string(),
+                result: None,
+                error: Some(HostErrorInfo {
+                    code: "session_timeout".to_string(),
+                    message: "timed out".to_string(),
+                }),
+            }
+        );
+
+        // Malformed completions are rejected: nothing set, several set,
+        // empty candidate, `cannot_merge: false`, unknown fields.
+        for bad in [
+            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s"}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","candidate":"x","cannot_merge":true}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","cannot_merge":true,"error":{"code":"c","message":"m"}}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","candidate":"  "}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","cannot_merge":false}"#,
+            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","extra":1}"#,
+        ] {
+            let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
+            assert!(
+                matches!(err, ProtocolError::InvalidPayload { .. }),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fact_synthesis_payload_bounds_are_enforced() {
+        let evidence = serde_json::json!({
+            "kind": "plan",
+            "plan_section": "Approach",
+            "excerpt": "Move the queue behind a mutex."
+        });
+        let evidence: EvidenceRef = serde_json::from_value(evidence).unwrap();
+        let input = |text: &str, evidence_count: usize| FactSynthesisInput {
+            text: text.to_string(),
+            evidence: vec![evidence.clone(); evidence_count],
+        };
+
+        let base = |facts: Vec<FactSynthesisInput>| FactSynthesisPayload {
+            synthesis_id: "syn".to_string(),
+            timeout_ms: 1_000,
+            model_profile: "standard".to_string(),
+            thinking_level: crate::domain::model::ThinkingLevel::Medium,
+            subject: "queue capacity".to_string(),
+            facts,
+        };
+
+        assert!(base(vec![input("a fact", 1)]).validate().is_ok());
+        assert!(base(Vec::new()).validate().unwrap_err().contains("empty"));
+        assert!(
+            base(vec![input("a fact", 0)])
+                .validate()
+                .unwrap_err()
+                .contains("evidence")
+        );
+        assert!(
+            base(vec![input(
+                "a fact",
+                crate::learning::facts::MAX_FACT_EVIDENCE + 1
+            )])
+            .validate()
+            .unwrap_err()
+            .contains("evidence")
+        );
+        assert!(
+            base(
+                (0..MAX_FACT_SYNTHESIS_FACTS + 1)
+                    .map(|_| input("a fact", 1))
+                    .collect()
+            )
+            .validate()
+            .unwrap_err()
+            .contains("exceeds")
+        );
+        assert!(
+            base(vec![input(
+                &"x".repeat(crate::domain::records::MAX_TEXT_BYTES + 1),
+                1
+            )])
+            .validate()
+            .unwrap_err()
+            .contains("text")
+        );
     }
 
     #[test]

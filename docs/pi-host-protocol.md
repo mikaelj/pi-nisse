@@ -47,7 +47,7 @@ Nisse Core → host:
 | `host_config` | active |
 | `start_review` | active |
 | `start_fact_verification` | active |
-| `start_fact_synthesis` | reserved |
+| `start_fact_synthesis` | active |
 | `start_domain_description` | active |
 | `start_finding_equivalence_check` | active |
 | `tool_response` | active |
@@ -63,7 +63,7 @@ Host → Nisse Core:
 | `reviewer_failed` | active |
 | `tool_request` | active |
 | `fact_verification_completed` | active |
-| `fact_synthesis_completed` | reserved |
+| `fact_synthesis_completed` | active |
 | `domain_description_completed` | active |
 | `finding_equivalence_completed` | active |
 | `host_error` | active |
@@ -311,6 +311,65 @@ Fake-runtime faults:
   exhausted entries answer `insufficient` (the fail-safe verdict);
 - `NISSE_FAKE_FACT_VERIFICATION_FAIL=1`: every job completes with
   `insufficient` plus a scripted error (exercises the pending path).
+
+### `start_fact_synthesis` / `fact_synthesis_completed` (plan section 54 step 5)
+
+Fresh synthesis of one fact-consolidation group. The core groups
+recorded facts deterministically (exact duplicates by normalized
+statement, semantic candidates by normalized subject) and sends one
+job per semantic group (correlation by `synthesis_id`):
+
+```json
+{
+  "synthesis_id": "<id>", "timeout_ms": 120000,
+  "model_profile": "standard", "thinking_level": "medium",
+  "subject": "queue capacity",
+  "facts": [
+    {"text": "The sensor queue is bounded to 32 slots.",
+     "evidence": [<EvidenceRef>, …]},
+    {"text": "The queue capacity is guarded by a mutex.",
+     "evidence": [<EvidenceRef>, …]}
+  ]
+}
+```
+
+`facts` is non-empty and holds at most 16 entries, each with 1–16
+evidence excerpts. The host runs one isolated non-juror session
+(identity `fact-synthesizer`): the model profile and thinking level
+come explicitly from the payload, no tools are granted, and the
+answer must be exactly one line —
+
+```text
+MERGED <the narrowest supported statement>
+CANNOT_MERGE
+```
+
+— parsed strictly with exactly one constrained repair attempt under
+the payload timeout. The session is never instructed to invent a
+compromise: when the supplied facts disagree it must answer
+`CANNOT_MERGE`, and the core then handles the conflict separately
+(plan section 55). Every job is answered:
+
+```json
+{"synthesis_id": "<id>", "candidate": "<merged statement>"}
+{"synthesis_id": "<id>", "cannot_merge": true}
+{"synthesis_id": "<id>", "error": {"code": "…", "message": "…"}}
+```
+
+A session that failed completes with an `error` and no candidate; the
+core treats that as uncertainty and consolidates nothing. A merged
+candidate still requires a separate fresh verifier
+(`start_fact_verification`) before anything becomes durable
+(permanent invariant 10).
+
+Fake-runtime faults:
+
+- `NISSE_FAKE_FACT_SYNTHESIS_RESULTS=merge:The queue is bounded and
+  guarded.,cannot_merge`: entries consumed in order; `merge:<text>`
+  answers a merged candidate, `cannot_merge` refuses; missing,
+  malformed, or exhausted entries refuse (the fail-safe answer);
+- `NISSE_FAKE_FACT_SYNTHESIS_FAIL=1`: every job completes with an
+  error (exercises the uncertain path).
 
 ### `cancel` (core → host)
 

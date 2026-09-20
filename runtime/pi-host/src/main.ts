@@ -26,6 +26,10 @@ import {
   type FactVerificationDeps,
 } from "./verify.ts";
 import {
+  runFactSynthesis,
+  type FactSynthesisDeps,
+} from "./synthesis.ts";
+import {
   decodeIncomingMessage,
   encodeMessage,
   ERROR_CODES,
@@ -45,12 +49,14 @@ import { parseFault, type HostRuntime } from "./types.ts";
 import {
   validateCancel,
   validateDomainDescriptionRequest,
+  validateFactSynthesisRequest,
   validateFactVerificationRequest,
   validateFindingEquivalenceCheck,
   validateHostConfig,
   validateStartReview,
   ValidationError,
   type DomainDescriptionRequest,
+  type FactSynthesisRequest,
   type FactVerificationRequest,
   type FindingEquivalenceCheck,
   type HostConfig,
@@ -152,6 +158,11 @@ function domainDescriptionDeps(): DomainDescriptionDeps {
 
 /** Dependencies of pi-runtime fact-verification sessions. */
 function factVerificationDeps(): FactVerificationDeps {
+  return { models: hostModels, resolveAgent: resolvePiAgentFactory };
+}
+
+/** Dependencies of pi-runtime fact-synthesis sessions. */
+function factSynthesisDeps(): FactSynthesisDeps {
   return { models: hostModels, resolveAgent: resolvePiAgentFactory };
 }
 
@@ -314,6 +325,43 @@ async function runFactVerificationJob(request: FactVerificationRequest): Promise
   }
 }
 
+/** Execute one fact-synthesis job: a completed result always answers
+ * the job — with a candidate, with an explicit `cannot_merge` refusal,
+ * or with an error when the session failed. */
+async function runFactSynthesisJob(request: FactSynthesisRequest): Promise<void> {
+  try {
+    const result = await runFactSynthesis(options.runtime, request, factSynthesisDeps());
+    switch (result.kind) {
+      case "merged":
+        send("fact_synthesis_completed", nextId(), {
+          synthesis_id: request.synthesis_id,
+          candidate: result.candidate,
+        });
+        return;
+      case "cannot_merge":
+        send("fact_synthesis_completed", nextId(), {
+          synthesis_id: request.synthesis_id,
+          cannot_merge: true,
+        });
+        return;
+      case "failed":
+        send("fact_synthesis_completed", nextId(), {
+          synthesis_id: request.synthesis_id,
+          error: result.error,
+        });
+        return;
+    }
+  } catch (err) {
+    // Unexpected internal failures are protocol-level host errors.
+    sendHostError(
+      ERROR_CODES.internal,
+      `fact synthesis \`${request.synthesis_id}\` failed unexpectedly: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
   switch (message.type) {
     case "host_config":
@@ -337,6 +385,11 @@ function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
       void runFactVerificationJob(request);
       return;
     }
+    case "start_fact_synthesis": {
+      const request = validateFactSynthesisRequest(message.payload);
+      void runFactSynthesisJob(request);
+      return;
+    }
     case "tool_response":
       bridge.handleResponse(message.payload);
       return;
@@ -344,8 +397,9 @@ function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
       handleCancel(message.payload);
       return;
     default:
-      // Vocabulary entries reserved for later milestones fail
-      // deterministically instead of being guessed.
+      // Defensive: every frozen vocabulary entry is handled above, so
+      // this arm only guards future vocabulary extensions — it fails
+      // deterministically instead of guessing.
       sendHostError(
         ERROR_CODES.unsupportedMessage,
         `\`${message.type}\` is defined by the protocol but not handled by this host version`,

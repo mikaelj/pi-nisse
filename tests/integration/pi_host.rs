@@ -352,14 +352,17 @@ fn unsupported_vocabulary_messages_are_refused_deterministically() {
     let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
 
-    // `start_fact_synthesis` is frozen vocabulary but belongs to a
-    // later milestone.
+    // Every frozen vocabulary entry is active in this host version
+    // (milestone 22 activated `start_fact_synthesis`), so an
+    // active-type message with an invalid payload is refused as
+    // `invalid_payload` — deterministically, never guessed.
     host.send_raw_line(r#"{"protocol_version":1,"id":"x-2","type":"start_fact_synthesis"}"#)
         .expect("write failed");
     match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
         HostEvent::HostError(info) => {
-            assert_eq!(info.code, "unsupported_message");
-            assert!(info.message.contains("start_fact_synthesis"));
+            assert_eq!(info.code, "invalid_payload");
+            // The strict payload validator names the offending field.
+            assert!(info.message.contains("facts"), "{}", info.message);
         }
         other => panic!("expected host_error, got {other:?}"),
     }

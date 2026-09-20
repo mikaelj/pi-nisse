@@ -18,14 +18,9 @@ fn version_prints_to_stdout_with_zero_exit() {
 
 #[test]
 fn unimplemented_review_subcommand_fails_on_stderr_only() {
-    // `records pending` (milestone 18) and `feedback` (milestone 19)
-    // are implemented; every remaining future command must fail with
-    // a typed NotImplemented error.
-    for args in [
-        vec!["records", "compact"],
-        vec!["eval", "routing"],
-        vec!["mcp"],
-    ] {
+    // `records compact` (milestone 22) is implemented; every remaining
+    // future command must fail with a typed NotImplemented error.
+    for args in [vec!["eval", "routing"], vec!["mcp"]] {
         let out = run_nisse(&args);
         assert!(
             !out.status.success(),

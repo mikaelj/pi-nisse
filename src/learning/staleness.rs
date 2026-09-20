@@ -260,16 +260,18 @@ pub fn stamp_content_provenance(
 }
 
 /// The result of rebuilding one fact's evidence against the current
-/// target snapshot for revalidation.
+/// target snapshot. Shared by targeted revalidation (plan section 48)
+/// and the conflict handling of knowledge consolidation (plan section
+/// 55: "retrieve current evidence where applicable").
 #[derive(Debug, Clone, PartialEq)]
-struct RefreshedEvidence {
+pub struct RefreshedEvidence {
     /// Evidence entries anchored in the current snapshot: refreshed
     /// `source` entries (current excerpts, clamped ranges, stamped
     /// provenance) plus non-source entries carried over unchanged.
-    evidence: Vec<EvidenceRef>,
+    pub evidence: Vec<EvidenceRef>,
     /// Why a source entry could not be refreshed (deleted paths,
     /// unreadable content, empty cited locations).
-    unavailable: Vec<String>,
+    pub unavailable: Vec<String>,
 }
 
 /// Truncate to a byte bound on a char boundary.
@@ -305,7 +307,7 @@ fn excerpt_of_lines(content: &str, start: u32, end: u32) -> String {
 /// clamped to the current line count, and the content key is stamped
 /// from the current bytes. Entries whose support vanished are dropped
 /// with a retained note; non-source entries are carried over.
-fn refresh_evidence(
+pub fn refresh_evidence(
     reader: &SnapshotReader<'_>,
     format: ObjectFormat,
     fact: &FactRecord,

@@ -5,6 +5,7 @@
 mod cache_binary;
 mod cli_binary;
 mod code_review;
+mod compact_binary;
 mod doctor_binary;
 mod fact_staleness;
 mod facts_binary;

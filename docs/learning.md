@@ -187,8 +187,96 @@ durable record is created (plan section 44).
 
 Positive outcomes (lesson statistics) are `fixed` and `accepted`.
 
-## What is explicitly not here yet
+## Knowledge consolidation (milestone 22)
 
-Knowledge consolidation into `.nisse/common/` — semantic fact merging,
-conflict handling, and lesson merging (plan sections 52–56) — is a
-later milestone; `nisse records compact` remains unimplemented.
+`nisse records compact` compacts the *semantic* duplication of durable
+knowledge into `.nisse/common/` without losing provenance (plan
+sections 52–56). One operation applies to one contributor's records
+and to many contributors' records alike: authorship affects only the
+provenance of the created records, never the semantics. Observations
+are never compacted away — they remain the authoritative raw learning
+data forever (plan section 53). Repeated runs are idempotent, and the
+original records always remain stored; only the *active* (non-
+superseded) set shrinks.
+
+### Fact consolidation
+
+```text
+active supported facts
+  |
+  +-- same normalized (subject, text) ------> deterministic exact duplicates
+  |                                            |
+  |                                            v
+  |                          representative statement verbatim + union(tags,
+  |                          evidence), one independent verification
+  |
+  +-- distinct statements, same subject -----> semantic group
+                                               |
+                                     fresh Pi synthesis session
+                                               |
+                          MERGED <candidate>          CANNOT_MERGE
+                               |                         |
+                     independent verifier          conflict handling
+                               |                         |
+                          SUPPORTED --> common      per-claim verification
+                          fact under .nisse/common  against current evidence
+                                                        |
+                          exactly one SUPPORTED, all others CONTRADICTED
+                                     |                        |
+                                     v                        v
+                          resolved common fact      unresolved conflict
+                          (winner verbatim)         (originals stay separate)
+```
+
+Rules frozen by the plan:
+
+- **Verification always gates durability** (permanent invariant 10):
+  even the deterministic exact-duplicate candidate is independently
+  verified before it becomes a common fact.
+- **Synthesis may only narrow.** The synthesis session produces *the
+  narrowest statement supported by the supplied facts and their
+  evidence* or answers `CANNOT_MERGE`; it is never instructed to
+  invent a compromise (plan sections 54–55).
+- **The verifier can only reject.** A `CONTRADICTED` merged candidate
+  never becomes knowledge; an `INSUFFICIENT` verdict (or a failed
+  session) leaves the whole group untouched — uncertainty produces
+  less automation, never guessed truth.
+- **Conflicts are preserved.** Resolution happens only when the
+  current evidence clearly supports exactly one claim (one
+  `supported`, every other `contradicted`); the winning formulation is
+  carried **verbatim**. Otherwise the conflicting facts remain
+  separate and active, and nothing is written.
+- **Provenance is explicit.** Every common fact records all source
+  record IDs in `source_record_ids` and supersedes them (`supersedes`);
+  the originals stay on disk for provenance.
+
+Grouping is deterministic (normalized statement, normalized subject;
+groups are bounded at 16 members). Optional Needle/embedding
+similarity may only widen the semantic groups; the baseline never
+needs it.
+
+### Lesson consolidation
+
+Compatible lessons — active lessons whose unique source observations
+form one `(reviewer, category)` group — merge with **no LLM at all**:
+
+1. union and deduplicate `source_observation_ids`;
+2. reload the unique original observations;
+3. recompute the statistics from those unique observations — never
+   `merged_support = support_A + support_B`, overlapping evidence is
+   counted once (permanent invariant 7);
+4. recompute the deterministic routing hint and wording;
+5. create the common lesson superseding the originals (which remain
+   stored together with every observation).
+
+If the recomputed statistics miss the frozen lesson threshold, the
+group creates nothing.
+
+### Reporting and identity
+
+`nisse records compact` prints one deterministic report (per-group
+relation and outcome, diagnostics, and a summary line). Creating
+durable records requires a contributor identity: interactive use may
+prompt for one on first use (plan section 44); noninteractive use
+fails explicitly, and nothing is written — the consolidation output
+is re-derivable at any time.

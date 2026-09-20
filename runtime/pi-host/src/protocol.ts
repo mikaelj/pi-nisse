@@ -7,10 +7,11 @@
  *
  *     { "protocol_version": 1, "id": "...", "type": "...", ...payload }
  *
- * The vocabularies below are the complete frozen sets from plan section 21.
- * Only the core review loop is implemented by this host version; other
- * vocabulary entries are recognized (and refused deterministically) so the
- * two sides never disagree about the protocol shape.
+ * The vocabularies below are the complete frozen sets from plan section 21;
+ * every entry is active in this host version. Payload validation of
+ * inbound messages is strict — malformed payloads are refused
+ * deterministically (`host_error{code="invalid_payload"}`) and unknown
+ * type names are `unknown_message`.
  */
 
 /** Protocol version of this host (plan section 21: version 1). */

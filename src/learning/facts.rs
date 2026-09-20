@@ -245,8 +245,9 @@ pub fn fact_duplicate_key(subject: &str, claim: &str) -> String {
     )
 }
 
-/// Lowercase and collapse internal whitespace.
-fn normalize_key_text(text: &str) -> String {
+/// Lowercase and collapse internal whitespace. The shared normalizer
+/// of duplicate keys and consolidation grouping.
+pub(crate) fn normalize_key_text(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

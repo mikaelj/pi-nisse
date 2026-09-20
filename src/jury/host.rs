@@ -23,12 +23,12 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use super::protocol::{
-    self, CancelMessage, CancelPayload, DomainDescriptionOutcome, FactVerificationPayload,
-    FindingEquivalenceCheckPayload, FindingEquivalenceOutcome, HostConfigMessage,
-    HostConfigPayload, HostEvent, HostReady, HostRuntime, ProtocolError,
-    StartDomainDescriptionMessage, StartFactVerificationMessage,
-    StartFindingEquivalenceCheckMessage, StartReviewMessage, StartReviewPayload,
-    ToolRequestPayload, ToolResponseMessage, ToolResponsePayload,
+    self, CancelMessage, CancelPayload, DomainDescriptionOutcome, FactSynthesisOutcome,
+    FactSynthesisPayload, FactVerificationPayload, FindingEquivalenceCheckPayload,
+    FindingEquivalenceOutcome, HostConfigMessage, HostConfigPayload, HostEvent, HostReady,
+    HostRuntime, ProtocolError, StartDomainDescriptionMessage, StartFactSynthesisMessage,
+    StartFactVerificationMessage, StartFindingEquivalenceCheckMessage, StartReviewMessage,
+    StartReviewPayload, ToolRequestPayload, ToolResponseMessage, ToolResponsePayload,
 };
 use crate::domain::facts::FactVerificationResult;
 use crate::domain::report::ReviewerReport;
@@ -325,6 +325,17 @@ impl HostProcess {
         self.write_line(&line)
     }
 
+    /// Send `start_fact_synthesis` for one fresh synthesis job (plan
+    /// section 54 step 5).
+    pub fn start_fact_synthesis(
+        &mut self,
+        payload: &FactSynthesisPayload,
+    ) -> Result<(), HostError> {
+        let id = crate::domain::ids::new_ulid();
+        let line = StartFactSynthesisMessage::new(id, payload.clone()).to_line();
+        self.write_line(&line)
+    }
+
     /// Send `tool_response`.
     pub fn send_tool_response(&mut self, payload: &ToolResponsePayload) -> Result<(), HostError> {
         let id = crate::domain::ids::new_ulid();
@@ -520,6 +531,13 @@ impl HostProcess {
                     return Err(HostError::UnexpectedHostMessage {
                         reason: format!(
                             "fact_verification_completed for job `{verification_id}` arrived while driving review `{review_id}`"
+                        ),
+                    });
+                }
+                HostEvent::FactSynthesisCompleted { synthesis_id, .. } => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "fact_synthesis_completed for job `{synthesis_id}` arrived while driving review `{review_id}`"
                         ),
                     });
                 }
@@ -725,6 +743,63 @@ impl HostProcess {
         }
     }
 
+    /// Drive one fresh fact-synthesis job to completion (plan section
+    /// 54 step 5).
+    ///
+    /// Waits for the `fact_synthesis_completed` answering
+    /// `synthesis_id`. A synthesis session that failed completes
+    /// without a result plus an error rather than failing the exchange
+    /// — the core treats it as uncertainty and consolidates nothing.
+    /// Protocol-level failures, child death, reviewer traffic, and a
+    /// mismatched correlation id are typed errors.
+    pub fn complete_fact_synthesis(
+        &mut self,
+        synthesis_id: &str,
+        timeout: Duration,
+    ) -> Result<FactSynthesisOutcome, HostError> {
+        if !self.ready {
+            return Err(HostError::UnexpectedHostMessage {
+                reason: "complete_fact_synthesis called before host_ready".to_string(),
+            });
+        }
+        let deadline = Instant::now() + timeout;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| HostError::Timeout {
+                what: format!("fact synthesis `{synthesis_id}` to complete"),
+            })?;
+        match self.recv_event(remaining)? {
+            HostEvent::FactSynthesisCompleted {
+                synthesis_id: found,
+                result,
+                error,
+            } => {
+                if found != synthesis_id {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "fact_synthesis_completed for job `{found}` while driving `{synthesis_id}`"
+                        ),
+                    });
+                }
+                Ok(FactSynthesisOutcome {
+                    synthesis_id: found,
+                    result,
+                    error,
+                })
+            }
+            HostEvent::HostError(info) => Err(HostError::HostReportedError {
+                code: info.code,
+                message: info.message,
+            }),
+            other => Err(HostError::UnexpectedHostMessage {
+                reason: format!(
+                    "received `{}` while driving fact synthesis `{synthesis_id}`",
+                    event_type_name(&other)
+                ),
+            }),
+        }
+    }
+
     /// Gracefully shut down: close stdin, wait up to `timeout` for the
     /// child to exit, then kill it if necessary. Returns the exit status.
     pub fn shutdown(mut self, timeout: Duration) -> Result<ExitStatus, HostError> {
@@ -801,6 +876,7 @@ fn event_type_name(event: &HostEvent) -> &'static str {
         HostEvent::FindingEquivalenceCompleted { .. } => "finding_equivalence_completed",
         HostEvent::DomainDescriptionCompleted { .. } => "domain_description_completed",
         HostEvent::FactVerificationCompleted { .. } => "fact_verification_completed",
+        HostEvent::FactSynthesisCompleted { .. } => "fact_synthesis_completed",
         HostEvent::HostError(_) => "host_error",
     }
 }

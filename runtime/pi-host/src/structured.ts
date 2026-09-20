@@ -190,6 +190,10 @@ export type FactVerificationVerdict = (typeof FACT_VERIFICATION_VERDICTS)[number
 /** Maximum evidence entries of one `start_fact_verification` payload. */
 export const MAX_FACT_EVIDENCE_ENTRIES = 16;
 
+/** Maximum fact entries of one `start_fact_synthesis` payload (plan
+ * section 54 step 5). */
+export const MAX_FACT_SYNTHESIS_FACTS = 16;
+
 export type ReviewerTool = (typeof REVIEWER_TOOLS)[number];
 
 export interface ContextEntry {
@@ -361,6 +365,71 @@ export function validateFactVerificationRequest(value: unknown): FactVerificatio
     thinking_level: requireEnum(object, "thinking_level", THINKING_LEVELS),
     claim: requireNonEmptyString(object, "claim"),
     evidence: evidence.map(validateEvidenceRef),
+  };
+}
+
+/** One recorded fact of a `start_fact_synthesis` payload (plan section
+ * 54 step 5): its exact statement plus the evidence excerpts backing
+ * it. */
+export interface FactSynthesisInput {
+  readonly text: string;
+  readonly evidence: readonly EvidenceRef[];
+}
+
+/** The `start_fact_synthesis` payload: the subject and the recorded
+ * facts one fresh synthesis session must try to merge into the
+ * narrowest statement supported by the supplied facts and their
+ * evidence. */
+export interface FactSynthesisRequest {
+  readonly synthesis_id: string;
+  readonly timeout_ms: number;
+  readonly model_profile: string;
+  readonly thinking_level: (typeof THINKING_LEVELS)[number];
+  readonly subject: string;
+  readonly facts: readonly FactSynthesisInput[];
+}
+
+/** Validate one `facts[]` entry of a synthesis request. */
+function validateFactSynthesisInput(value: unknown): FactSynthesisInput {
+  const object = requireObject(value, "facts[] entry");
+  const evidence = object["evidence"];
+  if (!Array.isArray(evidence)) {
+    throw new ValidationError("`facts[].evidence` must be an array");
+  }
+  if (evidence.length === 0) {
+    throw new ValidationError("`facts[].evidence` must not be empty");
+  }
+  if (evidence.length > MAX_FACT_EVIDENCE_ENTRIES) {
+    throw new ValidationError(
+      `\`facts[].evidence\` exceeds ${MAX_FACT_EVIDENCE_ENTRIES} entries`,
+    );
+  }
+  return {
+    text: requireNonEmptyString(object, "text"),
+    evidence: evidence.map(validateEvidenceRef),
+  };
+}
+
+/** Validate a `start_fact_synthesis` payload. */
+export function validateFactSynthesisRequest(value: unknown): FactSynthesisRequest {
+  const object = requireObject(value, "start_fact_synthesis payload");
+  const facts = object["facts"];
+  if (!Array.isArray(facts)) {
+    throw new ValidationError("`facts` must be an array");
+  }
+  if (facts.length === 0) {
+    throw new ValidationError("`facts` must not be empty");
+  }
+  if (facts.length > MAX_FACT_SYNTHESIS_FACTS) {
+    throw new ValidationError(`\`facts\` exceeds ${MAX_FACT_SYNTHESIS_FACTS} entries`);
+  }
+  return {
+    synthesis_id: requireNonEmptyString(object, "synthesis_id"),
+    timeout_ms: requirePositiveInteger(object, "timeout_ms"),
+    model_profile: requireNonEmptyString(object, "model_profile"),
+    thinking_level: requireEnum(object, "thinking_level", THINKING_LEVELS),
+    subject: requireNonEmptyString(object, "subject"),
+    facts: facts.map(validateFactSynthesisInput),
   };
 }
 

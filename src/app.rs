@@ -65,9 +65,7 @@ impl App {
             Command::Records { records } => match records {
                 crate::cli::RecordsCommand::List => self.run_records_list(),
                 crate::cli::RecordsCommand::Pending => self.run_records_pending(),
-                crate::cli::RecordsCommand::Compact => Err(AppError::NotImplemented(
-                    "nisse records compact".to_string(),
-                )),
+                crate::cli::RecordsCommand::Compact => self.run_records_compact(),
             },
             Command::Cache { cache } => match cache {
                 crate::cli::CacheCommand::Status => self.run_cache_status(),
@@ -420,6 +418,138 @@ impl App {
         Ok(())
     }
 
+    /// Run `nisse records compact` (plan sections 52–56).
+    ///
+    /// Consolidates the durable records of the current worktree into
+    /// `.nisse/common/`: deterministic exact-duplicate facts and
+    /// compatible lessons merge deterministically (the duplicates
+    /// still independently verified; permanent invariant 10),
+    /// compatible facts merge through fresh Pi synthesis plus a
+    /// separate fresh verifier, and conflicts are preserved — resolved
+    /// only when the current evidence clearly supports exactly one
+    /// claim. Originals always remain stored for provenance; only the
+    /// active set compacts. Creating durable records requires a
+    /// contributor identity: interactive use may prompt for one
+    /// (plan section 44), noninteractive use fails explicitly —
+    /// nothing is written on uncertainty.
+    fn run_records_compact(&self) -> Result<(), AppError> {
+        use crate::git::{SnapshotReader, SnapshotSpec, resolve_snapshot};
+        use crate::learning::consolidation::{self, ConsolidationOptions, run_consolidation};
+        use crate::storage::records::RecordStore;
+
+        let (ctx, _paths) = self.discover_storage()?;
+
+        // Trusted local configuration supplies the contributor
+        // identity and the model profiles the semantic sessions may
+        // use (reviewer sessions never inherit a model).
+        let user_path = crate::config::paths::user_config_path();
+        let repo_path = crate::config::paths::repo_config_path(&ctx.git_common_dir);
+        let loaded =
+            crate::config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
+                AppError::Other(anyhow::anyhow!(
+                    "records compact failed to load configuration: {err}"
+                ))
+            })?;
+
+        let store = RecordStore::new(&ctx.worktree_root);
+        let records = store
+            .load()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+
+        // Contributor identity: interactive use prompts on first use
+        // (plan section 44); noninteractive use fails explicitly —
+        // consolidation output is re-derivable at any time, so nothing
+        // is lost by refusing to guess an author.
+        let author = match loaded.config.contributor.as_ref() {
+            Some(contributor) => contributor.id.clone(),
+            None => {
+                let existing_contributors: Vec<String> = records
+                    .iter()
+                    .map(|stored| stored.record.author().to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                let hint = crate::config::identity::suggest_identity(&existing_contributors, None);
+                let outcome = crate::config::identity::resolve_or_prompt(
+                    None,
+                    user_path.as_deref(),
+                    interactive,
+                    &mut std::io::stdin().lock(),
+                    &mut std::io::stdout().lock(),
+                    hint.as_deref(),
+                )
+                .map_err(|err| {
+                    AppError::Other(anyhow::anyhow!(
+                        "records compact failed to resolve the contributor identity: {err}"
+                    ))
+                })?;
+                match outcome.identity() {
+                    Some(identity) => identity.id.clone(),
+                    None => {
+                        return Err(AppError::Other(anyhow::anyhow!(
+                            "records compact creates durable records and needs a contributor \
+                             identity; nothing was written. Configure `[contributor] id` in \
+                             the user config (plan section 44) and run it again"
+                        )));
+                    }
+                }
+            }
+        };
+
+        // Plan first: consolidation work that needs no semantic
+        // sessions (in particular lesson merging) never spawns the
+        // host and runs fully offline. The snapshot reader is needed
+        // only by fact work (conflict handling rebuilds current
+        // evidence), but building it unconditionally keeps the flow
+        // simple; it is cheap and side-effect free.
+        let plan = consolidation::plan_consolidation(&records);
+        let options = ConsolidationOptions::default();
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).map_err(|err| {
+            AppError::Other(anyhow::anyhow!(
+                "records compact failed to resolve the working-tree snapshot: {err}"
+            ))
+        })?;
+        let reader = SnapshotReader::new(&ctx, &resolved).map_err(|err| {
+            AppError::Other(anyhow::anyhow!(
+                "records compact failed to read the working-tree snapshot: {err}"
+            ))
+        })?;
+        let format = ctx
+            .object_format()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+
+        let summary = if plan.needs_host() {
+            let launch = crate::jury::review::host_launch_from_env()
+                .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+            let mut host = crate::jury::host::HostProcess::spawn(&launch)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+            host.wait_ready(crate::jury::review::HOST_READY_TIMEOUT)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+            let host_config = crate::jury::protocol::HostConfigPayload::from_config_profiles(
+                &loaded.config.model_profiles,
+            );
+            host.send_host_config(&host_config)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+            let summary = run_consolidation(
+                Some(&mut host),
+                &ctx,
+                &reader,
+                format,
+                &plan,
+                &author,
+                &options,
+            );
+            let _ = host.shutdown(std::time::Duration::from_secs(5));
+            summary
+        } else {
+            run_consolidation(None, &ctx, &reader, format, &plan, &author, &options)
+        };
+
+        print_to_stdout(&consolidation::render_compact_report(&summary));
+        Ok(())
+    }
+
     /// Run `nisse cache status`.
     ///
     /// The report is written to stdout. Status never mutates a database;
@@ -615,10 +745,9 @@ mod tests {
     fn every_frozen_command_is_typed_not_implemented() {
         let app = App::new();
 
+        // `records compact` is implemented (milestone 22); evaluation
+        // and MCP remain future milestones.
         let cases: Vec<Command> = vec![
-            Command::Records {
-                records: crate::cli::RecordsCommand::Compact,
-            },
             Command::Eval {
                 eval: crate::cli::EvalCommand::Routing,
             },
