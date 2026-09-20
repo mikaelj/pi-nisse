@@ -552,6 +552,18 @@ pub fn run_plan_review(
     );
     diagnostics.extend(fact_summary.diagnostics);
 
+    // 21. Deterministic learning maintenance (plan section 58 step
+    //     21): repeated review outcomes become routing lessons without
+    //     any LLM statistics (plan section 51). Maintenance is
+    //     idempotent and conservative — it can never fail the review.
+    let lesson_summary = crate::learning::lessons::run_learning_maintenance(
+        ctx,
+        Some(paths),
+        &records,
+        options.contributor_id.as_deref(),
+    );
+    diagnostics.extend(lesson_summary.diagnostics);
+
     let _ = host.shutdown(Duration::from_secs(5));
 
     Ok(PlanReviewOutcome {
@@ -670,7 +682,7 @@ fn record_tags(context: &ContextBundle, active: &[&StoredRecord]) -> Vec<String>
 
 /// Routing hints of active lessons (bounded). Lesson wording never
 /// influences routing; only these deterministic hints do.
-fn active_lesson_hints(active: &[&StoredRecord]) -> Vec<RoutingHint> {
+pub(crate) fn active_lesson_hints(active: &[&StoredRecord]) -> Vec<RoutingHint> {
     active
         .iter()
         .filter_map(|stored| match &stored.record {
@@ -1256,6 +1268,18 @@ pub fn run_code_review(
         &options.fact_processing,
     );
     diagnostics.extend(fact_summary.diagnostics);
+
+    // 21. Deterministic learning maintenance (plan section 58 step
+    //     21): repeated review outcomes become routing lessons without
+    //     any LLM statistics (plan section 51). Maintenance is
+    //     idempotent and conservative — it can never fail the review.
+    let lesson_summary = crate::learning::lessons::run_learning_maintenance(
+        ctx,
+        Some(paths),
+        &records,
+        options.contributor_id.as_deref(),
+    );
+    diagnostics.extend(lesson_summary.diagnostics);
 
     let _ = host.shutdown(Duration::from_secs(5));
 

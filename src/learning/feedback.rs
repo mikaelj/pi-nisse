@@ -39,6 +39,12 @@
 //! only (plan section 57); durability and idempotency come from the
 //! `.nisse` observation records themselves, which are independent of
 //! SQLite (permanent invariant 4).
+//!
+//! Recording new observations also triggers one deterministic
+//! lesson-learning maintenance pass (plan section 51; milestone 20):
+//! when the new outcomes push a group over the frozen threshold, an
+//! immutable lesson record is created immediately. Maintenance is
+//! best-effort — it can never fail an otherwise-successful submission.
 
 use std::collections::BTreeSet;
 
@@ -137,10 +143,16 @@ pub enum FeedbackError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedbackRecording {
     /// New durable observations were created: one `(reviewer_id,
-    /// record_id)` pair per reviewer that produced the finding.
+    /// record_id)` pair per reviewer that produced the finding, plus
+    /// any routing lessons the repeated outcomes deterministically
+    /// formed (plan section 51; milestone 20).
     Recorded {
         /// The created observations, in finding reviewer order.
         observations: Vec<(String, String)>,
+        /// Lessons created by the maintenance pass that followed, in
+        /// deterministic group order (empty when no threshold was
+        /// met).
+        lessons: Vec<crate::learning::lessons::LessonCreated>,
     },
     /// The same outcome was already durably recorded; the submission
     /// is an idempotent no-op.
@@ -383,8 +395,14 @@ pub fn record_feedback(
         created.push((observation.reviewer_id.clone(), stored.id().to_string()));
     }
     record_feedback_row(paths, review_id, finding_id, outcome);
+
+    // Repeated outcomes deterministically form routing lessons (plan
+    // section 51). The pass reloads the records (including the new
+    // observations) and is idempotent; its failures are warnings only.
+    let lessons = crate::learning::lessons::maintain_after_feedback(ctx, paths, author);
     Ok(FeedbackRecording::Recorded {
         observations: created,
+        lessons,
     })
 }
 
@@ -452,10 +470,25 @@ pub fn render_feedback(
     out.push_str(&format!("finding: {finding_id}\n"));
     out.push_str(&format!("outcome: {outcome}\n"));
     match recording {
-        FeedbackRecording::Recorded { observations } => {
+        FeedbackRecording::Recorded {
+            observations,
+            lessons,
+        } => {
             out.push_str(&format!("recorded observations: {}\n", observations.len()));
             for (reviewer_id, record_id) in observations {
                 out.push_str(&format!("  {record_id} reviewer={reviewer_id}\n"));
+            }
+            out.push_str(&format!("lessons created: {}\n", lessons.len()));
+            for lesson in lessons {
+                out.push_str(&format!(
+                    "  {} {}",
+                    lesson.record_id,
+                    crate::learning::lessons::group_label(&lesson.reviewer_id, &lesson.category)
+                ));
+                if !lesson.superseded.is_empty() {
+                    out.push_str(&format!(" (supersedes {})", lesson.superseded.len()));
+                }
+                out.push('\n');
             }
         }
         FeedbackRecording::AlreadyRecorded(recorded) => {
@@ -697,7 +730,7 @@ mod tests {
     fn record_feedback_creates_one_observation_per_reviewer() {
         let setup = setup("feedback-record");
         let recording = submit(&setup, FeedbackOutcome::Fixed, Some("alice")).unwrap();
-        let FeedbackRecording::Recorded { observations } = recording else {
+        let FeedbackRecording::Recorded { observations, .. } = recording else {
             panic!("expected new observations");
         };
         // One observation per contributing reviewer, in reviewer order.
@@ -847,12 +880,20 @@ mod tests {
                 "quality".to_string(),
                 "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
             )],
+            lessons: vec![crate::learning::lessons::LessonCreated {
+                reviewer_id: "concurrency".to_string(),
+                category: "race".to_string(),
+                record_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string(),
+                superseded: Vec::new(),
+            }],
         };
         let text = render_feedback("r1", "f1", FeedbackOutcome::Fixed, &recorded);
         assert!(text.starts_with("nisse feedback\n"));
         assert!(text.contains("outcome: fixed"));
         assert!(text.contains("recorded observations: 1"));
         assert!(text.contains("reviewer=quality"));
+        assert!(text.contains("lessons created: 1"));
+        assert!(text.contains("concurrency/race"));
 
         let text = render_feedback(
             "r1",
@@ -861,5 +902,6 @@ mod tests {
             &FeedbackRecording::AlreadyRecorded(FeedbackOutcome::Dismissed),
         );
         assert!(text.contains("already recorded: dismissed"));
+        assert!(!text.contains("lessons created"));
     }
 }

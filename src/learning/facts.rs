@@ -821,6 +821,29 @@ pub fn render_pending(rows: &[PendingRow]) -> String {
                 row.payload["candidate"]["subject"].as_str().unwrap_or("?"),
                 row.payload["reason"].as_str().unwrap_or("?"),
             ),
+            crate::learning::lessons::PENDING_KIND => {
+                let groups: Vec<String> = row.payload["groups"]
+                    .as_array()
+                    .map(|groups| {
+                        groups
+                            .iter()
+                            .map(|group| {
+                                format!(
+                                    "{}/{}",
+                                    group["reviewer_id"].as_str().unwrap_or("?"),
+                                    group["category"].as_str().unwrap_or("?")
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "pending lesson maintenance ({} group(s): {}): {}",
+                    groups.len(),
+                    groups.join(", "),
+                    row.payload["reason"].as_str().unwrap_or("?"),
+                )
+            }
             other => other.to_string(),
         };
         out.push_str(&format!("#{} {} {}\n", row.id, row.created_at, detail));
@@ -1225,6 +1248,28 @@ mod tests {
         // Empty state renders without panic.
         let empty = render_pending(&[]);
         assert!(empty.contains("no pending learning state"));
+
+        // Deferred lesson maintenance renders its groups.
+        let lesson_row = PendingRow {
+            id: 9,
+            kind: crate::learning::lessons::PENDING_KIND.to_string(),
+            created_at: "2026-03-01T12:00:00.000Z".to_string(),
+            payload: serde_json::json!({
+                "groups": [
+                    {"reviewer_id": "concurrency", "category": "race", "observation_ids": []},
+                    {"reviewer_id": "database", "category": "migration", "observation_ids": []},
+                ],
+                "reason": "no contributor identity available (plan section 44)",
+            }),
+        };
+        let text = render_pending(&[lesson_row]);
+        assert!(
+            text.contains(
+                "pending lesson maintenance (2 group(s): concurrency/race, database/migration)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("no contributor identity"), "{text}");
 
         // Unknown future kinds render generically.
         let foreign = PendingRow {

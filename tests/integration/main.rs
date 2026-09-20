@@ -9,6 +9,7 @@ mod doctor_binary;
 mod facts_binary;
 mod feedback_binary;
 mod git_env;
+mod lessons_binary;
 mod needle_binary;
 mod pi_host;
 mod pi_reviewer;
