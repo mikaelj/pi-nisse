@@ -477,3 +477,79 @@ fn records_pending_without_state_reports_empty() {
     assert!(pending.starts_with("nisse records pending\n"), "{pending}");
     assert!(pending.contains("no pending learning state"), "{pending}");
 }
+
+#[test]
+fn persisted_facts_carry_provenance_and_stale_ones_are_marked() {
+    let (_dir, repo, home) = rust_repo("fact-staleness");
+    configure_alice(&home);
+    let (ok, stdout, stderr) = review_with_candidate(
+        &repo,
+        &home,
+        FACT_CLAIM,
+        &[("NISSE_FAKE_FACT_VERIFICATION_VERDICTS", "supported")],
+    );
+    assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    // The persisted fact carries Rust-stamped content provenance
+    // (plan section 48): every source evidence entry names the exact
+    // snapshot content it was verified against.
+    let facts = fact_records(&repo);
+    assert_eq!(facts.len(), 1, "facts: {facts:?}");
+    let evidence = facts[0]["evidence"].as_array().expect("evidence");
+    assert!(
+        evidence.iter().all(|entry| entry["kind"] == "source"
+            && entry["content_key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("git:"))),
+        "stamped provenance expected: {evidence:?}"
+    );
+    let evidence_path = evidence[0]["path"]
+        .as_str()
+        .expect("evidence path")
+        .to_owned();
+
+    // While the support is unchanged, the fact is presented unmarked.
+    let out = run_nisse_in_with_env(&repo, &["query", "sensor queue bounded"], home.path(), &[]);
+    let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("project-fact"), "{stdout}");
+    assert!(!stdout.contains("[potentially stale]"), "{stdout}");
+
+    // The supporting source changes: the recorded provenance no longer
+    // matches the target snapshot, so the fact is never again
+    // presented as unquestioned current truth (plan section 48).
+    let source = std::fs::read_to_string(repo.join(&evidence_path)).expect("read source");
+    std::fs::write(
+        repo.join(&evidence_path),
+        format!("{source}\n// the queue discipline changed\n"),
+    )
+    .expect("write source");
+
+    let out = run_nisse_in_with_env(&repo, &["query", "sensor queue bounded"], home.path(), &[]);
+    let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("project-fact"), "{stdout}");
+    assert!(stdout.contains("[potentially stale]"), "{stdout}");
+
+    // Machine-readable output carries the same marking.
+    let out = run_nisse_in_with_env(
+        &repo,
+        &["query", "sensor queue bounded", "--json"],
+        home.path(),
+        &[],
+    );
+    let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
+    assert!(out.status.success(), "{stdout}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("one JSON document");
+    assert!(
+        report["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .any(|entry| entry["kind"] == "project_fact"
+                && entry["title"]
+                    .as_str()
+                    .is_some_and(|title| title.contains("[potentially stale]"))),
+        "{stdout}"
+    );
+}

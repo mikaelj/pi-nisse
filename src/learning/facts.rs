@@ -597,7 +597,16 @@ pub fn process_fact_candidates(
                             text: validated.claim.clone(),
                             tags: validated.tags.clone(),
                             state: FactState::Supported,
-                            evidence: validated.evidence.clone(),
+                            // Code-derived facts retain content
+                            // provenance (plan section 48): Rust stamps
+                            // the snapshot content key of every source
+                            // entry so later staleness detection can
+                            // prove whether the support is still
+                            // current.
+                            evidence: crate::learning::staleness::stamp_content_provenance(
+                                validation,
+                                &validated.evidence,
+                            ),
                             source_review_id: Some(review_id.to_string()),
                             source_record_ids: Vec::new(),
                             supersedes: Vec::new(),
@@ -745,13 +754,25 @@ pub fn store_pending_candidate(
     paths: &StoragePaths,
     entry: &PendingFactCandidate,
 ) -> Result<(), String> {
+    let payload = serde_json::to_string(entry).map_err(|error| error.to_string())?;
+    store_pending_row(paths, PENDING_KIND, &payload, &entry.created_at)
+}
+
+/// Store one raw pending-learning row in the shared cache. Shared by
+/// every learning subsystem that defers knowledge to local state
+/// (fact candidates, fact revalidations, lesson maintenance).
+pub fn store_pending_row(
+    paths: &StoragePaths,
+    kind: &str,
+    payload: &str,
+    created_at: &str,
+) -> Result<(), String> {
     let db = open_or_recover(&paths.shared, DbKind::Shared)
         .map_err(|error| format!("{}: {error}", error))?;
-    let payload = serde_json::to_string(entry).map_err(|error| error.to_string())?;
     db.conn
         .execute(
             "INSERT INTO pending_learning (kind, payload, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![PENDING_KIND, payload, entry.created_at],
+            rusqlite::params![kind, payload, created_at],
         )
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -844,6 +865,12 @@ pub fn render_pending(rows: &[PendingRow]) -> String {
                     row.payload["reason"].as_str().unwrap_or("?"),
                 )
             }
+            crate::learning::staleness::PENDING_KIND => format!(
+                "pending fact revalidation ({}): fact {} — {}",
+                row.payload["verdict"].as_str().unwrap_or("?"),
+                row.payload["fact_id"].as_str().unwrap_or("?"),
+                row.payload["reason"].as_str().unwrap_or("?"),
+            ),
             other => other.to_string(),
         };
         out.push_str(&format!("#{} {} {}\n", row.id, row.created_at, detail));
@@ -1270,6 +1297,30 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("no contributor identity"), "{text}");
+
+        // Deferred fact revalidations render their verdict and reason.
+        let revalidation_row = PendingRow {
+            id: 10,
+            kind: crate::learning::staleness::PENDING_KIND.to_string(),
+            created_at: "2026-04-01T12:00:00.000Z".to_string(),
+            payload: serde_json::json!({
+                "schema_version": 1,
+                "fact_id": "01FACTIDFACTIDFACTIDFACTID",
+                "verdict": "insufficient",
+                "reason": "revalidation found the current evidence insufficient",
+            }),
+        };
+        let text = render_pending(&[revalidation_row]);
+        assert!(
+            text.contains(
+                "pending fact revalidation (insufficient): fact 01FACTIDFACTIDFACTIDFACTID"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("revalidation found the current evidence insufficient"),
+            "{text}"
+        );
 
         // Unknown future kinds render generically.
         let foreign = PendingRow {

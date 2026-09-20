@@ -143,7 +143,10 @@ fn clear_creates_empty_caches_and_status_reports_them() {
         2,
         "both caches must be healthy after clear"
     );
-    assert_eq!(stdout.matches("schema version: 2").count(), 2);
+    // The shared cache remains at schema version 2; the worktree cache
+    // gained the fact-staleness marking column in version 3.
+    assert_eq!(stdout.matches("schema version: 2").count(), 1);
+    assert_eq!(stdout.matches("schema version: 3").count(), 1);
     assert_eq!(stdout.matches("integrity: ok").count(), 2);
     for table in [
         "content_artifact",

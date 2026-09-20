@@ -280,6 +280,10 @@ pub fn render_text(query: &str, snapshot: &SnapshotDescriptor, bundle: &ContextB
         }
         if let Some(record) = &entry.record_id {
             out.push_str(&format!("   record: {record}\n"));
+            // The title carries the record subject and its presentation
+            // markers (`[conflicting]`, `[potentially stale]`); without
+            // it a stale fact would look like unquestioned truth.
+            out.push_str(&format!("   {}\n", entry.title));
         }
         if let Some(practice) = &entry.practice_id {
             out.push_str(&format!("   practice: {practice}\n"));

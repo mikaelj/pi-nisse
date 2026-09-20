@@ -438,7 +438,9 @@ fn validate_source_evidence(
 /// Every content key the snapshot content of a file legitimately answers
 /// to: the reader-side blob OID when the side defines one, the blob OID
 /// the exact bytes would hash to, and the working-tree key of the bytes.
-fn snapshot_content_keys(file: &SnapshotFile, format: ObjectFormat) -> BTreeSet<String> {
+/// Shared by finding-evidence validation and fact-staleness assessment
+/// (plan sections 15, 26, and 48).
+pub(crate) fn snapshot_content_keys(file: &SnapshotFile, format: ObjectFormat) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     keys.insert(working_tree_key(&file.bytes).as_str());
     keys.insert(format!("git:{}", git_blob_oid(&file.bytes, format)));

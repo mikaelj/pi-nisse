@@ -333,7 +333,11 @@ pub fn run_plan_review(
         }
         None => Retriever::open(resolved, paths)?,
     };
-    retriever.sync_records(&records)?;
+    // Potentially stale facts (plan section 48) are marked and
+    // downranked in the shared context: current source evidence
+    // outranks stale memory (permanent invariant 22).
+    let stale_facts = stale_fact_ids(ctx, resolved, &records)?;
+    retriever.sync_records(&records, &stale_facts)?;
     retriever.sync_practices(&catalog)?;
     let query = RetrievalQuery::from_text(truncate_text(plan_text, MAX_QUERY_BYTES));
     let shared_context = retriever.lookup(&query)?;
@@ -626,6 +630,20 @@ pub fn plan_descriptors(plan_text: &str) -> Vec<String> {
 /// Truncate to a byte bound on a char boundary.
 fn bounded(text: &str, max_bytes: usize) -> String {
     truncate_text(text, max_bytes).to_string()
+}
+
+/// The potentially stale fact IDs of `records` against the exact
+/// target snapshot (plan section 48). Assessment is deterministic —
+/// content-key provenance, path presence, excerpt containment — and
+/// never consults an LLM.
+fn stale_fact_ids(
+    ctx: &RepoContext,
+    resolved: &ResolvedSnapshot,
+    records: &[StoredRecord],
+) -> Result<BTreeSet<String>, crate::git::GitError> {
+    let reader = SnapshotReader::new(ctx, resolved)?;
+    let format = ctx.object_format()?;
+    Ok(crate::learning::staleness::assess_records(records, &reader, format).ids())
 }
 
 /// Distinct index languages of the freshly refreshed target snapshot,
@@ -1038,7 +1056,11 @@ pub fn run_code_review(
         }
         None => Retriever::open(resolved, paths)?,
     };
-    retriever.sync_records(&records)?;
+    // Potentially stale facts (plan section 48) are marked and
+    // downranked in the shared context: current source evidence
+    // outranks stale memory (permanent invariant 22).
+    let stale_facts = stale_fact_ids(ctx, resolved, &records)?;
+    retriever.sync_records(&records, &stale_facts)?;
     retriever.sync_practices(&catalog)?;
     let query = RetrievalQuery {
         text: retrieval_text(&descriptors, &symbols),

@@ -7,6 +7,8 @@
 //!   (plan sections 49–50; milestone 19).
 //! - [`lessons`]: deterministic lesson learning from repeated
 //!   observation outcomes (plan sections 43 and 51; milestone 20).
+//! - [`staleness`]: fact staleness against the current snapshot and
+//!   targeted revalidation (plan section 48; milestone 21).
 //!
 //! Knowledge consolidation (plan sections 52–56) is a later milestone.
 //!
@@ -18,3 +20,4 @@
 pub mod facts;
 pub mod feedback;
 pub mod lessons;
+pub mod staleness;

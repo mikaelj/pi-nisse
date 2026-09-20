@@ -58,7 +58,7 @@ Worktree cache:
 | ------- | -------- |
 | `manifest` | Current path → content-key mapping used by lazy refresh |
 | `path_content` | Per-path content-key history and metadata; the snapshot-membership authority for retrieval |
-| `record_index` | Index of durable `.nisse/**` records for retrieval |
+| `record_index` | Index of durable `.nisse/**` records for retrieval, including the per-snapshot `[potentially stale]` marking of facts (plan section 48) |
 | `record_fts` | FTS5 index over active facts and lessons |
 | `practice_fts` | FTS5 index over the bundled practice packs |
 | `refresh_state` | Statistics of the last index refresh |

@@ -137,6 +137,46 @@ Maintenance is idempotent and conservative:
 - storage failures surface as diagnostics and never fail the operation
   that triggered maintenance.
 
+## Fact staleness (milestone 21)
+
+Code-derived facts retain content provenance: when the fact pipeline
+persists a supported fact, Rust stamps every source evidence entry
+with the content key of the exact snapshot content it was verified
+against. A reviewer never supplies its own provenance.
+
+Against every target snapshot, each active supported fact is assessed
+deterministically (plan section 48):
+
+- a cited path absent from the snapshot — deleted content — makes the
+  fact potentially stale;
+- a recorded content key that no longer matches the snapshot content
+  — modified content — makes it potentially stale;
+- keyless evidence (written before provenance stamping) falls back to
+  excerpt containment.
+
+Potentially stale facts are never silently current truth (permanent
+invariant 22): retrieval marks them `[potentially stale]` and
+downranks them to the weight of conflicting facts — both in `nisse
+query` and in reviewer initial context. The marking lives in the
+regenerable record index and is recomputed on every record sync
+because it is snapshot-dependent, never part of the immutable record.
+
+Stale facts stay eligible for **targeted revalidation**: one fresh,
+independent Pi verification session judges the exact claim against
+evidence rebuilt from the *current* snapshot content and answers
+`supported`, `contradicted`, or `insufficient`:
+
+| Verdict        | Durable effect                                                            |
+| -------------- | ------------------------------------------------------------------------- |
+| `supported`    | new supported fact record, provenance refreshed, supersedes the old one   |
+| `contradicted` | new fact record in state `unresolved_conflict`, supersedes the old one    |
+| `insufficient` | nothing updated; the attempt stays pending local state                    |
+
+The old record always remains for provenance. When no current source
+support can be rebuilt at all, revalidation is deterministically
+`insufficient` without a session. Without a contributor identity no
+durable record is created (plan section 44).
+
 ## Feedback outcomes (plan section 49)
 
 | Outcome    | Meaning                                                        |
@@ -151,5 +191,4 @@ Positive outcomes (lesson statistics) are `fixed` and `accepted`.
 
 Knowledge consolidation into `.nisse/common/` — semantic fact merging,
 conflict handling, and lesson merging (plan sections 52–56) — is a
-later milestone; `nisse records compact` remains unimplemented. Fact
-staleness detection (plan section 48) is likewise future work.
+later milestone; `nisse records compact` remains unimplemented.

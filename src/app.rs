@@ -289,8 +289,22 @@ impl App {
             Some(provider) => retriever.with_embedding_provider(provider),
             None => retriever,
         };
+        // Potentially stale facts (plan section 48) are marked and
+        // downranked: current source evidence outranks stale memory.
+        let stale = {
+            use crate::learning::staleness::assess_records;
+            let reader = crate::git::SnapshotReader::new(&ctx, &resolved)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+            assess_records(
+                &records,
+                &reader,
+                ctx.object_format()
+                    .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?,
+            )
+            .ids()
+        };
         retriever
-            .sync_records(&records)
+            .sync_records(&records, &stale)
             .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
         retriever
             .sync_practices(&catalog)

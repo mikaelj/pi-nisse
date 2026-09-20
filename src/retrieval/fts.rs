@@ -9,7 +9,7 @@
 //! learning data, and superseded records remain for provenance but are
 //! never retrieved as current knowledge (plan sections 45 and 53).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -86,11 +86,16 @@ fn record_doc(record: &StoredRecord) -> Option<RecordDoc<'_>> {
 ///
 /// Records are immutable, so synchronization is additive: new active
 /// facts/lessons are indexed, rows for records that are gone or no
-/// longer active are removed. This is safe to call before every query.
+/// longer active are removed. `stale` carries the IDs of facts whose
+/// supporting content is absent from the current target snapshot
+/// (plan section 48); their cached marking is (re)computed on every
+/// sync because it is snapshot-dependent, never part of the immutable
+/// record. This is safe to call before every query.
 pub fn sync_records(
     conn: &Connection,
     db_path: &Path,
     records: &[StoredRecord],
+    stale: &BTreeSet<String>,
 ) -> Result<RecordSyncStats, RetrievalError> {
     let mut desired: BTreeMap<&str, RecordDoc<'_>> = BTreeMap::new();
     for record in active_records(records) {
@@ -99,13 +104,16 @@ pub fn sync_records(
         }
     }
 
-    let existing: BTreeMap<String, String> = {
+    let existing: BTreeMap<String, (String, i64)> = {
         let mut stmt = conn
-            .prepare("SELECT record_id, kind FROM record_index")
+            .prepare("SELECT record_id, kind, potentially_stale FROM record_index")
             .map_err(|err| query_error(db_path, err))?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, String>(1)?, row.get::<_, i64>(2)?),
+                ))
             })
             .map_err(|err| query_error(db_path, err))?;
         rows.map(|row| row.map_err(|err| query_error(db_path, err)))
@@ -130,9 +138,20 @@ pub fn sync_records(
     }
 
     // Index active records that are not in the index yet. Records are
-    // immutable, so an existing row never needs rewriting.
+    // immutable, so an existing row never needs rewriting — except the
+    // snapshot-dependent staleness marking, which is refreshed for
+    // existing rows whenever the assessment changed (for example after
+    // content moved on or a stale fact was revalidated and superseded).
     for (id, doc) in &desired {
-        if existing.contains_key(*id) {
+        if let Some((_, existing_stale)) = existing.get(*id) {
+            let flag = i64::from(stale.contains(*id));
+            if *existing_stale != flag {
+                tx.execute(
+                    "UPDATE record_index SET potentially_stale = ?1 WHERE record_id = ?2",
+                    rusqlite::params![flag, id],
+                )
+                .map_err(|err| query_error(db_path, err))?;
+            }
             continue;
         }
         tx.execute(
@@ -149,9 +168,15 @@ pub fn sync_records(
         )
         .map_err(|err| query_error(db_path, err))?;
         tx.execute(
-            "INSERT INTO record_index (record_id, kind, path, indexed_at) \
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![doc.id, doc.kind.as_str(), doc.relative_path, now],
+            "INSERT INTO record_index (record_id, kind, path, indexed_at, potentially_stale) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                doc.id,
+                doc.kind.as_str(),
+                doc.relative_path,
+                now,
+                i64::from(stale.contains(*id))
+            ],
         )
         .map_err(|err| query_error(db_path, err))?;
         stats.indexed += 1;
@@ -247,6 +272,16 @@ mod tests {
     use crate::storage::db::{open_or_recover, read_user_version};
     use crate::storage::records::RecordStore;
     use crate::storage::schema::DbKind;
+
+    /// The recorded staleness flag of one indexed record.
+    fn stale_flag(conn: &Connection, record_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT potentially_stale FROM record_index WHERE record_id = ?1",
+            [record_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
 
     fn temp_worktree(label: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::Builder::new()
@@ -370,7 +405,7 @@ mod tests {
             },
         ];
 
-        let stats = sync_records(&conn, &path, &stored).unwrap();
+        let stats = sync_records(&conn, &path, &stored, &BTreeSet::new()).unwrap();
         assert_eq!(stats.indexed, 2);
         assert_eq!(stats.removed, 0);
         assert_eq!(fts_count(&conn, "01ARZ3NDEKTSV4RRFFQ69G5FAV"), 1);
@@ -386,7 +421,7 @@ mod tests {
         assert_eq!(indexed_path, "people/kalle/01ARZ3NDEKTSV4RRFFQ69G5FAV.json");
 
         // Idempotent second run.
-        let again = sync_records(&conn, &path, &stored).unwrap();
+        let again = sync_records(&conn, &path, &stored, &BTreeSet::new()).unwrap();
         assert_eq!(again.indexed, 0);
         assert_eq!(again.removed, 0);
     }
@@ -405,10 +440,10 @@ mod tests {
             location: RecordLocation::Common,
             path: std::path::PathBuf::from("/repo/.nisse/common/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
         }];
-        sync_records(&conn, &path, &stored).unwrap();
+        sync_records(&conn, &path, &stored, &BTreeSet::new()).unwrap();
         assert_eq!(fts_count(&conn, "01ARZ3NDEKTSV4RRFFQ69G5FAV"), 1);
 
-        let stats = sync_records(&conn, &path, &[]).unwrap();
+        let stats = sync_records(&conn, &path, &[], &BTreeSet::new()).unwrap();
         assert_eq!(stats.removed, 1);
         assert_eq!(fts_count(&conn, "01ARZ3NDEKTSV4RRFFQ69G5FAV"), 0);
         assert_eq!(index_count(&conn, "01ARZ3NDEKTSV4RRFFQ69G5FAV"), 0);
@@ -444,14 +479,14 @@ mod tests {
             },
         ];
 
-        sync_records(&conn, &path, &stored).unwrap();
+        sync_records(&conn, &path, &stored, &BTreeSet::new()).unwrap();
         assert_eq!(fts_count(&conn, older_id), 0, "superseded fact stays out");
         assert_eq!(fts_count(&conn, newer_id), 1);
 
         // When the newer record disappears (e.g. branch without it), the
         // older record becomes active again and is indexed.
         let only_older: Vec<StoredRecord> = vec![stored[0].clone()];
-        let stats = sync_records(&conn, &path, &only_older).unwrap();
+        let stats = sync_records(&conn, &path, &only_older, &BTreeSet::new()).unwrap();
         assert_eq!(stats.indexed, 1);
         assert_eq!(stats.removed, 1);
         assert_eq!(fts_count(&conn, older_id), 1);
@@ -507,11 +542,55 @@ mod tests {
     }
 
     #[test]
+    fn staleness_marking_is_computed_per_sync() {
+        let (_dir, path, conn) = open("stale-marking");
+        let fact_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let stored: Vec<StoredRecord> = vec![StoredRecord {
+            record: fact(
+                fact_id,
+                "queue locking",
+                "The queue is locked across await points.",
+                FactState::Supported,
+                Vec::new(),
+            ),
+            location: RecordLocation::People {
+                contributor: "kalle".to_string(),
+            },
+            path: std::path::PathBuf::from(format!("/repo/.nisse/people/kalle/{fact_id}.json")),
+        }];
+
+        // Fresh sync: the fact is current.
+        sync_records(&conn, &path, &stored, &BTreeSet::new()).unwrap();
+        assert_eq!(stale_flag(&conn, fact_id), 0);
+
+        // The next sync runs against a snapshot where the support is
+        // gone: the cached flag flips without rewriting the record.
+        let stale = BTreeSet::from([fact_id.to_string()]);
+        let stats = sync_records(&conn, &path, &stored, &stale).unwrap();
+        assert_eq!(stats.indexed, 0, "the immutable record is not re-indexed");
+        assert_eq!(stale_flag(&conn, fact_id), 1);
+
+        // A stale set naming a different record does not leak.
+        let other = BTreeSet::from(["01OTHER".to_string()]);
+        sync_records(&conn, &path, &stored, &other).unwrap();
+        assert_eq!(stale_flag(&conn, fact_id), 0);
+
+        // Idempotent re-sync keeps the flag.
+        sync_records(&conn, &path, &stored, &stale).unwrap();
+        assert_eq!(stale_flag(&conn, fact_id), 1);
+    }
+
+    #[test]
     fn record_sync_after_schema_migration_works_on_fresh_databases() {
         // Fresh databases already sit at the newest schema version.
         let (_dir, path, conn) = open("fresh");
-        assert_eq!(read_user_version(&conn, &path).unwrap(), 2);
-        assert!(sync_records(&conn, &path, &[]).unwrap().indexed == 0);
+        assert_eq!(read_user_version(&conn, &path).unwrap(), 3);
+        assert!(
+            sync_records(&conn, &path, &[], &BTreeSet::new())
+                .unwrap()
+                .indexed
+                == 0
+        );
     }
 
     #[test]
@@ -534,7 +613,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
 
         let (_db_dir, path, conn) = open("store");
-        sync_records(&conn, &path, &loaded).unwrap();
+        sync_records(&conn, &path, &loaded, &BTreeSet::new()).unwrap();
         let matches: i64 = conn
             .query_row(
                 "SELECT count(*) FROM record_fts WHERE record_fts MATCH '\"linker\"'",

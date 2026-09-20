@@ -86,7 +86,7 @@ pub const WORKTREE_TABLES: &[&str] = &["manifest", "path_content", "record_index
 pub const SHARED_SCHEMA_VERSION: u32 = 2;
 
 /// Schema version of the current worktree cache schema.
-pub const WORKTREE_SCHEMA_VERSION: u32 = 2;
+pub const WORKTREE_SCHEMA_VERSION: u32 = 3;
 
 /// Highest schema version understood for a database kind.
 pub fn supported_version(kind: DbKind) -> u32 {
@@ -269,6 +269,16 @@ CREATE TABLE meta (
 );
 "#,
     },
+    Migration {
+        version: 3,
+        sql: r#"
+-- Fact-staleness marking (plan section 48): potentially stale facts
+-- are marked and downranked at retrieval time. The flag is a
+-- regenerable cache of a snapshot-dependent assessment, recomputed
+-- by every record sync (`sync_records`).
+ALTER TABLE record_index ADD COLUMN potentially_stale INTEGER NOT NULL DEFAULT 0;
+"#,
+    },
 ];
 
 #[cfg(test)]
@@ -294,7 +304,49 @@ mod tests {
         assert_eq!(supported_version(DbKind::Shared), SHARED_SCHEMA_VERSION);
         assert_eq!(supported_version(DbKind::Worktree), WORKTREE_SCHEMA_VERSION);
         assert_eq!(supported_version(DbKind::Shared), 2);
-        assert_eq!(supported_version(DbKind::Worktree), 2);
+        assert_eq!(supported_version(DbKind::Worktree), 3);
+    }
+
+    #[test]
+    fn worktree_version_two_databases_migrate_to_the_staleness_column() {
+        use super::super::db::{open_or_recover, read_user_version};
+        use rusqlite::Connection;
+
+        // Build a worktree version-2 database with one indexed record,
+        // as written by Nisse before fact-staleness marking. Applying
+        // all migrations at once leaves the database at version 3, so
+        // the version is reset to 2 after the rows are written.
+        let dir = tempfile::Builder::new()
+            .prefix("nisse-schema-migrate-worktree-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("worktree.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(WORKTREE_MIGRATIONS[0].sql).unwrap();
+            conn.execute_batch(WORKTREE_MIGRATIONS[1].sql).unwrap();
+            conn.execute(
+                "INSERT INTO record_index (record_id, kind, path, indexed_at) \
+                 VALUES ('01A', 'fact', 'people/a/01A.json', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2_i64).unwrap();
+        }
+
+        let opened = open_or_recover(&path, DbKind::Worktree).unwrap();
+        assert!(!opened.recovered);
+        assert_eq!(read_user_version(&opened.conn, &path).unwrap(), 3);
+        let (stale, count): (i64, i64) = opened
+            .conn
+            .query_row(
+                "SELECT potentially_stale, count(*) FROM record_index WHERE record_id = '01A'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the pre-existing row survives");
+        assert_eq!(stale, 0, "migrated rows default to not stale");
     }
 
     #[test]

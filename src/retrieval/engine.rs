@@ -48,6 +48,10 @@ use crate::storage::schema::DbKind;
 const WEIGHT_SYMBOL_DEFINITION: f64 = 1.0;
 const WEIGHT_PROJECT_FACT: f64 = 0.9;
 const WEIGHT_CONFLICTING_FACT: f64 = 0.45;
+/// Potentially stale facts (plan section 48) are downranked to the
+/// same weight as conflicting facts: both are presented, never as
+/// unquestioned current truth.
+const WEIGHT_POTENTIALLY_STALE_FACT: f64 = 0.45;
 const WEIGHT_SOURCE_SKELETON: f64 = 0.8;
 const WEIGHT_SYMBOL_REFERENCE: f64 = 0.7;
 const WEIGHT_PROJECT_LESSON: f64 = 0.6;
@@ -139,8 +143,17 @@ impl Retriever {
 
     /// Synchronize the record full-text index with the durable records
     /// of the worktree. Safe to call before every query.
-    pub fn sync_records(&self, records: &[StoredRecord]) -> Result<(), RetrievalError> {
-        sync_records(&self.worktree, &self.worktree_path, records).map(|_| ())
+    ///
+    /// `stale` names the potentially stale facts of the current target
+    /// snapshot (plan section 48; see
+    /// [`assess_records`](crate::learning::staleness::assess_records)).
+    /// They are marked and downranked at retrieval time.
+    pub fn sync_records(
+        &self,
+        records: &[StoredRecord],
+        stale: &BTreeSet<String>,
+    ) -> Result<(), RetrievalError> {
+        sync_records(&self.worktree, &self.worktree_path, records, stale).map(|_| ())
     }
 
     /// Synchronize the practice full-text index with the bundled
@@ -393,11 +406,17 @@ impl Retriever {
     }
 
     /// Record entries (facts and lessons) matching one FTS expression.
+    ///
+    /// Conflicting facts are marked `[conflicting]` and downranked;
+    /// potentially stale facts (plan section 48) are marked
+    /// `[potentially stale]` and downranked the same way — current
+    /// source evidence outranks stale memory (permanent invariant 22).
     fn record_entries(&self, expr: &str) -> Result<Vec<ContextEntry>, RetrievalError> {
         let mut stmt = self
             .worktree
             .prepare(
-                "SELECT f.record_id, f.subject, f.text, f.kind, f.state, ri.path \
+                "SELECT f.record_id, f.subject, f.text, f.kind, f.state, ri.path, \
+                 ri.potentially_stale \
                  FROM record_fts f JOIN record_index ri ON ri.record_id = f.record_id \
                  WHERE record_fts MATCH ?1 \
                  ORDER BY bm25(record_fts), f.record_id \
@@ -415,6 +434,7 @@ impl Retriever {
                         kind: row.get(3)?,
                         state: row.get(4)?,
                         path: row.get(5)?,
+                        potentially_stale: row.get::<_, i64>(6)? != 0,
                     })
                 },
             )
@@ -425,11 +445,14 @@ impl Retriever {
             let row = row.map_err(|err| self.worktree_error(err))?;
             let is_common = row.path.starts_with("common/");
             let conflicting = row.state == "unresolved_conflict";
-            let weight = match (row.kind.as_str(), conflicting) {
+            let mut weight = match (row.kind.as_str(), conflicting) {
                 ("fact", false) => WEIGHT_PROJECT_FACT,
                 ("fact", true) => WEIGHT_CONFLICTING_FACT,
                 _ => WEIGHT_PROJECT_LESSON,
             };
+            if row.potentially_stale {
+                weight = weight.min(WEIGHT_POTENTIALLY_STALE_FACT);
+            }
             let rank = entries.len() as f64;
             let mut score = weight * RANK_DECAY.powi(rank as i32);
             if is_common {
@@ -440,11 +463,13 @@ impl Retriever {
             } else {
                 ContextKind::ProjectLesson
             };
-            let title = if conflicting {
-                format!("{} [conflicting]", row.subject)
-            } else {
-                row.subject
-            };
+            let mut title = row.subject;
+            if conflicting {
+                title.push_str(" [conflicting]");
+            }
+            if row.potentially_stale {
+                title.push_str(" [potentially stale]");
+            }
             entries.push(ContextEntry {
                 kind,
                 title,
@@ -576,6 +601,9 @@ struct RecordRow {
     kind: String,
     state: String,
     path: String,
+    /// Cached staleness marking of the current target snapshot (plan
+    /// section 48); recomputed by every record sync.
+    potentially_stale: bool,
 }
 
 /// One practice match of the worktree full-text index.
@@ -880,7 +908,7 @@ mod tests {
         let records = store.load().unwrap();
 
         let (_ctx, _resolved, _storage, retriever) = prepare(&fixture, &SnapshotSpec::Working);
-        retriever.sync_records(&records).unwrap();
+        retriever.sync_records(&records, &BTreeSet::new()).unwrap();
         retriever
             .sync_practices(&Catalog::bundled().unwrap())
             .unwrap();
@@ -1182,6 +1210,85 @@ mod tests {
             queue_entries.len(),
             2,
             "alpha and beta in the changed module"
+        );
+    }
+
+    #[test]
+    fn potentially_stale_facts_are_marked_and_downranked() {
+        let fixture = Fixture::repo("retr-stale-fact");
+        write_file(
+            &fixture.root,
+            "src/lib.rs",
+            "pub fn x() -> u8 {\n    1\n}\n",
+        );
+        commit_all(&fixture.root, "one");
+
+        let store = RecordStore::new(&fixture.root);
+        store
+            .create(
+                &make_fact(
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "fresh queue fact",
+                    "The fresh queue fact is about ring buffer discipline.",
+                    FactState::Supported,
+                )
+                .record,
+            )
+            .unwrap();
+        store
+            .create(
+                &make_fact(
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                    "beta queue fact",
+                    "The beta queue fact is about ring buffer discipline.",
+                    FactState::Supported,
+                )
+                .record,
+            )
+            .unwrap();
+        let records = store.load().unwrap();
+
+        let (_ctx, _resolved, _storage, retriever) = prepare(&fixture, &SnapshotSpec::Working);
+        retriever.sync_records(&records, &BTreeSet::new()).unwrap();
+
+        // Fresh sync: both facts rank as ordinary project facts.
+        let fresh = retriever
+            .lookup(&RetrievalQuery::from_text("queue fact ring buffer"))
+            .unwrap();
+        let fresh_entry = fresh
+            .entries
+            .iter()
+            .find(|entry| entry.record_id.as_deref() == Some("01ARZ3NDEKTSV4RRFFQ69G5FAW"))
+            .expect("the fact must be retrievable");
+        assert!(!fresh_entry.title.contains("[potentially stale]"));
+
+        // Re-sync with the second fact stale: it is marked and
+        // downranked below the fresh fact.
+        let stale = BTreeSet::from(["01ARZ3NDEKTSV4RRFFQ69G5FAW".to_string()]);
+        retriever.sync_records(&records, &stale).unwrap();
+        let marked = retriever
+            .lookup(&RetrievalQuery::from_text("queue fact ring buffer"))
+            .unwrap();
+        let stale_entry = marked
+            .entries
+            .iter()
+            .find(|entry| entry.record_id.as_deref() == Some("01ARZ3NDEKTSV4RRFFQ69G5FAW"))
+            .expect("a stale fact stays retrievable, never hidden");
+        assert!(
+            stale_entry.title.contains("[potentially stale]"),
+            "{}",
+            stale_entry.title
+        );
+        let fresh_score = marked
+            .entries
+            .iter()
+            .find(|entry| entry.record_id.as_deref() == Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+            .expect("the fresh fact stays retrievable")
+            .score;
+        assert!(
+            fresh_score > stale_entry.score,
+            "fresh {fresh_score} must outrank stale {}",
+            stale_entry.score
         );
     }
 
