@@ -1,0 +1,33 @@
+{
+  "name": "@nisse/pi-integration",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Nisse integration for Main Pi: thin extension tools over the nisse CLI plus the bounded Nisse review-workflow skill.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=23.6.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.86.1",
+    "@earendil-works/pi-coding-agent": "^0.86.1",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "typebox": "^1.3.27"
+  }
+}
