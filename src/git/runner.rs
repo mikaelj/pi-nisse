@@ -322,4 +322,32 @@ mod tests {
         assert_eq!(runner.program, PathBuf::from("git"));
         assert_eq!(runner.timeout(), DEFAULT_TIMEOUT);
     }
+
+    // Milestone 28: revision strings containing shell metacharacters
+    // reach Git as single literal arguments. No shell is ever involved,
+    // so nothing can be executed through them.
+    #[test]
+    fn metacharacters_in_arguments_are_never_executed() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = GitRunner::new();
+        for hostile in [
+            "HEAD; touch pwned.txt",
+            "HEAD && touch pwned.txt",
+            "$(touch pwned.txt)",
+            "`touch pwned.txt`",
+            "HEAD\n touch pwned.txt",
+        ] {
+            let output = runner
+                .run_unchecked(dir.path(), &["rev-parse", "--verify", hostile])
+                .unwrap();
+            assert!(
+                !output.success,
+                "git must reject the bogus revision {hostile:?}"
+            );
+        }
+        assert!(
+            !dir.path().join("pwned.txt").exists(),
+            "no metacharacter may ever reach a shell"
+        );
+    }
 }

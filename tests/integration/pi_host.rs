@@ -329,6 +329,37 @@ fn malformed_stdout_line_from_host_is_a_typed_error() {
 }
 
 #[test]
+fn oversized_stdout_line_from_host_is_a_typed_error() {
+    // Milestone 28: a host (or injected content relayed by a host) that
+    // exceeds the frozen line bound is rejected while reading, without
+    // buffering the oversized line.
+    let mut host =
+        HostProcess::spawn(&fake_launch(Some("oversized-line"), &[])).expect("spawn failed");
+    let err = host.wait_ready(READY_TIMEOUT).expect_err("must fail");
+    match &err {
+        HostError::MalformedHostLine { reason } => {
+            assert!(reason.contains("byte protocol bound"), "{reason}");
+        }
+        other => panic!("expected a malformed-line error, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_utf8_stdout_from_host_is_a_typed_error() {
+    // Milestone 28: stdout is a strict UTF-8 JSONL channel; binary noise
+    // fails closed.
+    let mut host =
+        HostProcess::spawn(&fake_launch(Some("binary-stdout"), &[])).expect("spawn failed");
+    let err = host.wait_ready(READY_TIMEOUT).expect_err("must fail");
+    match &err {
+        HostError::MalformedHostLine { reason } => {
+            assert!(reason.contains("UTF-8"), "{reason}");
+        }
+        other => panic!("expected a malformed-line error, got {other:?}"),
+    }
+}
+
+#[test]
 fn malformed_input_toward_host_reports_host_error() {
     let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");

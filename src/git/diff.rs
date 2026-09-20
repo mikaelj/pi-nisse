@@ -1589,4 +1589,69 @@ second",
                 .contains("+staged content")
         );
     }
+
+    // -----------------------------------------------------------------
+    // Milestone 28: malformed Git output fails closed with typed
+    // errors instead of being silently misread.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_raw_entries_rejects_malformed_output() {
+        // Not a raw entry at all.
+        for stdout in [
+            "garbage\0",
+            "::100644 100644 0000 0000 M\0a\0", // combined/unmerged
+            ":100644 100644 abc def\0a\0",      // wrong field count
+            ":100644 100644 0000 0000 X\0a\0",  // unknown status
+            ":100644 100644 0000000 0000000 A\0", // ends before path
+            ":100644 100644 0000000 0000000 R\0a\0", // rename without dst
+            ":100644 100644 0000000 0000000 A\0\0", // empty path
+        ] {
+            let err = parse_raw_entries(stdout).unwrap_err();
+            assert!(
+                matches!(err, GitError::UnexpectedOutput { .. }),
+                "expected a typed failure for {stdout:?}, got {err:?}"
+            );
+        }
+
+        // A non-zero OID that is not a valid OID is rejected.
+        let err = parse_raw_entries(":100644 100644 zz 0000000 A\0a\0").unwrap_err();
+        assert!(matches!(err, GitError::InvalidOid { .. }), "{err:?}");
+
+        // Well-formed entries still parse.
+        let entries = parse_raw_entries(
+            ":100644 100644 0000000000000000000000000000000000000000 \
+             a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 A\0src/new.rs\0",
+        )
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "src/new.rs");
+        assert!(entries[0].old_oid.is_none());
+        assert_eq!(
+            entries[0].new_oid.as_deref(),
+            Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
+        );
+    }
+
+    #[test]
+    fn parse_numstat_binary_rejects_malformed_output() {
+        for stdout in [
+            "3\0",                // missing fields
+            "3\t1\0",             // missing path
+            "x\t1\ta\0",          // invalid line count
+            "3\ty\ta\0",          // invalid line count
+            "3\t1\t\0only-src\0", // rename ends before destination
+        ] {
+            let err = parse_numstat_binary(stdout).unwrap_err();
+            assert!(
+                matches!(err, GitError::UnexpectedOutput { .. }),
+                "expected a typed failure for {stdout:?}, got {err:?}"
+            );
+        }
+
+        // Well-formed plain and rename entries parse.
+        let map = parse_numstat_binary("3\t1\tsrc/a.rs\0-\t-\t\0old.rs\0new.rs\0").unwrap();
+        assert_eq!(map.get("src/a.rs"), Some(&false));
+        assert_eq!(map.get("new.rs"), Some(&true));
+    }
 }

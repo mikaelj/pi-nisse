@@ -17,6 +17,8 @@ export const FAULTS = [
   "stderr-noise",
   "malformed-after-ready",
   "review-hang",
+  "oversized-line",
+  "binary-stdout",
 ] as const;
 
 export type Fault = (typeof FAULTS)[number];

@@ -24,10 +24,17 @@
 //! - **Strict loading**: every file must be a valid, validating record
 //!   whose file name matches its ID, whose author matches its people
 //!   directory, and whose IDs are unique across the whole tree. Invalid
-//!   content is a hard error, not a silent skip.
+//!   content is a hard error, not a silent skip; oversized files are
+//!   rejected before they are read, so a hostile `.nisse` tree never
+//!   causes unbounded reads.
 //! - **Path safety**: contributor directories and record file names are
 //!   derived only from validated ULIDs/contributor slugs; traversal
-//!   values are rejected before any path is built.
+//!   values are rejected before any path is built. The `.nisse` tree is
+//!   never traversed through symlinks in either direction: loading
+//!   rejects a symlinked `.nisse` root, and creating records walks every
+//!   directory component below the worktree root and refuses to
+//!   traverse a symlink, so a pre-planted `.nisse/people/<id>` symlink
+//!   can never redirect an immutable record outside the worktree.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -41,6 +48,13 @@ use super::fsutil::{ExclusiveWrite, atomic_write_exclusive};
 
 /// Name of the durable record tree at the worktree root.
 pub const NISSE_RECORDS_DIR: &str = ".nisse";
+
+/// Maximum accepted size of one durable record file.
+///
+/// Validated records are far smaller (every text field is bounded); the
+/// bound exists so a hostile or accidentally huge `.nisse` tree fails
+/// closed instead of causing unbounded reads.
+pub const MAX_RECORD_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Where a record is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +106,11 @@ pub enum RecordStoreError {
     /// A location was rejected before any filesystem path was built.
     #[error("invalid record location `{location}`: {reason}")]
     InvalidLocation { location: String, reason: String },
+    /// A path below the worktree root resolves through a symlink or a
+    /// non-directory. Record paths may only traverse real directories
+    /// created by Nisse.
+    #[error("unsafe record path `{path}`: {reason}")]
+    UnsafePath { path: PathBuf, reason: String },
     /// A record file or directory entry is invalid. Loading is strict:
     /// invalid content is a hard failure, never a silent skip.
     #[error("invalid record at `{path}`: {reason}")]
@@ -152,6 +171,63 @@ impl RecordStore {
         self.nisse_dir().join("common")
     }
 
+    /// Create every missing directory component of `dir` below the
+    /// worktree root, refusing to traverse anything that is not a real
+    /// directory.
+    ///
+    /// `fs::create_dir_all` alone is not acceptable here: it succeeds
+    /// when an intermediate component already exists as a symlink to a
+    /// directory, which would silently redirect durable records outside
+    /// the worktree. Every component is therefore inspected with
+    /// `symlink_metadata` (which does not follow links) and only plain
+    /// directories are traversed; missing components are created with
+    /// `create_dir`, which itself refuses to clobber an existing path.
+    fn ensure_real_dir(&self, dir: &Path) -> Result<(), RecordStoreError> {
+        let relative =
+            dir.strip_prefix(&self.worktree_root)
+                .map_err(|_| RecordStoreError::UnsafePath {
+                    path: dir.to_owned(),
+                    reason: "record directory must live below the worktree root".to_string(),
+                })?;
+        let mut current = self.worktree_root.clone();
+        for component in relative.components() {
+            if component.as_os_str().to_str().is_none() {
+                return Err(RecordStoreError::UnsafePath {
+                    path: dir.to_owned(),
+                    reason: "record directory components must be valid UTF-8".to_string(),
+                });
+            }
+            current.push(component.as_os_str());
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(metadata) => {
+                    let reason = if metadata.file_type().is_symlink() {
+                        "refusing to traverse a symlinked directory under `.nisse`"
+                    } else {
+                        "expected a directory, found a file"
+                    };
+                    return Err(RecordStoreError::UnsafePath {
+                        path: current,
+                        reason: reason.to_string(),
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&current).map_err(|source| RecordStoreError::Io {
+                        path: current.clone(),
+                        source,
+                    })?;
+                }
+                Err(source) => {
+                    return Err(RecordStoreError::Io {
+                        path: current,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Validate a contributor slug for use as a path component.
     fn validate_contributor(contributor: &str) -> Result<(), RecordStoreError> {
         if is_valid_contributor_id(contributor) {
@@ -210,6 +286,7 @@ impl RecordStore {
     ) -> Result<StoredRecord, RecordStoreError> {
         record.validate()?;
         let dir = self.location_dir(&location)?;
+        self.ensure_real_dir(&dir)?;
         let path = dir.join(format!("{}.json", record.id()));
         let mut bytes = serde_json::to_vec_pretty(record).map_err(RecordStoreError::Serialize)?;
         bytes.push(b'\n');
@@ -233,13 +310,19 @@ impl RecordStore {
     /// errors. An absent `.nisse` tree is an empty record set.
     pub fn load(&self) -> Result<Vec<StoredRecord>, RecordStoreError> {
         let root = self.nisse_dir();
-        if !root.exists() {
-            return Ok(Vec::new());
-        }
-        if !root.is_dir() {
+        let root_metadata = match std::fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(source) => {
+                return Err(RecordStoreError::Io { path: root, source });
+            }
+        };
+        if !root_metadata.file_type().is_dir() {
             return Err(RecordStoreError::InvalidRecord {
                 path: root,
-                reason: "`.nisse` must be a directory".to_string(),
+                reason: "`.nisse` must be a real directory (symlinks are rejected)".to_string(),
             });
         }
 
@@ -394,10 +477,7 @@ impl RecordStore {
                 });
             }
 
-            let bytes = std::fs::read(&path).map_err(|source| RecordStoreError::Io {
-                path: path.clone(),
-                source,
-            })?;
+            let bytes = read_bounded(&path)?;
             let record: ProjectRecord =
                 serde_json::from_slice(&bytes).map_err(|err| RecordStoreError::InvalidRecord {
                     path: path.clone(),
@@ -468,6 +548,33 @@ pub fn active_records(records: &[StoredRecord]) -> Vec<&StoredRecord> {
         .iter()
         .filter(|stored| !superseded.contains(stored.id()))
         .collect()
+}
+
+/// Read a record file after enforcing regular-file and size bounds.
+///
+/// The bounds are checked before reading so an oversized (possibly
+/// hostile) file never enters memory.
+fn read_bounded(path: &Path) -> Result<Vec<u8>, RecordStoreError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|source| RecordStoreError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(RecordStoreError::InvalidRecord {
+            path: path.to_owned(),
+            reason: "record entries must be regular files (symlinks are rejected)".to_string(),
+        });
+    }
+    if metadata.len() > MAX_RECORD_FILE_BYTES {
+        return Err(RecordStoreError::InvalidRecord {
+            path: path.to_owned(),
+            reason: format!("record file exceeds the {MAX_RECORD_FILE_BYTES} byte bound"),
+        });
+    }
+    std::fs::read(path).map_err(|source| RecordStoreError::Io {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 /// Read a directory's entries sorted by file name for deterministic
@@ -934,6 +1041,122 @@ mod tests {
         {
             assert_eq!(result.unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn load_rejects_oversized_record_files_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = new_store(dir.path());
+        let people = dir.path().join(".nisse").join("people").join("alice");
+        std::fs::create_dir_all(&people).unwrap();
+
+        // A hostile record file whose *declared* size already exceeds the
+        // bound: the store must fail before reading any content.
+        let huge = people.join(format!("{}.json", crate::domain::ids::new_ulid()));
+        let file = std::fs::File::create(&huge).unwrap();
+        file.set_len(MAX_RECORD_FILE_BYTES + 1).unwrap();
+        drop(file);
+
+        let err = store.load().unwrap_err();
+        assert!(
+            err.to_string().contains("byte bound"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_invalid_utf8_record_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = new_store(dir.path());
+        let people = dir.path().join(".nisse").join("people").join("alice");
+        std::fs::create_dir_all(&people).unwrap();
+
+        // Raw invalid UTF-8 bytes: JSON parsing fails closed.
+        std::fs::write(
+            people.join(format!("{}.json", crate::domain::ids::new_ulid())),
+            b"{\"kind\":\"\xff\xfe\"}",
+        )
+        .unwrap();
+        let err = store.load().unwrap_err();
+        assert!(
+            matches!(err, RecordStoreError::InvalidRecord { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_symlinked_nisse_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let store = new_store(dir.path());
+        store.create(&fact("alice")).unwrap();
+
+        // Move the real tree away and symlink `.nisse` to a directory
+        // outside the worktree: loading must refuse to follow it.
+        let real = dir.path().join(".nisse");
+        std::fs::rename(&real, outside.path().join("nisse-real")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path().join("nisse-real"), &real).unwrap();
+
+        #[cfg(unix)]
+        {
+            let err = store.load().unwrap_err();
+            assert!(err.to_string().contains("symlinks are rejected"), "{err}");
+        }
+        #[cfg(not(unix))]
+        {
+            // Without symlink support the moved-away tree simply loads empty.
+            assert!(store.load().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn create_refuses_to_traverse_symlinked_directory_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // Case 1: the contributor directory is a symlink out of the tree.
+        let people = dir.path().join(".nisse").join("people");
+        std::fs::create_dir_all(&people).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), people.join("alice")).unwrap();
+        #[cfg(unix)]
+        {
+            let err = new_store(dir.path()).create(&fact("alice")).unwrap_err();
+            assert!(
+                matches!(err, RecordStoreError::UnsafePath { .. }),
+                "unexpected error: {err}"
+            );
+            assert!(err.to_string().contains("symlinked directory"), "{err}");
+            // Nothing escaped into the symlink target.
+            assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        }
+
+        // Case 2: the `.nisse` root itself is a symlink.
+        let dir2 = tempfile::tempdir().unwrap();
+        let outside2 = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside2.path(), dir2.path().join(".nisse")).unwrap();
+        #[cfg(unix)]
+        {
+            let err = new_store(dir2.path())
+                .create(&observation("bob"))
+                .unwrap_err();
+            assert!(matches!(err, RecordStoreError::UnsafePath { .. }), "{err}");
+            assert_eq!(std::fs::read_dir(outside2.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn create_rejects_non_directory_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let nisse = dir.path().join(".nisse");
+        std::fs::create_dir_all(&nisse).unwrap();
+        // `.nisse` is fine, but `people` exists as a plain file.
+        std::fs::write(nisse.join("people"), b"not a directory").unwrap();
+
+        let err = new_store(dir.path()).create(&fact("alice")).unwrap_err();
+        assert!(matches!(err, RecordStoreError::UnsafePath { .. }), "{err}");
     }
 
     #[test]

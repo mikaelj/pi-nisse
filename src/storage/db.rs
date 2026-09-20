@@ -690,4 +690,53 @@ mod tests {
         );
         assert!(dir_path.is_dir(), "the directory must not be deleted");
     }
+
+    #[test]
+    fn concurrent_writers_are_serialized_by_the_busy_timeout() {
+        // Two independent connections (models of two concurrent Nisse
+        // processes) writing the same database: the busy timeout plus
+        // WAL journaling must serialize them without corruption.
+        let (dir, path) = temp_path("concurrent", "cache.sqlite");
+        let first = open_or_recover(&path, DbKind::Shared).unwrap();
+
+        // Hold an exclusive write transaction on the first connection.
+        first
+            .conn
+            .execute_batch("BEGIN IMMEDIATE; INSERT INTO review_feedback \n            (review_id, finding_id, outcome, created_at)\n            VALUES ('held', 'f1', 'fixed', '2026-01-01T00:00:00Z');")
+            .unwrap();
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let second = open_or_recover(&writer_path, DbKind::Shared).unwrap();
+            second
+                .conn
+                .execute(
+                    "INSERT INTO review_feedback (review_id, finding_id, outcome, created_at)\n                     VALUES ('waited', 'f2', 'accepted', '2026-01-01T00:00:01Z')",
+                    [],
+                )
+                .expect("the busy timeout must wait for the held lock, not fail");
+            second.conn
+        });
+
+        // Give the second writer time to block on the held lock, then
+        // release it. If the writer somehow raced ahead, the test still
+        // passes: both rows must be durable either way.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        first.conn.execute_batch("COMMIT;").unwrap();
+        let second = writer.join().expect("writer thread panicked");
+        drop(second);
+
+        let check = open_or_recover(&path, DbKind::Shared).unwrap();
+        let reviews: Vec<String> = check
+            .conn
+            .prepare("SELECT review_id FROM review_feedback ORDER BY review_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(reviews, vec!["held".to_string(), "waited".to_string()]);
+        drop(check);
+        drop(dir);
+    }
 }

@@ -420,6 +420,24 @@ if (fault === "crash-on-start") {
   process.exit(3);
 }
 
+if (fault === "oversized-line") {
+  // Scripted protocol-bound violation: a stdout line beyond the frozen
+  // 8 MiB protocol bound. The Rust reader must reject it without
+  // buffering it. Exit only after the write flushed so the reader sees
+  // the full oversized line, not a truncated one.
+  log("fault oversized-line: writing a line beyond the protocol bound");
+  process.stdout.write(`${"x".repeat(9 * 1024 * 1024)}\n`, () => {
+    process.exit(0);
+  });
+} else if (fault === "binary-stdout") {
+  // Scripted protocol-bound violation: stdout bytes that are not valid
+  // UTF-8. The Rust reader must fail closed.
+  log("fault binary-stdout: writing non-UTF-8 bytes to stdout");
+  process.stdout.write(Buffer.from([0x22, 0xff, 0xfe, 0x22, 0x0a]), () => {
+    process.exit(0);
+  });
+}
+
 if (fault === "startup-hang") {
   log("fault startup-hang: host_ready will never be sent");
 }

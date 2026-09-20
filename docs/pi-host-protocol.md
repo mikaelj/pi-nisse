@@ -418,7 +418,11 @@ and reflects tool outcomes in its report summary.
 
 Environment variable `NISSE_PI_HOST_FAULT` scripts protocol faults for
 testing: `startup-hang`, `crash-on-start`, `wrong-version`,
-`ready-then-exit`, `stderr-noise`, `malformed-after-ready`, `review-hang`.
+`ready-then-exit`, `stderr-noise`, `malformed-after-ready`,
+`review-hang`, `oversized-line` (a stdout line beyond the frozen 8 MiB
+protocol bound), and `binary-stdout` (stdout bytes that are not valid
+UTF-8). The last two exist so the Rust reader's line-bound and UTF-8
+fail-closed behavior stays covered by regression tests.
 
 Fake reviewer faults:
 
