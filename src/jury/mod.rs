@@ -22,7 +22,11 @@
 //!   findings, and groups obvious duplicates (plan sections 14, 15, 37);
 //! - [`synthesis`] consolidates validated findings into final findings:
 //!   narrow equivalence checks, the non-juror synthesis session, and
-//!   strict synthesis-output validation (plan section 38).
+//!   strict synthesis-output validation (plan section 38);
+//! - [`review`] orchestrates the complete review pipeline over all of
+//!   the above (plan sections 58 and 59): snapshot, index refresh,
+//!   retrieval, routing, jury execution, validation, synthesis, and
+//!   the local review event.
 
 pub mod catalog;
 pub mod execution;
@@ -30,6 +34,7 @@ pub mod findings;
 pub mod host;
 pub mod plan;
 pub mod protocol;
+pub mod review;
 pub mod synthesis;
 pub mod tools;
 
@@ -42,6 +47,10 @@ pub use findings::{
 pub use host::{HostError, HostProcess, PiHostLaunch, ReviewerOutcome};
 pub use plan::{
     JuryPlanError, MAX_JURY_SIZE, MAX_SELECTED_SPECIALISTS, MIN_JURY_SIZE, build_jury_plan,
+};
+pub use review::{
+    MAX_PLAN_BYTES, PlanInput, PlanReviewError, PlanReviewOptions, PlanReviewOutcome,
+    host_launch_from_env, render_review_text, run_plan_review,
 };
 pub use synthesis::{ConsolidationOptions, SYNTHESIZER_ID, consolidate};
 pub use tools::ReviewerToolServer;

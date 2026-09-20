@@ -13,7 +13,12 @@ sections 20 and 21; protocol version **1**.
   object per line. Any other stdout traffic is a protocol violation.
 - **stderr**: host logs and diagnostics. Never parsed as protocol data;
   captured separately by the Rust side.
-- Startup: `node runtime/pi-host/src/main.ts --runtime <fake|pi>`.
+- Startup: `node runtime/pi-host/src/main.ts --runtime <fake|pi>`. The
+  Rust core selects the interpreter, runtime, and script path with the
+  `NISSE_PI_HOST_PROGRAM`, `NISSE_PI_HOST_RUNTIME`, and
+  `NISSE_PI_HOST_SCRIPT` environment variables (defaults: `node`, `pi`,
+  and the repository's `runtime/pi-host/src/main.ts`). Tests use the
+  same variables to select the deterministic fake/scripted runtimes.
 
 ## Envelope
 
@@ -43,7 +48,7 @@ Nisse Core → host:
 | `start_review` | active |
 | `start_fact_verification` | reserved |
 | `start_fact_synthesis` | reserved |
-| `start_domain_description` | reserved |
+| `start_domain_description` | active |
 | `start_finding_equivalence_check` | active |
 | `tool_response` | active |
 | `cancel` | active |
@@ -59,7 +64,7 @@ Host → Nisse Core:
 | `tool_request` | active |
 | `fact_verification_completed` | reserved |
 | `fact_synthesis_completed` | reserved |
-| `domain_description_completed` | reserved |
+| `domain_description_completed` | active |
 | `finding_equivalence_completed` | active |
 | `host_error` | active |
 
@@ -205,6 +210,52 @@ findings may only reference known group keys, may not change the impact
 class, and may only lower severity; every other final-finding field is
 computed deterministically by the core from the validated source
 findings.
+
+### `start_domain_description` / `domain_description_completed` (plan section 19)
+
+The constrained dynamic-domain description of the `dynamic-domain-expert`
+fallback. The core sends one job per review that routed to the fallback
+(correlation by `description_id`):
+
+```json
+{
+  "description_id": "<id>", "timeout_ms": 60000,
+  "model_profile": "standard", "thinking_level": "medium",
+  "descriptors": ["Rewrite the audio pipeline"],
+  "changed_paths": [], "languages": ["rust"]
+}
+
+The host runs one isolated non-juror session (identity
+`domain-describer`): the model profile and thinking level come explicitly
+from the payload, no tools are granted, and the output must be exactly
+
+```json
+{"domain_label": "audio dsp", "focus_terms": ["sampling rate"],
+ "risks_to_check": ["denormals"], "relevant_practice_tags": ["realtime"]}
+```
+
+parsed strictly (non-empty label; every list bounded to 16 non-empty
+entries of at most 256 bytes) with exactly one constrained repair
+attempt under the payload timeout. Every job is answered:
+
+```json
+{"description_id": "<id>", "description": {…}}
+{"description_id": "<id>", "error": {"code": "…", "message": "…"}}
+```
+
+A session that failed completes with an error and no description — an
+`error` is only permitted without a `description`. The description is
+semantic input only: the core combines it with the static reviewer
+template (which remains the only source of capabilities, model profile,
+and endpoint trust), bounds and filters it (unknown practice tags are
+dropped), and falls back to the plain static template when the job
+fails. Uncertainty loses specialization, never the review.
+
+Fake-runtime fault:
+
+- `NISSE_FAKE_DOMAIN_DESCRIPTION_FAIL=1`: every job completes with an
+  error (exercises the static-template fallback). Without the fault the
+  fake derives a deterministic description from the first descriptor.
 
 ### `cancel` (core → host)
 

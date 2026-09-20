@@ -135,6 +135,7 @@ export const CONTEXT_KINDS = [
   "symbol_reference",
   "source_skeleton",
   "source",
+  "plan",
   "project_fact",
   "project_lesson",
   "practice",
@@ -278,6 +279,36 @@ export interface FindingEquivalenceCheck {
 export interface HostModelProfilePayload {
   readonly model: string;
   readonly endpoint?: string;
+}
+
+/** The constrained dynamic domain description (plan section 19). */
+export interface DynamicDomainDescription {
+  readonly domain_label: string;
+  readonly focus_terms: readonly string[];
+  readonly risks_to_check: readonly string[];
+  readonly relevant_practice_tags: readonly string[];
+}
+
+/** Maximum entries per list of a dynamic domain description. */
+export const MAX_DOMAIN_DESCRIPTION_TERMS = 16;
+
+/** Maximum entries per request list (`descriptors`, `changed_paths`,
+ * `languages`) of a `start_domain_description` payload. */
+export const MAX_DOMAIN_REQUEST_TERMS = 64;
+
+/** Maximum bytes of one list entry or of the domain label. */
+const MAX_DOMAIN_DESCRIPTION_TERM_BYTES = 256;
+const MAX_DOMAIN_LABEL_BYTES = 256;
+
+/** The `start_domain_description` payload (plan section 19). */
+export interface DomainDescriptionRequest {
+  readonly description_id: string;
+  readonly timeout_ms: number;
+  readonly model_profile: string;
+  readonly thinking_level: (typeof THINKING_LEVELS)[number];
+  readonly descriptors: readonly string[];
+  readonly changed_paths: readonly string[];
+  readonly languages: readonly string[];
 }
 
 /** The `host_config` payload: resolved model profiles by name. */
@@ -502,6 +533,65 @@ export function validateFindingEquivalenceCheck(value: unknown): FindingEquivale
     thinking_level: requireEnum(object, "thinking_level", THINKING_LEVELS),
     finding_a: validateEquivalenceFinding(findingA),
     finding_b: validateEquivalenceFinding(findingB),
+  };
+}
+
+function requireBoundedTermList(
+  object: Record<string, unknown>,
+  field: string,
+  maxEntries: number,
+): string[] {
+  const list = requireStringArray(object, field);
+  if (list.length > maxEntries) {
+    throw new ValidationError(`\`${field}\` exceeds ${maxEntries} entries`);
+  }
+  for (const entry of list) {
+    if (entry.length === 0 || entry.length > MAX_DOMAIN_DESCRIPTION_TERM_BYTES) {
+      throw new ValidationError(
+        `\`${field}\` entries must be non-empty and at most ` +
+          `${MAX_DOMAIN_DESCRIPTION_TERM_BYTES} bytes`,
+      );
+    }
+  }
+  return list;
+}
+
+/** Validate a `start_domain_description` payload (plan section 19). */
+export function validateDomainDescriptionRequest(value: unknown): DomainDescriptionRequest {
+  const object = requireObject(value, "start_domain_description payload");
+  return {
+    description_id: requireNonEmptyString(object, "description_id"),
+    timeout_ms: requirePositiveInteger(object, "timeout_ms"),
+    model_profile: requireNonEmptyString(object, "model_profile"),
+    thinking_level: requireEnum(object, "thinking_level", THINKING_LEVELS),
+    descriptors: requireBoundedTermList(object, "descriptors", MAX_DOMAIN_REQUEST_TERMS),
+    changed_paths: requireBoundedTermList(object, "changed_paths", MAX_DOMAIN_REQUEST_TERMS),
+    languages: requireBoundedTermList(object, "languages", MAX_DOMAIN_REQUEST_TERMS),
+  };
+}
+
+/** Validate a session answer as a strict dynamic domain description. */
+export function validateDynamicDomainDescription(value: unknown): DynamicDomainDescription {
+  const object = requireObject(value, "dynamic domain description");
+  const label = requireNonEmptyString(object, "domain_label");
+  if (label.length > MAX_DOMAIN_LABEL_BYTES) {
+    throw new ValidationError(
+      `\`domain_label\` must be at most ${MAX_DOMAIN_LABEL_BYTES} bytes`,
+    );
+  }
+  return {
+    domain_label: label,
+    focus_terms: requireBoundedTermList(object, "focus_terms", MAX_DOMAIN_DESCRIPTION_TERMS),
+    risks_to_check: requireBoundedTermList(
+      object,
+      "risks_to_check",
+      MAX_DOMAIN_DESCRIPTION_TERMS,
+    ),
+    relevant_practice_tags: requireBoundedTermList(
+      object,
+      "relevant_practice_tags",
+      MAX_DOMAIN_DESCRIPTION_TERMS,
+    ),
   };
 }
 

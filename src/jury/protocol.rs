@@ -19,9 +19,11 @@
 //! both sides agree on the vocabulary. This milestone implements the core
 //! review loop (`host_ready`, `start_review`, `reviewer_started`,
 //! `reviewer_completed`, `reviewer_failed`, `tool_request`,
-//! `tool_response`, `cancel`, `host_error`) and the narrow
+//! `tool_response`, `cancel`, `host_error`), the narrow
 //! `start_finding_equivalence_check` / `finding_equivalence_completed`
-//! exchange of finding consolidation (plan section 38). Receiving a
+//! exchange of finding consolidation (plan section 38), and the constrained
+//! `start_domain_description` / `domain_description_completed` exchange of
+//! the dynamic domain expert (plan section 19). Receiving a
 //! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,9 @@ use crate::domain::finding::ReviewerFinding;
 use crate::domain::model::ModelProfile;
 use crate::domain::report::ReviewerReport;
 use crate::domain::review::ReviewKind;
-use crate::domain::reviewer::{ReviewerCapability, ReviewerExecutionSpec};
+use crate::domain::reviewer::{
+    DynamicDomainDescription, ReviewerCapability, ReviewerExecutionSpec,
+};
 
 /// Protocol version of this build (plan section 21: version 1).
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -335,6 +339,16 @@ pub enum HostEvent {
         /// Why the verdict fell back to `uncertain`.
         error: Option<HostErrorInfo>,
     },
+    /// A constrained dynamic-domain description finished (plan section 19).
+    DomainDescriptionCompleted {
+        /// Correlation identifier of the answered description job.
+        description_id: String,
+        /// The validated description; `None` when the session failed and
+        /// the caller must fall back to the plain static reviewer template.
+        description: Option<DynamicDomainDescription>,
+        /// Why the description fell back, when its session failed.
+        error: Option<HostErrorInfo>,
+    },
     /// The host reported a protocol-level failure.
     HostError(HostErrorInfo),
 }
@@ -606,6 +620,59 @@ pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> 
                 error: payload.error,
             })
         }
+        host_to_rust::DOMAIN_DESCRIPTION_COMPLETED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                description_id: String,
+                #[serde(default)]
+                description: Option<DynamicDomainDescription>,
+                #[serde(default)]
+                error: Option<HostErrorInfo>,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.description_id, "description_id", &invalid)?;
+            match (&payload.description, &payload.error) {
+                (Some(_), Some(_)) => {
+                    return Err(invalid(
+                        "`error` is only permitted when no `description` was produced".to_string(),
+                    ));
+                }
+                (None, Some(error)) => {
+                    require_valid_error(error, &invalid)?;
+                }
+                (Some(description), None) => {
+                    if description.domain_label.trim().is_empty() {
+                        return Err(invalid("`domain_label` must be non-empty".to_string()));
+                    }
+                    for (list, field) in [
+                        (&description.focus_terms, "focus_terms"),
+                        (&description.risks_to_check, "risks_to_check"),
+                        (
+                            &description.relevant_practice_tags,
+                            "relevant_practice_tags",
+                        ),
+                    ] {
+                        if list.len() > MAX_DOMAIN_DESCRIPTION_TERMS {
+                            return Err(invalid(format!(
+                                "`{field}` exceeds {MAX_DOMAIN_DESCRIPTION_TERMS} entries"
+                            )));
+                        }
+                    }
+                }
+                (None, None) => {
+                    return Err(invalid(
+                        "either `description` or `error` must be present".to_string(),
+                    ));
+                }
+            }
+            Ok(HostEvent::DomainDescriptionCompleted {
+                description_id: payload.description_id,
+                description: payload.description,
+                error: payload.error,
+            })
+        }
         other => Err(ProtocolError::UnsupportedMessageType(other.to_string())),
     }
 }
@@ -704,6 +771,70 @@ pub struct FindingEquivalenceOutcome {
     /// Why the verdict fell back to `uncertain`, when the check's
     /// session failed.
     pub error: Option<HostErrorInfo>,
+}
+
+/// Maximum number of entries each list of a
+/// [`DynamicDomainDescription`] may carry on the wire.
+pub const MAX_DOMAIN_DESCRIPTION_TERMS: usize = 16;
+
+/// `start_domain_description` payload: the deterministic request
+/// descriptors a constrained non-juror session may use to describe the
+/// domain, plus the explicit bounds of that session (plan section 19).
+/// Rust owns the job identity, the model selection, and the timeout; the
+/// description can never add tools, providers, or endpoint trust.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainDescriptionPayload {
+    /// Correlation identifier of this job (assigned by Rust).
+    pub description_id: String,
+    /// Session timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Explicitly configured model profile for the session.
+    pub model_profile: String,
+    /// Explicit thinking level for the session.
+    pub thinking_level: crate::domain::model::ThinkingLevel,
+    /// Free-text request descriptors of the review (plan headings, diff
+    /// subjects, …).
+    pub descriptors: Vec<String>,
+    /// Repository-relative paths changed by the request, when known.
+    pub changed_paths: Vec<String>,
+    /// Lowercase index language ids detected in the change/snapshot.
+    pub languages: Vec<String>,
+}
+
+/// The resolved outcome of one dynamic-domain description job.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainDescriptionOutcome {
+    /// Correlation identifier of the job.
+    pub description_id: String,
+    /// The description; `None` when the session failed.
+    pub description: Option<DynamicDomainDescription>,
+    /// Why the description fell back, when its session failed.
+    pub error: Option<HostErrorInfo>,
+}
+
+/// A Rust-to-host `start_domain_description` message.
+#[derive(Debug, Clone)]
+pub struct StartDomainDescriptionMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the description job to execute.
+    pub payload: DomainDescriptionPayload,
+}
+
+impl StartDomainDescriptionMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: DomainDescriptionPayload) -> Self {
+        StartDomainDescriptionMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(
+            rust_to_host::START_DOMAIN_DESCRIPTION,
+            &self.id,
+            &self.payload,
+        )
+    }
 }
 
 /// A Rust-to-host `host_config` message.
@@ -1130,6 +1261,99 @@ mod tests {
                 matches!(err, ProtocolError::InvalidPayload { .. }),
                 "{err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn domain_description_messages_roundtrip_strictly() {
+        let payload = DomainDescriptionPayload {
+            description_id: "desc-1".to_string(),
+            timeout_ms: 60_000,
+            model_profile: "standard".to_string(),
+            thinking_level: crate::domain::model::ThinkingLevel::Low,
+            descriptors: vec!["Audio pipeline rewrite".to_string()],
+            changed_paths: Vec::new(),
+            languages: vec!["rust".to_string()],
+        };
+        let line = StartDomainDescriptionMessage::new("m-5".to_string(), payload.clone()).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["type"], "start_domain_description");
+        assert_eq!(value["id"], "m-5");
+        assert_eq!(value["description_id"], "desc-1");
+        assert_eq!(value["timeout_ms"], 60_000);
+        let back: DomainDescriptionPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(back, payload);
+        assert!(!line.contains('\n'), "messages must be single lines");
+
+        // A successful completion carries the description and no error.
+        let description = serde_json::json!({
+            "domain_label": "audio dsp",
+            "focus_terms": ["sampling rate"],
+            "risks_to_check": ["denormals"],
+            "relevant_practice_tags": ["realtime"],
+        });
+        let line = format!(
+            r#"{{"protocol_version":1,"id":"h-10","type":"domain_description_completed","description_id":"desc-1","description":{description}}}"#
+        );
+        let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
+        match event {
+            HostEvent::DomainDescriptionCompleted {
+                description_id,
+                description,
+                error,
+            } => {
+                assert_eq!(description_id, "desc-1");
+                assert!(error.is_none());
+                assert_eq!(
+                    description.expect("description present").domain_label,
+                    "audio dsp"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // A failed completion carries an error and no description.
+        let line = r#"{"protocol_version":1,"id":"h-10","type":"domain_description_completed","description_id":"desc-1","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let event = parse_host_event(Envelope::parse_host_line(line).unwrap()).unwrap();
+        match event {
+            HostEvent::DomainDescriptionCompleted {
+                description, error, ..
+            } => {
+                assert!(description.is_none());
+                assert!(error.is_some());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // Malformed completions are rejected: neither field, both fields,
+        // empty label, oversized lists, unknown fields.
+        for bad in [
+            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d"}"#.to_string(),
+            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"x","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[]},"error":{"code":"c","message":"m"}}"#.to_string(),
+            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"  ","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[]}}"#.to_string(),
+            {
+                let mut oversized = serde_json::json!({
+                    "protocol_version": 1, "id": "h", "type": "domain_description_completed",
+                    "description_id": "d",
+                    "description": {
+                        "domain_label": "x",
+                        "focus_terms": [],
+                        "risks_to_check": [],
+                        "relevant_practice_tags": [],
+                    },
+                });
+                let tags: Vec<String> = (0..=MAX_DOMAIN_DESCRIPTION_TERMS)
+                    .map(|index| format!("tag{index}"))
+                    .collect();
+                oversized["description"]["relevant_practice_tags"] =
+                    serde_json::json!(tags);
+                oversized.to_string()
+            },
+            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"x","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[],"tools":["shell"]}}"#.to_string(),
+        ] {
+            let err = parse_host_event(Envelope::parse_host_line(&bad).unwrap()).unwrap_err();
+            assert!(matches!(err, ProtocolError::InvalidPayload { .. }), "{err:?}");
         }
     }
 

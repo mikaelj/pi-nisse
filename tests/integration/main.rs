@@ -10,6 +10,7 @@ mod pi_host;
 mod pi_reviewer;
 mod pi_synthesis;
 mod pi_tools;
+mod plan_review;
 mod query_binary;
 mod records_binary;
 
@@ -36,6 +37,29 @@ pub(crate) fn run_nisse_in(cwd: &Path, args: &[&str], home: &Path) -> Output {
         .env("RUST_LOG", "off")
         .output()
         .expect("failed to spawn nisse binary")
+}
+
+/// Run the built `nisse` binary in `cwd` with an isolated home and
+/// extra environment variables (host runtime selection, fault
+/// injection).
+pub(crate) fn run_nisse_in_with_env(
+    cwd: &Path,
+    args: &[&str],
+    home: &Path,
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nisse"));
+    command.args(args).current_dir(cwd);
+    command
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("xdg"))
+        .env("APPDATA", home.join("appdata"))
+        .env("RUST_LOG", "off")
+        .env("NISSE_PI_HOST_RUNTIME", "fake");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("failed to spawn nisse binary")
 }
 
 /// Write the same user config into every platform-native location the

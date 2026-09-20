@@ -6,6 +6,7 @@
 use thiserror::Error;
 
 use crate::cli::Command;
+use crate::jury::review::MAX_PLAN_BYTES;
 
 /// Typed application errors.
 #[derive(Debug, Error)]
@@ -48,8 +49,8 @@ impl App {
         match command {
             Command::Doctor => self.run_doctor(),
             Command::Review { review } => match review {
-                crate::cli::ReviewCommand::Plan { .. } => {
-                    Err(AppError::NotImplemented("nisse review plan".to_string()))
+                crate::cli::ReviewCommand::Plan { source, json } => {
+                    self.run_review_plan(source, json)
                 }
                 crate::cli::ReviewCommand::Code { .. } => {
                     Err(AppError::NotImplemented("nisse review code".to_string()))
@@ -97,6 +98,69 @@ impl App {
         )?;
         let paths = crate::storage::StoragePaths::for_repo(&ctx);
         Ok((ctx, paths))
+    }
+
+    /// Run `nisse review plan` (plan sections 58 and 59).
+    ///
+    /// Executes the complete plan-review pipeline against the current
+    /// working-tree snapshot and prints the result (text, or the strict
+    /// `ReviewResult` JSON with `--json`). The local review event is
+    /// persisted in the shared cache. Reviews never require Needle,
+    /// embeddings, or network access in the deterministic runtimes.
+    fn run_review_plan(&self, source: crate::cli::PlanSource, json: bool) -> Result<(), AppError> {
+        use crate::config;
+        use crate::git::{SnapshotSpec, resolve_snapshot};
+        use crate::jury::review::{
+            PlanInput, PlanReviewOptions, host_launch_from_env, render_review_text, run_plan_review,
+        };
+
+        let (text, file) = read_plan_source(&source)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
+
+        let (ctx, paths) = self.discover_storage()?;
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).map_err(|err| {
+            AppError::Other(anyhow::anyhow!(
+                "review plan failed to resolve the working-tree snapshot: {err}"
+            ))
+        })?;
+
+        // Trusted local configuration supplies the model profiles the
+        // host may use; reviewer sessions never inherit a model.
+        let user_path = config::paths::user_config_path();
+        let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
+        let loaded =
+            config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
+                AppError::Other(anyhow::anyhow!(
+                    "review plan failed to load configuration: {err}"
+                ))
+            })?;
+
+        let launch = host_launch_from_env()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
+        let mut options = PlanReviewOptions::new(launch);
+        options.model_profiles = loaded.config.model_profiles.clone();
+
+        // The plan file participates in the working snapshot when it
+        // lives inside the worktree (untracked non-ignored content is
+        // part of the target); compute its repository-relative path so
+        // evidence can cite it.
+        let plan_path = file.as_deref().and_then(|file| repo_relative(&ctx, file));
+        let plan = PlanInput {
+            text,
+            path: plan_path,
+        };
+
+        let outcome = run_plan_review(&ctx, &resolved, &paths, &plan, &options)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
+
+        let rendered = if json {
+            serde_json::to_string(&outcome.result)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?
+        } else {
+            render_review_text(&outcome.result)
+        };
+        print_to_stdout(&rendered);
+        Ok(())
     }
 
     /// Run `nisse query`.
@@ -244,6 +308,37 @@ fn print_to_stdout(text: &str) {
     let _ = stdout.flush();
 }
 
+/// Read the plan input from `--file <path>` or `--stdin` (exactly one
+/// is set; the CLI enforces it). The input is bounded to
+/// [`MAX_PLAN_BYTES`](crate::jury::review::MAX_PLAN_BYTES).
+fn read_plan_source(
+    source: &crate::cli::PlanSource,
+) -> Result<(String, Option<std::path::PathBuf>), String> {
+    let bytes: Vec<u8> = if let Some(file) = &source.file {
+        std::fs::read(file)
+            .map_err(|err| format!("failed to read plan `{}`: {err}", file.display()))?
+    } else {
+        let mut buffer = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buffer)
+            .map_err(|err| format!("failed to read the plan from stdin: {err}"))?;
+        buffer
+    };
+    if bytes.len() > MAX_PLAN_BYTES {
+        return Err(format!("the plan exceeds {MAX_PLAN_BYTES} bytes"));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "the plan is not valid UTF-8".to_string())?;
+    Ok((text, source.file.clone()))
+}
+
+/// Repository-relative form of `path` when it lies inside the
+/// worktree, using forward slashes; `None` otherwise.
+fn repo_relative(ctx: &crate::git::RepoContext, path: &std::path::Path) -> Option<String> {
+    let absolute = std::fs::canonicalize(path).ok()?;
+    let root = std::fs::canonicalize(&ctx.worktree_root).ok()?;
+    let relative = absolute.strip_prefix(&root).ok()?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
 /// Configure tracing output.
 ///
 /// Logs always go to stderr; stdout is reserved for protocol and
@@ -271,15 +366,6 @@ mod tests {
         let app = App::new();
 
         let cases: Vec<Command> = vec![
-            Command::Review {
-                review: crate::cli::ReviewCommand::Plan {
-                    source: crate::cli::PlanSource {
-                        file: Some("plan.md".into()),
-                        stdin: false,
-                    },
-                    json: false,
-                },
-            },
             Command::Review {
                 review: crate::cli::ReviewCommand::Code {
                     scope: crate::cli::CodeScope {

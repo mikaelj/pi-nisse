@@ -23,10 +23,11 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use super::protocol::{
-    self, CancelMessage, CancelPayload, FindingEquivalenceCheckPayload, FindingEquivalenceOutcome,
-    HostConfigMessage, HostConfigPayload, HostEvent, HostReady, HostRuntime, ProtocolError,
-    StartFindingEquivalenceCheckMessage, StartReviewMessage, StartReviewPayload,
-    ToolRequestPayload, ToolResponseMessage, ToolResponsePayload,
+    self, CancelMessage, CancelPayload, DomainDescriptionOutcome, FindingEquivalenceCheckPayload,
+    FindingEquivalenceOutcome, HostConfigMessage, HostConfigPayload, HostEvent, HostReady,
+    HostRuntime, ProtocolError, StartDomainDescriptionMessage, StartFindingEquivalenceCheckMessage,
+    StartReviewMessage, StartReviewPayload, ToolRequestPayload, ToolResponseMessage,
+    ToolResponsePayload,
 };
 use crate::domain::report::ReviewerReport;
 
@@ -300,6 +301,17 @@ impl HostProcess {
         self.write_line(&line)
     }
 
+    /// Send `start_domain_description` for one constrained description
+    /// job (plan section 19).
+    pub fn start_domain_description(
+        &mut self,
+        payload: &super::protocol::DomainDescriptionPayload,
+    ) -> Result<(), HostError> {
+        let id = crate::domain::ids::new_ulid();
+        let line = StartDomainDescriptionMessage::new(id, payload.clone()).to_line();
+        self.write_line(&line)
+    }
+
     /// Send `tool_response`.
     pub fn send_tool_response(&mut self, payload: &ToolResponsePayload) -> Result<(), HostError> {
         let id = crate::domain::ids::new_ulid();
@@ -482,6 +494,13 @@ impl HostProcess {
                         ),
                     });
                 }
+                HostEvent::DomainDescriptionCompleted { description_id, .. } => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "domain_description_completed for job `{description_id}` arrived while driving review `{review_id}`"
+                        ),
+                    });
+                }
                 HostEvent::HostError(info) => {
                     return Err(HostError::HostReportedError {
                         code: info.code,
@@ -570,6 +589,62 @@ impl HostProcess {
             .expect("every expected check resolved"))
     }
 
+    /// Drive one dynamic-domain description job to completion (plan
+    /// section 19).
+    ///
+    /// Waits for the `domain_description_completed` answering
+    /// `description_id`. A session that failed completes without a
+    /// description plus an error rather than failing the exchange;
+    /// protocol-level failures, child death, reviewer traffic, and a
+    /// mismatched correlation id are typed errors.
+    pub fn complete_domain_description(
+        &mut self,
+        description_id: &str,
+        timeout: Duration,
+    ) -> Result<DomainDescriptionOutcome, HostError> {
+        if !self.ready {
+            return Err(HostError::UnexpectedHostMessage {
+                reason: "complete_domain_description called before host_ready".to_string(),
+            });
+        }
+        let deadline = Instant::now() + timeout;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| HostError::Timeout {
+                what: format!("domain description `{description_id}` to complete"),
+            })?;
+        match self.recv_event(remaining)? {
+            HostEvent::DomainDescriptionCompleted {
+                description_id: found,
+                description,
+                error,
+            } => {
+                if found != description_id {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "domain_description_completed for job `{found}` while driving `{description_id}`"
+                        ),
+                    });
+                }
+                Ok(DomainDescriptionOutcome {
+                    description_id: found,
+                    description,
+                    error,
+                })
+            }
+            HostEvent::HostError(info) => Err(HostError::HostReportedError {
+                code: info.code,
+                message: info.message,
+            }),
+            other => Err(HostError::UnexpectedHostMessage {
+                reason: format!(
+                    "received `{}` while driving domain description `{description_id}`",
+                    event_type_name(&other)
+                ),
+            }),
+        }
+    }
+
     /// Gracefully shut down: close stdin, wait up to `timeout` for the
     /// child to exit, then kill it if necessary. Returns the exit status.
     pub fn shutdown(mut self, timeout: Duration) -> Result<ExitStatus, HostError> {
@@ -644,6 +719,7 @@ fn event_type_name(event: &HostEvent) -> &'static str {
         HostEvent::ReviewerFailed { .. } => "reviewer_failed",
         HostEvent::ToolRequest { .. } => "tool_request",
         HostEvent::FindingEquivalenceCompleted { .. } => "finding_equivalence_completed",
+        HostEvent::DomainDescriptionCompleted { .. } => "domain_description_completed",
         HostEvent::HostError(_) => "host_error",
     }
 }

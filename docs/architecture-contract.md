@@ -70,6 +70,20 @@ LLMs are untrusted semantic workers, not orchestrators.
 - Reviewer source access is read-only and budget-bounded.
 - Uncertainty is represented explicitly and produces less automation.
 
+## Review pipeline
+
+`review plan` executes the frozen pipeline of PLAN.md section 58 against the
+working-tree snapshot (section 25): lazy index refresh, deterministic request
+descriptors from the plan, preliminary fact/lesson retrieval, rules-based
+routing, deterministic jury construction (`quality` always, 2..=4 jurors,
+dynamic-domain-expert fallback), bounded initial reviewer contexts led by the
+plan itself (section 23), independent reviewer execution over the Pi host
+with the one-retry policy and the two-valid-reports minimum (section 36),
+finding/evidence validation against the snapshot, consolidation, and the
+local review event in the shared cache (section 57). The dynamic fallback's
+domain description is a constrained, validated semantic input only; when its
+session fails, the static expert template is used unchanged.
+
 ## Storage
 
 - **Durable shared knowledge**: Git-tracked `.nisse/**` immutable JSON records

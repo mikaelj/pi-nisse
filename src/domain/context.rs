@@ -23,6 +23,9 @@ pub enum ContextKind {
     /// Raw source content read back from the target snapshot by the
     /// `source_lookup` reviewer tool (plan section 22).
     Source,
+    /// The reviewed plan itself: the primary review input of a plan
+    /// review (plan sections 23 and 59).
+    Plan,
     /// A supported (or conflicting) durable project fact.
     ProjectFact,
     /// A durable project lesson.
@@ -42,6 +45,7 @@ impl ContextKind {
             ContextKind::SymbolReference => "symbol-reference",
             ContextKind::SourceSkeleton => "source-skeleton",
             ContextKind::Source => "source",
+            ContextKind::Plan => "plan",
             ContextKind::ProjectFact => "project-fact",
             ContextKind::ProjectLesson => "project-lesson",
             ContextKind::Practice => "practice",
@@ -49,23 +53,23 @@ impl ContextKind {
         }
     }
 
-    /// Context-priority rank (plan section 31): affected source first,
-    /// then verified facts, directly related source, lessons, and
-    /// built-in practices. Lower ranks sort first on equal scores.
-    /// `Source` and `SymbolReference` share the rank of directly related
-    /// source: both are exact, reviewer-requested target-snapshot
-    /// content rather than pre-selected affected source.
+    /// Context-priority rank (plan section 31): review input first
+    /// (the plan and consolidated finding groups are direct review
+    /// input, never retrieval signals), then affected source, verified
+    /// facts, directly related source, lessons, and built-in practices.
+    /// Lower ranks sort first on equal scores. `Source` and
+    /// `SymbolReference` share the rank of directly related source: both
+    /// are exact, reviewer-requested target-snapshot content rather than
+    /// pre-selected affected source.
     pub fn priority(self) -> u8 {
         match self {
+            ContextKind::Plan | ContextKind::FindingGroup => 0,
             ContextKind::SymbolDefinition => 0,
             ContextKind::ProjectFact => 1,
             ContextKind::SourceSkeleton => 2,
             ContextKind::Source | ContextKind::SymbolReference => 3,
             ContextKind::ProjectLesson => 4,
             ContextKind::Practice => 5,
-            // Finding-group entries are direct review input of the
-            // synthesis session, never a retrieval signal.
-            ContextKind::FindingGroup => 0,
         }
     }
 }
@@ -161,6 +165,7 @@ mod tests {
             (ContextKind::SymbolReference, "\"symbol_reference\""),
             (ContextKind::SourceSkeleton, "\"source_skeleton\""),
             (ContextKind::Source, "\"source\""),
+            (ContextKind::Plan, "\"plan\""),
             (ContextKind::ProjectFact, "\"project_fact\""),
             (ContextKind::ProjectLesson, "\"project_lesson\""),
             (ContextKind::Practice, "\"practice\""),
@@ -181,6 +186,11 @@ mod tests {
 
     #[test]
     fn context_priority_follows_plan_ordering() {
+        // Review input first: the plan outranks every retrieved signal.
+        assert_eq!(
+            ContextKind::Plan.priority(),
+            ContextKind::FindingGroup.priority()
+        );
         // Affected source, then verified facts, directly related source,
         // lessons, built-in practices (plan section 31).
         assert!(ContextKind::SymbolDefinition.priority() < ContextKind::ProjectFact.priority());

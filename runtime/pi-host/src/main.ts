@@ -18,6 +18,10 @@ import * as readline from "node:readline";
 
 import { runFindingEquivalenceCheck, type EquivalenceDeps } from "./equivalence.ts";
 import {
+  runDomainDescription,
+  type DomainDescriptionDeps,
+} from "./domain.ts";
+import {
   decodeIncomingMessage,
   encodeMessage,
   ERROR_CODES,
@@ -36,10 +40,12 @@ import { ToolBridge } from "./tools.ts";
 import { parseFault, type HostRuntime } from "./types.ts";
 import {
   validateCancel,
+  validateDomainDescriptionRequest,
   validateFindingEquivalenceCheck,
   validateHostConfig,
   validateStartReview,
   ValidationError,
+  type DomainDescriptionRequest,
   type FindingEquivalenceCheck,
   type HostConfig,
   type ReviewerExecutionSpec,
@@ -130,6 +136,11 @@ function piSessionDeps(kind: "plan" | "code"): PiSessionDeps {
 
 /** Dependencies of pi-runtime equivalence sessions. */
 function equivalenceDeps(): EquivalenceDeps {
+  return { models: hostModels, resolveAgent: resolvePiAgentFactory };
+}
+
+/** Dependencies of pi-runtime domain-description sessions. */
+function domainDescriptionDeps(): DomainDescriptionDeps {
   return { models: hostModels, resolveAgent: resolvePiAgentFactory };
 }
 
@@ -246,6 +257,31 @@ async function runEquivalenceJob(check: FindingEquivalenceCheck): Promise<void> 
   }
 }
 
+/** Execute one domain-description job: a completed result always answers
+ * the job, with an error (and no description) when the session failed. */
+async function runDomainDescriptionJob(request: DomainDescriptionRequest): Promise<void> {
+  try {
+    const result = await runDomainDescription(
+      options.runtime,
+      request,
+      domainDescriptionDeps(),
+    );
+    send("domain_description_completed", nextId(), {
+      description_id: request.description_id,
+      ...(result.description !== undefined ? { description: result.description } : {}),
+      ...(result.error !== undefined ? { error: result.error } : {}),
+    });
+  } catch (err) {
+    // Unexpected internal failures are protocol-level host errors.
+    sendHostError(
+      ERROR_CODES.internal,
+      `domain description \`${request.description_id}\` failed unexpectedly: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
   switch (message.type) {
     case "host_config":
@@ -257,6 +293,11 @@ function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
     case "start_finding_equivalence_check": {
       const check = validateFindingEquivalenceCheck(message.payload);
       void runEquivalenceJob(check);
+      return;
+    }
+    case "start_domain_description": {
+      const request = validateDomainDescriptionRequest(message.payload);
+      void runDomainDescriptionJob(request);
       return;
     }
     case "tool_response":

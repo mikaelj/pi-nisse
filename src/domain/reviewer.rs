@@ -89,6 +89,29 @@ pub struct ReviewerProfile {
     pub allowed_capabilities: Vec<ReviewerCapability>,
 }
 
+/// A constrained dynamic domain description (plan section 19).
+///
+/// Nisse may obtain such a description for the `dynamic-domain-expert`
+/// reviewer. The description is **semantic input only**: it can focus the
+/// expert's review on a domain, but it can never add tools, executables,
+/// providers, endpoint trust, or a permanent reviewer identity — those are
+/// assigned exclusively by the static reviewer template Rust combines the
+/// description with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicDomainDescription {
+    /// Short label of the domain the request belongs to (e.g.
+    /// `audio dsp`).
+    pub domain_label: String,
+    /// Terms worth focusing on when reviewing this domain.
+    pub focus_terms: Vec<String>,
+    /// Domain-specific risks worth checking explicitly.
+    pub risks_to_check: Vec<String>,
+    /// Practice pack tags relevant to this domain. Only tags provided by
+    /// the bundled catalog survive Rust-side normalization.
+    pub relevant_practice_tags: Vec<String>,
+}
+
 /// One juror's execution contract (plan section 18).
 ///
 /// Rust constructs exactly one spec per juror. The spec fully determines
@@ -129,6 +152,32 @@ pub struct ReviewerExecutionSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_domain_description_roundtrip_is_strict() {
+        let description = DynamicDomainDescription {
+            domain_label: "audio dsp".to_string(),
+            focus_terms: vec!["sampling rate".to_string()],
+            risks_to_check: vec!["denormal handling".to_string()],
+            relevant_practice_tags: vec!["realtime".to_string()],
+        };
+        let json = serde_json::to_string(&description).unwrap();
+        assert_eq!(
+            json,
+            "{\"domain_label\":\"audio dsp\",\"focus_terms\":[\"sampling rate\"],\
+\"risks_to_check\":[\"denormal handling\"],\"relevant_practice_tags\":[\"realtime\"]}"
+        );
+        let back: DynamicDomainDescription = serde_json::from_str(&json).unwrap();
+        assert_eq!(description, back);
+
+        // Unknown fields and missing fields are rejected.
+        let mut extra = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+        extra["tools"] = serde_json::json!(["shell"]);
+        assert!(serde_json::from_str::<DynamicDomainDescription>(&extra.to_string()).is_err());
+        let mut pruned = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+        pruned.as_object_mut().unwrap().remove("domain_label");
+        assert!(serde_json::from_str::<DynamicDomainDescription>(&pruned.to_string()).is_err());
+    }
 
     fn sample_execution_spec() -> ReviewerExecutionSpec {
         ReviewerExecutionSpec {
