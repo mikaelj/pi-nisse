@@ -81,6 +81,7 @@ fn options() -> ConsolidationOptions {
 
 fn host_config() -> HostConfigPayload {
     HostConfigPayload {
+        max_concurrent_reviewers: None,
         models: BTreeMap::from([(
             "standard".to_string(),
             HostModelProfile {

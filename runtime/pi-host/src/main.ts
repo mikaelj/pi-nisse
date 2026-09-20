@@ -29,6 +29,7 @@ import {
   runFactSynthesis,
   type FactSynthesisDeps,
 } from "./synthesis.ts";
+import { createLimiter, type Limiter } from "./limiter.ts";
 import {
   decodeIncomingMessage,
   encodeMessage,
@@ -127,6 +128,13 @@ const bridge = new ToolBridge({ nextId, send });
 /** Model profiles supplied by the Rust core through `host_config`. */
 const hostModels = new Map<string, { readonly model: string; readonly endpoint?: string }>();
 
+/** Reviewer-session concurrency bound (plan milestone 29: reviewer
+ * concurrency obeys config). The Rust core forwards the configured
+ * bound through `host_config`; until one arrives the compiled default
+ * (the frozen jury maximum) applies. */
+const DEFAULT_MAX_CONCURRENT_REVIEWERS = 4;
+let reviewerLimiter: Limiter = createLimiter(DEFAULT_MAX_CONCURRENT_REVIEWERS);
+
 /** Resolve the agent-session factory for the pi runtime (once per host). */
 let agentFactoryPromise: Promise<SessionAgentFactory> | undefined;
 function resolvePiAgentFactory(): Promise<SessionAgentFactory> {
@@ -175,41 +183,48 @@ async function runReviewer(
   spec: ReviewerExecutionSpec,
   kind: "plan" | "code",
 ): Promise<void> {
-  if (isCancelled(reviewId)) {
-    return;
-  }
-  send("reviewer_started", nextId(), {
-    review_id: reviewId,
-    reviewer_id: spec.reviewer_id,
-  });
-  try {
-    const session = createReviewerSession(options.runtime, spec, piSessionDeps(kind));
-    const report = await session.run({
-      reviewId,
-      tools: bridge,
-      isCancelled: () => isCancelled(reviewId),
-    });
-    if (isCancelled(reviewId)) {
-      return;
-    }
-    send("reviewer_completed", nextId(), {
-      review_id: reviewId,
-      reviewer_id: spec.reviewer_id,
-      report,
-    });
-  } catch (err) {
-    if (isCancelled(reviewId)) {
-      return;
-    }
-    send("reviewer_failed", nextId(), {
-      review_id: reviewId,
-      reviewer_id: spec.reviewer_id,
-      error: {
-        code: err instanceof ReviewerSessionError ? err.code : "session_error",
-        message: err instanceof Error ? err.message : String(err),
-      },
-    });
-  }
+  // Reviewer sessions run concurrently, but never more at once than the
+  // configured bound: acquire a slot first, and only then announce the
+  // reviewer as started (a queued reviewer has not started yet).
+  await reviewerLimiter
+    .run(async (): Promise<void> => {
+      if (isCancelled(reviewId)) {
+        return;
+      }
+      send("reviewer_started", nextId(), {
+        review_id: reviewId,
+        reviewer_id: spec.reviewer_id,
+      });
+      try {
+        const session = createReviewerSession(options.runtime, spec, piSessionDeps(kind));
+        const report = await session.run({
+          reviewId,
+          tools: bridge,
+          isCancelled: () => isCancelled(reviewId),
+        });
+        if (isCancelled(reviewId)) {
+          return;
+        }
+        send("reviewer_completed", nextId(), {
+          review_id: reviewId,
+          reviewer_id: spec.reviewer_id,
+          report,
+        });
+      } catch (err) {
+        if (isCancelled(reviewId)) {
+          return;
+        }
+        send("reviewer_failed", nextId(), {
+          review_id: reviewId,
+          reviewer_id: spec.reviewer_id,
+          error: {
+            code: err instanceof ReviewerSessionError ? err.code : "session_error",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+    })
+    .done;
 }
 
 function handleStartReview(payload: unknown): void {
@@ -255,7 +270,14 @@ function handleHostConfig(payload: unknown): void {
   for (const [name, profile] of config.models) {
     hostModels.set(name, profile);
   }
-  log(`host_config: stored ${hostModels.size} model profile(s)`);
+  reviewerLimiter = createLimiter(
+    config.maxConcurrentReviewers ?? DEFAULT_MAX_CONCURRENT_REVIEWERS,
+  );
+  log(
+    `host_config: stored ${hostModels.size} model profile(s); ` +
+      `max ${config.maxConcurrentReviewers ?? DEFAULT_MAX_CONCURRENT_REVIEWERS} ` +
+      `concurrent reviewer session(s)`,
+  );
 }
 
 /** Execute one equivalence check job: a completed result always answers

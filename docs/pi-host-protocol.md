@@ -77,7 +77,7 @@ Sending a vocabulary-but-reserved message is refused deterministically
 ### `host_config` (core → host)
 
 ```json
-{"models":{"standard":{"model":"acme/local-small","endpoint":"http://127.0.0.1:8080/v1"}}}
+{"models":{"standard":{"model":"acme/local-small","endpoint":"http://127.0.0.1:8080/v1"}},"max_concurrent_reviewers":2}
 ```
 
 Resolved model profiles the host may use for reviewer sessions, mapped
@@ -88,6 +88,15 @@ model's base URL (endpoint trust was already validated by the core).
 Sending `host_config` again replaces the table. Reviewer sessions never
 inherit a model: a spec whose `model_profile` is absent from the table
 fails closed (`reviewer_failed{code="model_profile_unresolved"}`).
+
+`max_concurrent_reviewers` is an optional integer (1–16) bounding how
+many reviewer sessions the host runs at once (plan milestone 29:
+reviewer concurrency obeys the trusted local `performance`
+configuration). Reviewers beyond the bound queue in submission order;
+`reviewer_started` is sent when a reviewer's session actually begins.
+When the field is absent the host default (4, the frozen jury maximum)
+applies. Non-reviewer sessions (equivalence checks, fact verification,
+fact synthesis, domain descriptions) are not affected.
 
 ### `host_ready` (host → core)
 

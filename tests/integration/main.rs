@@ -15,6 +15,7 @@ mod git_env;
 mod lessons_binary;
 mod mcp_binary;
 mod needle_binary;
+mod performance;
 mod pi_host;
 mod pi_reviewer;
 mod pi_synthesis;

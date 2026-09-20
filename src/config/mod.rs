@@ -42,6 +42,9 @@
 //!
 //! [learning]
 //! enabled = true
+//!
+//! [performance]
+//! max_concurrent_reviewers = 4
 //! ```
 
 /// Check a contributor ID against the frozen slug pattern.
@@ -73,6 +76,16 @@ pub const REQUIRED_PROFILE_NAMES: [&str; 2] = ["standard", "strong"];
 /// Optional conceptual model profile names.
 pub const OPTIONAL_PROFILE_NAMES: [&str; 2] = ["fast", "strongest"];
 
+/// Default bound on concurrently running reviewer sessions in the Pi
+/// review host (plan milestone 29: reviewer concurrency obeys config).
+/// The default lets a full frozen jury (2–4 reviewers) run in parallel.
+pub const DEFAULT_MAX_CONCURRENT_REVIEWERS: usize = 4;
+
+/// Upper bound accepted for `performance.max_concurrent_reviewers`.
+/// Reviews never run more reviewers than the frozen jury maximum; the
+/// bound only rejects implausible configuration values.
+pub const MAX_CONCURRENT_REVIEWERS_LIMIT: usize = 16;
+
 /// Fully merged Nisse configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NisseConfig {
@@ -86,6 +99,8 @@ pub struct NisseConfig {
     pub embeddings: EmbeddingsConfig,
     /// Learning behavior.
     pub learning: LearningConfig,
+    /// Performance behavior (plan milestone 29).
+    pub performance: PerformanceConfig,
     /// Contributor identity (lives in user config).
     pub contributor: Option<ContributorIdentity>,
 }
@@ -106,6 +121,7 @@ impl Default for NisseConfig {
                 endpoint: None,
             },
             learning: LearningConfig { enabled: true },
+            performance: PerformanceConfig::default(),
             contributor: None,
         }
     }
@@ -162,6 +178,24 @@ pub struct EmbeddingsConfig {
 pub struct LearningConfig {
     /// Whether lesson learning from observations is enabled.
     pub enabled: bool,
+}
+
+/// Performance behavior configuration (plan milestone 29: reviewer
+/// concurrency obeys config).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerformanceConfig {
+    /// Maximum number of reviewer sessions the Pi review host runs
+    /// concurrently. Bounded below by 1 (no unbounded parallelism) and
+    /// above by [`MAX_CONCURRENT_REVIEWERS_LIMIT`].
+    pub max_concurrent_reviewers: usize,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        PerformanceConfig {
+            max_concurrent_reviewers: DEFAULT_MAX_CONCURRENT_REVIEWERS,
+        }
+    }
 }
 
 /// Local contributor identity.
@@ -316,6 +350,19 @@ fn validate_layer(layer: &PartialConfig, path: &Path, origin: Origin) -> Result<
         }
     }
 
+    if let Some(performance) = &layer.performance
+        && let Some(max) = performance.max_concurrent_reviewers
+        && !(1..=MAX_CONCURRENT_REVIEWERS_LIMIT).contains(&max)
+    {
+        return Err(invalid(
+            path,
+            format!(
+                "performance.max_concurrent_reviewers must be between 1 and \
+                 {MAX_CONCURRENT_REVIEWERS_LIMIT}, got {max}"
+            ),
+        ));
+    }
+
     Ok(())
 }
 
@@ -385,6 +432,18 @@ fn validate_merged(config: &NisseConfig, blame: Option<&Path>) -> Result<(), Con
         }
     }
 
+    if !(1..=MAX_CONCURRENT_REVIEWERS_LIMIT).contains(&config.performance.max_concurrent_reviewers)
+    {
+        return Err(invalid(
+            path,
+            format!(
+                "performance.max_concurrent_reviewers must be between 1 and \
+                 {MAX_CONCURRENT_REVIEWERS_LIMIT}, got {}",
+                config.performance.max_concurrent_reviewers
+            ),
+        ));
+    }
+
     Ok(())
 }
 
@@ -396,6 +455,7 @@ struct PartialConfig {
     classifier: Option<PartialProviderConfig>,
     embeddings: Option<PartialProviderConfig>,
     learning: Option<PartialLearning>,
+    performance: Option<PartialPerformance>,
     contributor: Option<PartialContributor>,
 }
 
@@ -416,6 +476,12 @@ struct PartialProviderConfig {
 #[serde(deny_unknown_fields)]
 struct PartialLearning {
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartialPerformance {
+    max_concurrent_reviewers: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -452,6 +518,11 @@ impl PartialConfig {
             && let Some(enabled) = learning.enabled
         {
             config.learning.enabled = enabled;
+        }
+        if let Some(performance) = self.performance
+            && let Some(max) = performance.max_concurrent_reviewers
+        {
+            config.performance.max_concurrent_reviewers = max;
         }
         if let Some(contributor) = self.contributor
             && let Some(id) = contributor.id
@@ -758,6 +829,52 @@ model = "repo-strong"
         );
         let err = load_config(Some(&path), None).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { .. }), "{err}");
+    }
+
+    #[test]
+    fn performance_concurrency_config_is_validated_and_merged() {
+        // The default matches the frozen jury maximum.
+        assert_eq!(DEFAULT_MAX_CONCURRENT_REVIEWERS, 4);
+
+        // A valid value overrides the default (repository layer wins).
+        let user_dir = tempfile::tempdir().unwrap();
+        let user_path = write_config(
+            user_dir.path(),
+            "[performance]\nmax_concurrent_reviewers = 2\n",
+        );
+        let loaded = load_config(Some(&user_path), None).unwrap();
+        assert_eq!(loaded.config.performance.max_concurrent_reviewers, 2);
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo_path = write_config(
+            repo_dir.path(),
+            "[performance]\nmax_concurrent_reviewers = 1\n",
+        );
+        let loaded = load_config(Some(&user_path), Some(&repo_path)).unwrap();
+        assert_eq!(loaded.config.performance.max_concurrent_reviewers, 1);
+
+        // Out-of-range values are rejected at layer and merge time.
+        for bad in ["0", "17", "999"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_config(
+                dir.path(),
+                &format!("[performance]\nmax_concurrent_reviewers = {bad}\n"),
+            );
+            let err = load_config(Some(&path), None).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Invalid { .. }),
+                "expected `{bad}` to be rejected, got {err}"
+            );
+        }
+
+        // Unknown performance fields are rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "[performance]\nmax_concurrent_reviewers = 2\nextra = true\n",
+        );
+        let err = load_config(Some(&path), None).unwrap_err();
+        assert!(matches!(err, ConfigError::Malformed { .. }));
     }
 
     #[test]

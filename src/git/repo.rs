@@ -90,6 +90,13 @@ pub struct TreeEntry {
 ///
 /// Discovery starts from any directory inside a worktree (including linked
 /// worktrees) and resolves the exact paths and HEAD state for that worktree.
+///
+/// Performance (plan milestone 29): discovery resolves the worktree root,
+/// Git directories, and the repository's object format with **one** Git
+/// invocation, and [`RepoContext::object_format`] answers from that cached
+/// discovery — a repository's object format is immutable for its lifetime,
+/// so repeated `git rev-parse --show-object-format` calls per operation are
+/// pure overhead.
 #[derive(Debug, Clone)]
 pub struct RepoContext {
     runner: GitRunner,
@@ -109,6 +116,9 @@ pub struct RepoContext {
     pub detached: bool,
     /// Whether HEAD points at a branch that has no commits yet.
     pub unborn: bool,
+    /// Object format resolved once during discovery (immutable per
+    /// repository; shared across clones of this context).
+    object_format: ObjectFormat,
 }
 
 impl RepoContext {
@@ -124,8 +134,20 @@ impl RepoContext {
             });
         }
 
-        let worktree_root = match runner.run(cwd, &["rev-parse", "--show-toplevel"]) {
-            Ok(output) => PathBuf::from(output.stdout_trimmed()),
+        // One batched `rev-parse` answers the worktree root, both Git
+        // directories, and the object format (milestone 29: discovery runs
+        // on every operation, so each saved Git process is latency saved).
+        // Output order matches the argument order, one line per query.
+        let discover_args = [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "--show-object-format",
+        ];
+        let output = match runner.run(cwd, &discover_args) {
+            Ok(output) => output,
             Err(GitError::Execution { stderr, .. }) if is_not_a_repository(&stderr) => {
                 return Err(GitError::NotARepository {
                     cwd: cwd.to_owned(),
@@ -133,22 +155,40 @@ impl RepoContext {
             }
             Err(err) => return Err(err),
         };
-
-        let git_dir = PathBuf::from(
-            runner
-                .run(cwd, &["rev-parse", "--absolute-git-dir"])?
-                .stdout_trimmed()
-                .to_owned(),
-        );
+        let mut lines = output.stdout.lines().map(str::trim);
+        let Some(worktree_root) = lines.next().filter(|line| !line.is_empty()) else {
+            return Err(GitError::UnexpectedOutput {
+                command: discover_args.join(" "),
+                message: "missing worktree root line".to_string(),
+            });
+        };
+        let worktree_root = PathBuf::from(worktree_root);
+        let git_dir = PathBuf::from(lines.next().filter(|line| !line.is_empty()).ok_or_else(
+            || GitError::UnexpectedOutput {
+                command: discover_args.join(" "),
+                message: "missing git dir line".to_string(),
+            },
+        )?);
         let git_common_dir = PathBuf::from(
-            runner
-                .run(
-                    cwd,
-                    &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-                )?
-                .stdout_trimmed()
-                .to_owned(),
+            lines
+                .next()
+                .filter(|line| !line.is_empty())
+                .ok_or_else(|| GitError::UnexpectedOutput {
+                    command: discover_args.join(" "),
+                    message: "missing git common dir line".to_string(),
+                })?,
         );
+        let object_format =
+            ObjectFormat::parse(lines.next().ok_or_else(|| GitError::UnexpectedOutput {
+                command: discover_args.join(" "),
+                message: "missing object format line".to_string(),
+            })?)?;
+        if lines.next().is_some() {
+            return Err(GitError::UnexpectedOutput {
+                command: discover_args.join(" "),
+                message: "unexpected extra rev-parse output".to_string(),
+            });
+        }
 
         // `--quiet` makes an unresolvable HEAD a status-only outcome instead
         // of a diagnostic, which is how unborn HEAD is detected.
@@ -182,6 +222,7 @@ impl RepoContext {
             branch,
             detached,
             unborn,
+            object_format,
         })
     }
 
@@ -236,11 +277,13 @@ impl RepoContext {
 
     /// Object-hash format of this repository.
     ///
-    /// Decided by the installed Git; content keys for working-tree files
-    /// are derived from it so they agree with Git's own blob object IDs.
+    /// Decided by the installed Git and resolved once during discovery —
+    /// a repository's object format is immutable for its lifetime — so this
+    /// answers without another Git process. Content keys for working-tree
+    /// files are derived from it so they agree with Git's own blob object
+    /// IDs.
     pub fn object_format(&self) -> Result<ObjectFormat, GitError> {
-        let output = self.run(&["rev-parse", "--show-object-format"])?;
-        ObjectFormat::parse(&output.stdout)
+        Ok(self.object_format)
     }
 
     /// Paths tracked in the index, relative to the worktree root and sorted
@@ -453,6 +496,18 @@ impl RepoContext {
         paths.sort();
         paths.dedup();
         Ok(paths)
+    }
+
+    /// Whether any path currently has conflict stages (stage 1–3) in the
+    /// index.
+    ///
+    /// Equivalent to `!unmerged_paths()?.is_empty()` but answered by
+    /// `git ls-files --unmerged` alone (milestone 29): snapshot resolution
+    /// runs on every operation and must not list and parse the entire
+    /// index just to learn that no conflict exists.
+    pub fn has_unmerged_entries(&self) -> Result<bool, GitError> {
+        let output = self.run(&["ls-files", "--unmerged", "-z"])?;
+        Ok(split_nul_entries(&output.stdout).next().is_some())
     }
 
     /// Check that `oid` is a full hex Git object ID (SHA-1 or SHA-256).

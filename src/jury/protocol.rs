@@ -191,17 +191,30 @@ impl HostModelProfile {
 pub struct HostConfigPayload {
     /// Resolved model profiles by profile name.
     pub models: BTreeMap<String, HostModelProfile>,
+    /// Bound on concurrently running reviewer sessions (plan milestone
+    /// 29: reviewer concurrency obeys config). Absent means the host's
+    /// compiled default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_reviewers: Option<u32>,
 }
 
 impl HostConfigPayload {
-    /// Build the payload from configured model profiles.
+    /// Build the payload from configured model profiles, without a
+    /// reviewer-concurrency override.
     pub fn from_config_profiles(profiles: &BTreeMap<String, ModelProfile>) -> Self {
         HostConfigPayload {
             models: profiles
                 .iter()
                 .map(|(name, profile)| (name.clone(), HostModelProfile::from_config(profile)))
                 .collect(),
+            max_concurrent_reviewers: None,
         }
+    }
+
+    /// Set the bound on concurrently running reviewer sessions.
+    pub fn with_max_concurrent_reviewers(mut self, max: u32) -> Self {
+        self.max_concurrent_reviewers = Some(max);
+        self
     }
 
     /// Whether `profile` was supplied to the host.
@@ -1461,11 +1474,33 @@ mod tests {
         assert_eq!(value["id"], "m-0");
         assert_eq!(value["models"]["strong"]["model"], "acme/local-large");
         assert!(value["models"]["strong"].get("endpoint").is_none());
+        // Without a concurrency override the field is absent, keeping
+        // the payload shape compatible with hosts that predate it.
+        assert!(value.get("max_concurrent_reviewers").is_none());
 
         // Strict roundtrip: wrong shape is rejected.
         let back: HostConfigPayload = serde_json::from_value(value).unwrap();
         assert_eq!(back, payload);
         assert!(serde_json::from_str::<HostConfigPayload>("{\"profiles\":{}}").is_err());
+
+        // The reviewer-concurrency override serializes and roundtrips
+        // (plan milestone 29: reviewer concurrency obeys config).
+        let limited =
+            HostConfigPayload::from_config_profiles(&profiles).with_max_concurrent_reviewers(2);
+        let value: serde_json::Value =
+            serde_json::to_value(&limited).expect("serialize limited payload");
+        assert_eq!(value["max_concurrent_reviewers"], 2);
+        let back: HostConfigPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(back, limited);
+        assert_eq!(back.max_concurrent_reviewers, Some(2));
+        // Out-of-range bounds are still decoded leniently on the Rust
+        // side (the host validates strictly); wrong types are rejected.
+        assert!(
+            serde_json::from_value::<HostConfigPayload>(
+                serde_json::json!({"models": {}, "max_concurrent_reviewers": "two"})
+            )
+            .is_err()
+        );
     }
 
     #[test]

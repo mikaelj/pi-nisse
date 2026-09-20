@@ -273,12 +273,15 @@ fn split_range_spec(spec: &str) -> Result<(String, String), GitError> {
 /// state, so `working`/`staged` review scopes are refused instead of
 /// reviewed against a guessed target.
 fn reject_unmerged(ctx: &RepoContext) -> Result<(), GitError> {
-    let unmerged = ctx.unmerged_paths()?;
-    if unmerged.is_empty() {
-        Ok(())
-    } else {
-        Err(GitError::UnmergedPaths { paths: unmerged })
+    // Fast rejection of the ordinary conflict-free case without listing
+    // the whole index (milestone 29); the path list is only materialized
+    // for the error when a conflict actually exists.
+    if !ctx.has_unmerged_entries()? {
+        return Ok(());
     }
+    Err(GitError::UnmergedPaths {
+        paths: ctx.unmerged_paths()?,
+    })
 }
 
 #[cfg(test)]

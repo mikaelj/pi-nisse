@@ -160,6 +160,10 @@ fn config_check(loaded: &LoadedConfig) -> DoctorCheck {
         Some(path) => lines.push(format!("repository config loaded: {}", path.display())),
         None => lines.push("repository config: not found".to_string()),
     }
+    lines.push(format!(
+        "reviewer concurrency: max {} concurrent reviewer session(s)",
+        loaded.config.performance.max_concurrent_reviewers
+    ));
     DoctorCheck {
         name: "config",
         status: CheckStatus::Pass,

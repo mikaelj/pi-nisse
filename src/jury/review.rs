@@ -256,11 +256,15 @@ pub struct PlanReviewOptions {
     pub contributor_id: Option<String>,
     /// Bounds of the fact-candidate pipeline (plan section 47).
     pub fact_processing: crate::learning::facts::FactProcessingOptions,
+    /// Bound on concurrently running reviewer sessions in the Pi host
+    /// (plan milestone 29: reviewer concurrency obeys config).
+    pub max_concurrent_reviewers: u32,
 }
 
 impl PlanReviewOptions {
-    /// Options for `launch` with default consolidation bounds and no
-    /// configured model profiles or optional providers.
+    /// Options for `launch` with default consolidation bounds, the
+    /// default reviewer-concurrency bound, and no configured model
+    /// profiles or optional providers.
     pub fn new(launch: PiHostLaunch) -> Self {
         PlanReviewOptions {
             launch,
@@ -270,6 +274,7 @@ impl PlanReviewOptions {
             embedding_provider: None,
             contributor_id: None,
             fact_processing: crate::learning::facts::FactProcessingOptions::default(),
+            max_concurrent_reviewers: crate::config::DEFAULT_MAX_CONCURRENT_REVIEWERS as u32,
         }
     }
 }
@@ -366,10 +371,13 @@ pub fn run_plan_review(
     );
     let jury = build_jury_plan(&decision, &catalog)?;
 
-    // 11. Start the Pi host early so every semantic job shares it.
+    // 11. Start the Pi host early so every semantic job shares it. The
+    // configured reviewer-concurrency bound travels with the host
+    // config (plan milestone 29).
     let mut host = HostProcess::spawn(&options.launch)?;
     host.wait_ready(HOST_READY_TIMEOUT)?;
-    let host_config = HostConfigPayload::from_config_profiles(&options.model_profiles);
+    let host_config = HostConfigPayload::from_config_profiles(&options.model_profiles)
+        .with_max_concurrent_reviewers(options.max_concurrent_reviewers);
     host.send_host_config(&host_config)?;
 
     // 12. Constrained dynamic-domain description for the fallback seat.
@@ -971,11 +979,15 @@ pub struct CodeReviewOptions {
     pub contributor_id: Option<String>,
     /// Bounds of the fact-candidate pipeline (plan section 47).
     pub fact_processing: crate::learning::facts::FactProcessingOptions,
+    /// Bound on concurrently running reviewer sessions in the Pi host
+    /// (plan milestone 29: reviewer concurrency obeys config).
+    pub max_concurrent_reviewers: u32,
 }
 
 impl CodeReviewOptions {
-    /// Options for `launch` with default consolidation bounds and no
-    /// configured model profiles or optional providers.
+    /// Options for `launch` with default consolidation bounds, the
+    /// default reviewer-concurrency bound, and no configured model
+    /// profiles or optional providers.
     pub fn new(launch: PiHostLaunch) -> Self {
         CodeReviewOptions {
             launch,
@@ -985,6 +997,7 @@ impl CodeReviewOptions {
             embedding_provider: None,
             contributor_id: None,
             fact_processing: crate::learning::facts::FactProcessingOptions::default(),
+            max_concurrent_reviewers: crate::config::DEFAULT_MAX_CONCURRENT_REVIEWERS as u32,
         }
     }
 }
@@ -1093,10 +1106,13 @@ pub fn run_code_review(
     );
     let jury = build_jury_plan(&decision, &catalog)?;
 
-    // 11. Start the Pi host early so every semantic job shares it.
+    // 11. Start the Pi host early so every semantic job shares it. The
+    // configured reviewer-concurrency bound travels with the host
+    // config (plan milestone 29).
     let mut host = HostProcess::spawn(&options.launch)?;
     host.wait_ready(HOST_READY_TIMEOUT)?;
-    let host_config = HostConfigPayload::from_config_profiles(&options.model_profiles);
+    let host_config = HostConfigPayload::from_config_profiles(&options.model_profiles)
+        .with_max_concurrent_reviewers(options.max_concurrent_reviewers);
     host.send_host_config(&host_config)?;
 
     // 12. Constrained dynamic-domain description for the fallback seat.

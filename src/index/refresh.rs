@@ -22,6 +22,16 @@
 //! reused across branches and worktrees; the **worktree** manifest only
 //! maps the paths of the last refresh.
 //!
+//! Performance (plan milestone 29): the warm no-change refresh has a
+//! frozen interactive target (under 100 ms for ordinary local
+//! repositories when Git and the filesystem are responsive), so the
+//! working-tree enumeration derives its listing from the one index
+//! listing the refresh already needs (stage-0 paths plus untracked
+//! non-ignored paths — exactly the final working state; a separate
+//! `git ls-files` pass would be redundant), reads every file exactly
+//! once (existence, shebang prefix, and content come from the same
+//! bytes), and writes only manifest rows that actually changed.
+//!
 //! Refresh statistics (`files_seen`, `files_reused`, `files_parsed`,
 //! `files_removed`, duration) are recorded in the worktree cache's
 //! `refresh_state` table and returned to the caller.
@@ -39,7 +49,7 @@ use super::extract::{IndexerCache, LanguageIndexer};
 use super::language::Language;
 use super::shebang;
 use crate::domain::time::now_utc_rfc3339;
-use crate::git::{ObjectFormat, RepoContext, ResolvedSnapshot, SnapshotReader, SnapshotTarget};
+use crate::git::{RepoContext, ResolvedSnapshot, SnapshotReader, SnapshotTarget};
 use crate::storage::StoragePaths;
 use crate::storage::db::open_or_recover;
 use crate::storage::schema::DbKind;
@@ -111,23 +121,6 @@ pub fn refresh_index(
     let started = Instant::now();
 
     let reader = SnapshotReader::new(ctx, resolved)?;
-    let listings = reader.list_files_with_oids()?;
-
-    // Working-tree targets hash the exact bytes; index and commit-tree
-    // targets already carry Git blob object IDs.
-    let working = matches!(resolved.target, SnapshotTarget::Working);
-    let mut index_oids: Option<BTreeMap<String, String>> = None;
-    let mut object_format: Option<ObjectFormat> = None;
-    if working {
-        let mut map = BTreeMap::new();
-        for entry in ctx.index_entries()? {
-            if entry.stage == 0 {
-                map.insert(entry.path.clone(), entry.oid.clone());
-            }
-        }
-        index_oids = Some(map);
-        object_format = Some(ctx.object_format()?);
-    }
 
     let shared = open_or_recover(&paths.shared, DbKind::Shared)?;
     let worktree = open_or_recover(&paths.worktree, DbKind::Worktree)?;
@@ -149,83 +142,19 @@ pub fn refresh_index(
     // colliding on the parsed_artifact unique constraint.
     let mut known_keys: BTreeSet<String> = BTreeSet::new();
 
-    // One file at a time, in Git's path order: detect the language (a
-    // recognized extension always wins; extensionless files get a
-    // bounded shebang read), then reuse-or-parse the exact target-side
-    // content.
-    for listing in listings {
-        let Some(language) = detect_language(&reader, &listing.path)? else {
-            continue;
-        };
-        stats.files_seen += 1;
-        let path = listing.path.clone();
-
-        let key = if let Some(oid) = &listing.blob_oid {
-            // Index and commit-tree sides are defined by Git objects.
-            ContentKey::Git(oid.clone())
-        } else {
-            // Working-tree side: hash the exact bytes. A tracked file
-            // whose content hashes to its stage-0 index blob OID is
-            // clean and gets the Git key; everything else (dirty or
-            // untracked) gets a sha256 key.
-            let Some(file) = reader.read(&path)? else {
-                // Enumerated but unreadable (for example a race with the
-                // working tree): skip rather than guess.
-                continue;
-            };
-            let format = object_format.expect("working targets resolved the format");
-            let hashed = git_blob_oid(&file.bytes, format);
-            let clean = index_oids
-                .as_ref()
-                .and_then(|map| map.get(&path))
-                .is_some_and(|oid| *oid == hashed);
-            let key = if clean {
-                ContentKey::Git(hashed)
-            } else {
-                working_tree_key(&file.bytes)
-            };
-
-            if artifact_exists(&shared.conn, &paths.shared, &key, language)?
-                || known_keys.contains(&key.as_str())
-            {
-                current.push(IndexPath {
-                    path,
-                    key,
-                    language,
-                    byte_len: file.bytes.len() as i64,
-                });
-                stats.files_reused += 1;
-                continue;
-            }
-            // Not cached: parse the exact bytes already read.
-            let Ok(text) = std::str::from_utf8(&file.bytes) else {
-                // Non-text content is not indexable; it never enters the
-                // manifest, so later refreshes reconsider it.
-                continue;
-            };
-            let extracted = indexers.for_detected_path(&path, language)?.parse(text);
-            let artifact = ParsedArtifact::new(&key.as_str(), language, extracted);
-            stats.files_parsed += 1;
-            known_keys.insert(key.as_str());
-            new_artifacts.push(NewArtifact {
-                path: path.clone(),
-                artifact,
-                byte_len: file.bytes.len() as i64,
-            });
-            current.push(IndexPath {
-                path,
-                key,
-                language,
-                byte_len: file.bytes.len() as i64,
-            });
-            continue;
-        };
-
-        // Index/commit-tree side: reuse without reading when cached.
+    // Reuse-or-parse one file whose exact target-side bytes are already
+    // in memory (the working-tree side).
+    let mut classify_working = |path: String,
+                                bytes: Vec<u8>,
+                                key: ContentKey,
+                                language: Language,
+                                current: &mut Vec<IndexPath>,
+                                new_artifacts: &mut Vec<NewArtifact>|
+     -> Result<(), IndexError> {
         if artifact_exists(&shared.conn, &paths.shared, &key, language)?
             || known_keys.contains(&key.as_str())
         {
-            let byte_len = recorded_byte_len(&shared.conn, &paths.shared, &key)?;
+            let byte_len = bytes.len() as i64;
             current.push(IndexPath {
                 path,
                 key,
@@ -233,13 +162,13 @@ pub fn refresh_index(
                 byte_len,
             });
             stats.files_reused += 1;
-            continue;
+            return Ok(());
         }
-        let Some(file) = reader.read(&path)? else {
-            continue;
-        };
-        let Ok(text) = std::str::from_utf8(&file.bytes) else {
-            continue;
+        // Not cached: parse the exact bytes already read.
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            // Non-text content is not indexable; it never enters the
+            // manifest, so later refreshes reconsider it.
+            return Ok(());
         };
         let extracted = indexers.for_detected_path(&path, language)?.parse(text);
         let artifact = ParsedArtifact::new(&key.as_str(), language, extracted);
@@ -248,14 +177,118 @@ pub fn refresh_index(
         new_artifacts.push(NewArtifact {
             path: path.clone(),
             artifact,
-            byte_len: file.bytes.len() as i64,
+            byte_len: bytes.len() as i64,
         });
         current.push(IndexPath {
             path,
             key,
             language,
-            byte_len: file.bytes.len() as i64,
+            byte_len: bytes.len() as i64,
         });
+        Ok(())
+    };
+
+    match &resolved.target {
+        SnapshotTarget::Working => {
+            // Working-tree enumeration from the one index listing the
+            // refresh already needs: stage-0 paths (the tracked files)
+            // plus untracked non-ignored paths, in Git's path order —
+            // exactly the final working state. A tracked path whose file
+            // no longer exists reads as absent below.
+            let mut index_oids: BTreeMap<String, String> = BTreeMap::new();
+            let mut candidates: BTreeSet<String> = BTreeSet::new();
+            for entry in ctx.index_entries()? {
+                if entry.stage == 0 {
+                    candidates.insert(entry.path.clone());
+                    index_oids.insert(entry.path, entry.oid);
+                }
+            }
+            for path in ctx.untracked_non_ignored()? {
+                candidates.insert(path);
+            }
+            let format = ctx.object_format()?;
+            for path in candidates {
+                let Some(file) = reader.read(&path)? else {
+                    // Enumerated but unreadable (deleted from the working
+                    // tree, or a race with it): skip rather than guess.
+                    continue;
+                };
+                let Some(language) = detect_working_language(&path, &file.bytes) else {
+                    continue;
+                };
+                stats.files_seen += 1;
+
+                // Hash the exact bytes. A tracked file whose content
+                // hashes to its stage-0 index blob OID is clean and gets
+                // the Git key; everything else (dirty or untracked) gets
+                // a sha256 key.
+                let hashed = git_blob_oid(&file.bytes, format);
+                let clean = index_oids.get(&path).is_some_and(|oid| *oid == hashed);
+                let key = if clean {
+                    ContentKey::Git(hashed)
+                } else {
+                    working_tree_key(&file.bytes)
+                };
+                classify_working(
+                    path,
+                    file.bytes,
+                    key,
+                    language,
+                    &mut current,
+                    &mut new_artifacts,
+                )?;
+            }
+        }
+        SnapshotTarget::Index | SnapshotTarget::Commit { .. } => {
+            // Index and commit-tree sides are defined by Git objects:
+            // listed blob OIDs are the content keys, and cached artifacts
+            // are reused without reading content at all.
+            for listing in reader.list_files_with_oids()? {
+                let path = listing.path.clone();
+                let Some(oid) = &listing.blob_oid else {
+                    continue;
+                };
+                let Some(language) = detect_language(&reader, &path)? else {
+                    continue;
+                };
+                stats.files_seen += 1;
+                let key = ContentKey::Git(oid.clone());
+                if artifact_exists(&shared.conn, &paths.shared, &key, language)?
+                    || known_keys.contains(&key.as_str())
+                {
+                    let byte_len = recorded_byte_len(&shared.conn, &paths.shared, &key)?;
+                    current.push(IndexPath {
+                        path,
+                        key,
+                        language,
+                        byte_len,
+                    });
+                    stats.files_reused += 1;
+                    continue;
+                }
+                let Some(file) = reader.read(&path)? else {
+                    continue;
+                };
+                let Ok(text) = std::str::from_utf8(&file.bytes) else {
+                    continue;
+                };
+                let extracted = indexers.for_detected_path(&path, language)?.parse(text);
+                let artifact = ParsedArtifact::new(&key.as_str(), language, extracted);
+                stats.files_parsed += 1;
+                known_keys.insert(key.as_str());
+                new_artifacts.push(NewArtifact {
+                    path: path.clone(),
+                    artifact,
+                    byte_len: file.bytes.len() as i64,
+                });
+                current.push(IndexPath {
+                    path,
+                    key,
+                    language,
+                    byte_len: file.bytes.len() as i64,
+                });
+            }
+        }
     }
 
     // Manifest pruning: paths of the previous refresh that this refresh
@@ -269,14 +302,21 @@ pub fn refresh_index(
     stats.files_removed = removed.len() as u64;
 
     persist_shared(&shared.conn, &paths.shared, &new_artifacts)?;
-    persist_worktree(&worktree.conn, &paths.worktree, &current, &removed)?;
+    persist_worktree(
+        &worktree.conn,
+        &paths.worktree,
+        &current,
+        &removed,
+        &manifest,
+    )?;
 
     stats.duration = started.elapsed();
     persist_refresh_state(&worktree.conn, &paths.worktree, stats, &resolved.descriptor)?;
     Ok(stats)
 }
 
-/// Detect the language of one snapshot path.
+/// Detect the language of one snapshot path of an object side (index or
+/// commit tree).
 ///
 /// A recognized extension always wins — extension-based classification
 /// never reads content. Files whose name carries no extension at all are
@@ -296,6 +336,21 @@ fn detect_language(
         return Ok(None);
     };
     Ok(shebang::language_from_prefix(&prefix))
+}
+
+/// Detect the language of one working-tree path whose exact bytes are
+/// already in memory: a recognized extension always wins, and an
+/// extensionless path is classified from the bounded shebang prefix of
+/// those same bytes (no second read; plan milestone 29).
+fn detect_working_language(path: &str, bytes: &[u8]) -> Option<Language> {
+    if let Some(language) = Language::from_path(path) {
+        return Some(language);
+    }
+    if !shebang::is_extensionless(path) {
+        return None;
+    }
+    let limit = bytes.len().min(shebang::PREFIX_LIMIT);
+    shebang::language_from_prefix(&bytes[..limit])
 }
 
 /// Load the worktree manifest: path -> content key.
@@ -453,15 +508,27 @@ fn persist_shared(
 }
 
 /// Write the worktree manifest and path content in one transaction.
+///
+/// Rows whose `(path, content_key)` pair already matches the previous
+/// manifest are skipped (plan milestone 29): identical content implies
+/// identical language and byte length, so rewriting unchanged rows only
+/// churned the database — and made warm no-change refreshes grow it.
 fn persist_worktree(
     conn: &Connection,
     db_path: &Path,
     current: &[IndexPath],
     removed: &[String],
+    manifest: &BTreeMap<String, String>,
 ) -> Result<(), IndexError> {
     let now = now_utc_rfc3339();
     let tx = conn.unchecked_transaction().map_err(query_error(db_path))?;
     for entry in current {
+        if manifest
+            .get(&entry.path)
+            .is_some_and(|key| *key == entry.key.as_str())
+        {
+            continue;
+        }
         tx.execute(
             "INSERT INTO manifest (path, content_key, updated_at) VALUES (?1, ?2, ?3) \
              ON CONFLICT(path) DO UPDATE SET \

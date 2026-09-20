@@ -193,6 +193,7 @@ impl App {
         options.contributor_id = environment.contributor_id;
         options.routing_provider = environment.routing_provider;
         options.embedding_provider = environment.embedding_provider;
+        options.max_concurrent_reviewers = environment.max_concurrent_reviewers;
 
         let outcome = run_plan_review(&ctx, &resolved, &paths, &plan, &options)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
@@ -225,6 +226,7 @@ impl App {
         options.contributor_id = environment.contributor_id;
         options.routing_provider = environment.routing_provider;
         options.embedding_provider = environment.embedding_provider;
+        options.max_concurrent_reviewers = environment.max_concurrent_reviewers;
 
         let outcome = run_code_review(&ctx, &resolved, &paths, &options)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
@@ -265,6 +267,7 @@ impl App {
                 .map(|contributor| contributor.id.clone()),
             routing_provider: providers.routing,
             embedding_provider: providers.embeddings,
+            max_concurrent_reviewers: loaded.config.performance.max_concurrent_reviewers as u32,
         })
     }
 
@@ -822,6 +825,9 @@ struct ReviewEnvironment {
     routing_provider: Option<std::sync::Arc<dyn crate::providers::RoutingClassifierProvider>>,
     /// Optional embedding provider reranking retrieval results.
     embedding_provider: Option<std::sync::Arc<dyn crate::providers::EmbeddingProvider>>,
+    /// Bound on concurrently running reviewer sessions (plan milestone
+    /// 29: reviewer concurrency obeys config).
+    max_concurrent_reviewers: u32,
 }
 
 /// The result of the shared query operation: everything the text and

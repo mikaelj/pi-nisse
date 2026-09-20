@@ -196,6 +196,7 @@ fn verdict_host(verdicts: &str) -> HostProcess {
     host.wait_ready(Duration::from_secs(20))
         .expect("host_ready");
     let config = HostConfigPayload {
+        max_concurrent_reviewers: None,
         models: BTreeMap::from([(
             "standard".to_string(),
             HostModelProfile {

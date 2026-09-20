@@ -69,6 +69,7 @@ fn spec(reviewer_id: &str, timeout_ms: u64) -> ReviewerExecutionSpec {
 
 fn host_config(model: &str, endpoint: Option<&str>) -> HostConfigPayload {
     HostConfigPayload {
+        max_concurrent_reviewers: None,
         models: BTreeMap::from([(
             "standard".to_string(),
             HostModelProfile {

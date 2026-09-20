@@ -7,6 +7,7 @@
  * clear reason; it never flows onward as guessed state.
  */
 
+import { MAX_CONCURRENT_REVIEWERS_LIMIT } from "./limiter.ts";
 import { ERROR_CODES } from "./protocol.ts";
 
 /** Validation failure with a stable protocol error code. */
@@ -328,9 +329,12 @@ export interface DomainDescriptionRequest {
   readonly languages: readonly string[];
 }
 
-/** The `host_config` payload: resolved model profiles by name. */
+/** The `host_config` payload: resolved model profiles by name, plus the
+ * optional reviewer-concurrency bound (plan milestone 29: reviewer
+ * concurrency obeys config). */
 export interface HostConfig {
   readonly models: ReadonlyMap<string, HostModelProfilePayload>;
+  readonly maxConcurrentReviewers: number | undefined;
 }
 
 /** The `start_fact_verification` payload (plan section 47 step 2):
@@ -729,7 +733,23 @@ export function validateHostConfig(value: unknown): HostConfig {
     const endpoint = requireOptionalString(profile, "endpoint");
     table.set(name, endpoint !== undefined ? { model, endpoint } : { model });
   }
-  return { models: table };
+  const rawMax = object["max_concurrent_reviewers"];
+  let maxConcurrentReviewers: number | undefined;
+  if (rawMax !== undefined) {
+    if (
+      typeof rawMax !== "number" ||
+      !Number.isInteger(rawMax) ||
+      rawMax < 1 ||
+      rawMax > MAX_CONCURRENT_REVIEWERS_LIMIT
+    ) {
+      throw new ValidationError(
+        "`max_concurrent_reviewers` must be an integer between 1 and " +
+          `${MAX_CONCURRENT_REVIEWERS_LIMIT}`,
+      );
+    }
+    maxConcurrentReviewers = rawMax;
+  }
+  return { models: table, maxConcurrentReviewers };
 }
 
 export function validateCancel(value: unknown): { review_id?: string } {

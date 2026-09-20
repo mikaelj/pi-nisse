@@ -16,3 +16,8 @@ pub mod providers;
 pub mod retrieval;
 pub mod routing;
 pub mod storage;
+
+// Performance measurements and regression bounds are test-only (plan
+// milestone 29); they use the crate-internal Git fixtures.
+#[cfg(test)]
+mod perf;
