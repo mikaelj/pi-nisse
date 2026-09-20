@@ -4,6 +4,7 @@
 
 mod cache_binary;
 mod cli_binary;
+mod code_review;
 mod doctor_binary;
 mod git_env;
 mod pi_host;

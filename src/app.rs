@@ -52,8 +52,8 @@ impl App {
                 crate::cli::ReviewCommand::Plan { source, json } => {
                     self.run_review_plan(source, json)
                 }
-                crate::cli::ReviewCommand::Code { .. } => {
-                    Err(AppError::NotImplemented("nisse review code".to_string()))
+                crate::cli::ReviewCommand::Code { scope, json } => {
+                    self.run_review_code(scope, json)
                 }
             },
             Command::Query { query, json } => self.run_query(query, json),
@@ -156,6 +156,60 @@ impl App {
         let rendered = if json {
             serde_json::to_string(&outcome.result)
                 .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?
+        } else {
+            render_review_text(&outcome.result)
+        };
+        print_to_stdout(&rendered);
+        Ok(())
+    }
+
+    /// Run `nisse review code` (plan sections 58 and 60).
+    ///
+    /// Executes the complete code-review pipeline for the selected
+    /// snapshot mode (`--working`, `--staged`, `--commit`, `--range`,
+    /// `--branch`) and prints the result (text, or the strict
+    /// `ReviewResult` JSON with `--json`). The local review event is
+    /// persisted in the shared cache. Reviews never require Needle,
+    /// embeddings, or network access in the deterministic runtimes.
+    fn run_review_code(&self, scope: crate::cli::CodeScope, json: bool) -> Result<(), AppError> {
+        use crate::config;
+        use crate::git::resolve_snapshot;
+        use crate::jury::review::{
+            CodeReviewOptions, host_launch_from_env, render_review_text, run_code_review,
+        };
+
+        let spec = code_scope_spec(&scope)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+
+        let (ctx, paths) = self.discover_storage()?;
+        let resolved = resolve_snapshot(&ctx, &spec).map_err(|err| {
+            AppError::Other(anyhow::anyhow!(
+                "review code failed to resolve the snapshot: {err}"
+            ))
+        })?;
+
+        // Trusted local configuration supplies the model profiles the
+        // host may use; reviewer sessions never inherit a model.
+        let user_path = config::paths::user_config_path();
+        let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
+        let loaded =
+            config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
+                AppError::Other(anyhow::anyhow!(
+                    "review code failed to load configuration: {err}"
+                ))
+            })?;
+
+        let launch = host_launch_from_env()
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+        let mut options = CodeReviewOptions::new(launch);
+        options.model_profiles = loaded.config.model_profiles.clone();
+
+        let outcome = run_code_review(&ctx, &resolved, &paths, &options)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
+
+        let rendered = if json {
+            serde_json::to_string(&outcome.result)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?
         } else {
             render_review_text(&outcome.result)
         };
@@ -330,6 +384,31 @@ fn read_plan_source(
     Ok((text, source.file.clone()))
 }
 
+/// Map the parsed code-review scope to its snapshot specification.
+/// The CLI enforces that exactly one mode is set.
+fn code_scope_spec(scope: &crate::cli::CodeScope) -> Result<crate::git::SnapshotSpec, String> {
+    use crate::git::SnapshotSpec;
+    if scope.working {
+        Ok(SnapshotSpec::Working)
+    } else if scope.staged {
+        Ok(SnapshotSpec::Staged)
+    } else if let Some(commit) = &scope.commit {
+        Ok(SnapshotSpec::Commit {
+            revision: commit.clone(),
+        })
+    } else if let Some(range) = &scope.range {
+        Ok(SnapshotSpec::Range {
+            spec: range.clone(),
+        })
+    } else if let Some(branch) = &scope.branch {
+        Ok(SnapshotSpec::Branch {
+            base_ref: branch.clone(),
+        })
+    } else {
+        Err("exactly one code review mode is required".to_string())
+    }
+}
+
 /// Repository-relative form of `path` when it lies inside the
 /// worktree, using forward slashes; `None` otherwise.
 fn repo_relative(ctx: &crate::git::RepoContext, path: &std::path::Path) -> Option<String> {
@@ -366,18 +445,6 @@ mod tests {
         let app = App::new();
 
         let cases: Vec<Command> = vec![
-            Command::Review {
-                review: crate::cli::ReviewCommand::Code {
-                    scope: crate::cli::CodeScope {
-                        working: true,
-                        staged: false,
-                        commit: None,
-                        range: None,
-                        branch: None,
-                    },
-                    json: false,
-                },
-            },
             Command::Feedback {
                 review_id: "01J8Z".into(),
                 finding_id: "01J8Y".into(),

@@ -174,6 +174,17 @@ test("context entries validate strictly", () => {
   });
   assert.equal(source.path, "src/queue.rs");
 
+  // The unified diff of a changed path is the primary input of a code
+  // review and a valid entry kind.
+  const diff = validateContextEntry({
+    kind: "diff",
+    title: "diff: src/queue.rs (modified)",
+    path: "src/queue.rs",
+    text: "--- a/src/queue.rs\n+++ b/src/queue.rs",
+    score: 1,
+  });
+  assert.equal(diff.path, "src/queue.rs");
+
   assert.throws(
     () => validateContextEntry({ kind: "embedding", title: "x", text: "y", score: 1 }),
     ValidationError,

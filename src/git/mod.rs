@@ -23,7 +23,7 @@ mod snapshot;
 #[cfg(test)]
 pub(crate) mod testutil;
 
-pub use diff::{DiffEntry, DiffStatus, snapshot_diff};
+pub use diff::{DiffEntry, DiffStatus, SnapshotPatch, snapshot_diff, snapshot_patches};
 pub use error::GitError;
 pub use reader::{SnapshotFile, SnapshotListing, SnapshotReader};
 pub use repo::{IndexEntry, ObjectFormat, ObjectKind, RepoContext, TreeEntry};

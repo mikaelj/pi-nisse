@@ -136,6 +136,7 @@ export const CONTEXT_KINDS = [
   "source_skeleton",
   "source",
   "plan",
+  "diff",
   "project_fact",
   "project_lesson",
   "practice",

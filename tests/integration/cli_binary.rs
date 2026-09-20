@@ -19,7 +19,7 @@ fn version_prints_to_stdout_with_zero_exit() {
 #[test]
 fn unimplemented_review_subcommand_fails_on_stderr_only() {
     for args in [
-        vec!["review", "code", "--working"],
+        vec!["feedback", "01J8Z", "01J8Y", "--fixed"],
         vec!["records", "pending"],
         vec!["records", "compact"],
         vec!["eval", "routing"],

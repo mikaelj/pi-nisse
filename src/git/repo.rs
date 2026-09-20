@@ -387,6 +387,59 @@ impl RepoContext {
         Ok(output.stdout.into_bytes())
     }
 
+    /// Subject line (first line of the message) of one commit.
+    ///
+    /// Commits without any message yield an empty string; callers decide
+    /// whether an empty subject is usable. The revision must already be a
+    /// resolved object ID.
+    pub fn commit_subject(&self, commit: &str) -> Result<String, GitError> {
+        Self::validate_oid(commit)?;
+        let output = self.run(&[
+            "--no-pager",
+            "show",
+            "-s",
+            "--format=%s",
+            "--end-of-options",
+            commit,
+        ])?;
+        Ok(output.stdout.trim_end_matches('\n').to_owned())
+    }
+
+    /// Subject lines of the commits in `base..head`, newest first,
+    /// bounded to `limit`.
+    ///
+    /// Both revisions must already be resolved object IDs. An empty range
+    /// yields no subjects.
+    pub fn commit_subjects_between(
+        &self,
+        base: &str,
+        head: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, GitError> {
+        Self::validate_oid(base)?;
+        Self::validate_oid(head)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let range = format!("{base}..{head}");
+        let output = self.run(&[
+            "--no-pager",
+            "log",
+            "--format=%s",
+            "-n",
+            &limit.to_string(),
+            "--end-of-options",
+            &range,
+        ])?;
+        Ok(output
+            .stdout
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Paths that currently have conflict stages (stage 1–3) in the index.
     ///
     /// Each conflicted path is listed once, sorted.
@@ -830,6 +883,59 @@ mod tests {
             ctx.read_blob("abc123"),
             Err(GitError::InvalidOid { .. })
         ));
+    }
+
+    #[test]
+    fn commit_subject_returns_the_subject_line() {
+        let fixture = Fixture::repo("commit-subject");
+        write_file(&fixture.root, "a.txt", "a\n");
+        let commit = commit_all(
+            &fixture.root,
+            "Fix the race on the shared queue\n\nbody text",
+        );
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        assert_eq!(
+            ctx.commit_subject(&commit).unwrap(),
+            "Fix the race on the shared queue"
+        );
+        // Only the validated object id is accepted.
+        assert!(matches!(
+            ctx.commit_subject("--exec=evil"),
+            Err(GitError::InvalidOid { .. })
+        ));
+    }
+
+    #[test]
+    fn commit_subjects_between_lists_newest_first_bounded() {
+        let fixture = Fixture::repo("commit-subjects");
+        write_file(&fixture.root, "a.txt", "a\n");
+        let base = commit_all(&fixture.root, "base");
+        write_file(&fixture.root, "a.txt", "b\n");
+        commit_all(&fixture.root, "second: add mutex");
+        write_file(&fixture.root, "a.txt", "c\n");
+        let head = commit_all(&fixture.root, "third: fix queue");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        assert_eq!(
+            ctx.commit_subjects_between(&base, &head, 8).unwrap(),
+            vec!["third: fix queue", "second: add mutex"]
+        );
+        // The bound limits the result.
+        assert_eq!(
+            ctx.commit_subjects_between(&base, &head, 1).unwrap(),
+            vec!["third: fix queue"]
+        );
+        assert_eq!(
+            ctx.commit_subjects_between(&base, &head, 0).unwrap(),
+            Vec::<String>::new()
+        );
+        // An empty range yields nothing.
+        assert!(
+            ctx.commit_subjects_between(&head, &head, 8)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

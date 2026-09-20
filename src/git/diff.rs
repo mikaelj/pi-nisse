@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use super::error::GitError;
+use super::reader::SnapshotReader;
 use super::repo::RepoContext;
 use super::snapshot::{ResolvedSnapshot, SnapshotBase, SnapshotTarget};
 
@@ -71,6 +72,203 @@ pub struct DiffEntry {
     /// Whether either side looks binary (Git's heuristic or a NUL byte in
     /// the first 8000 bytes of working-tree content).
     pub binary: bool,
+}
+
+/// One bounded unified diff of a changed path.
+///
+/// The patch is presentation of Git's own diff for the reviewer context
+/// of a code review; the typed [`DiffEntry`] list remains the authority
+/// for what changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotPatch {
+    /// Target-side path of the change (base-side path for deletions).
+    pub path: String,
+    /// What happened to the path.
+    pub status: DiffStatus,
+    /// Whether the change looks binary.
+    pub binary: bool,
+    /// Unified diff text, truncated to the caller's per-file budget.
+    /// `None` when no textual diff exists (binary or non-UTF-8
+    /// content). Empty when Git produced headers only (for example a
+    /// mode-only change).
+    pub patch: Option<String>,
+    /// Whether the text was truncated to fit the budget.
+    pub truncated: bool,
+}
+
+/// Produce bounded unified diffs for the changed paths of a snapshot.
+///
+/// `entries` must be the output of [`snapshot_diff`] (already sorted and
+/// `.nisse`-excluded); at most `max_entries` paths are covered, each with
+/// at most `per_file_budget` bytes of patch text (truncated on a char
+/// boundary with an explicit marker).
+///
+/// Git produces the patches for every mode. Untracked additions of the
+/// `working` target (and every file of an unborn `working` target, whose
+/// base is the empty tree) never appear in `git diff` output, so their
+/// added-file patches are synthesized from the target snapshot reader —
+/// the same authority all source reads use.
+pub fn snapshot_patches(
+    ctx: &RepoContext,
+    resolved: &ResolvedSnapshot,
+    entries: &[DiffEntry],
+    max_entries: usize,
+    per_file_budget: usize,
+) -> Result<Vec<SnapshotPatch>, GitError> {
+    let reader = SnapshotReader::new(ctx, resolved)?;
+    let unborn_working = matches!(resolved.base, SnapshotBase::EmptyTree)
+        && matches!(resolved.target, SnapshotTarget::Working);
+    let untracked: BTreeMap<String, bool> = if matches!(resolved.target, SnapshotTarget::Working) {
+        let untracked_set: std::collections::BTreeSet<String> =
+            ctx.untracked_non_ignored()?.into_iter().collect();
+        entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    unborn_working || untracked_set.contains(&entry.path),
+                )
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    let diff_args = patch_args(ctx, resolved);
+
+    let mut patches = Vec::new();
+    for entry in entries.iter().take(max_entries) {
+        if entry.binary {
+            patches.push(SnapshotPatch {
+                path: entry.path.clone(),
+                status: entry.status,
+                binary: true,
+                patch: None,
+                truncated: false,
+            });
+            continue;
+        }
+        if untracked.get(&entry.path).copied().unwrap_or(false) {
+            let patch = reader
+                .read(&entry.path)?
+                .map(|file| synthesize_added_patch(&file.bytes, &entry.path, per_file_budget));
+            let (patch, truncated) = match patch {
+                Some(Some(text)) => (Some(text.0), text.1),
+                // Non-UTF-8 or absent content: no textual diff.
+                Some(None) => (None, false),
+                None => (None, false),
+            };
+            patches.push(SnapshotPatch {
+                path: entry.path.clone(),
+                status: entry.status,
+                binary: false,
+                patch,
+                truncated,
+            });
+            continue;
+        }
+        let mut args: Vec<&str> = vec![
+            "--no-pager",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-abbrev",
+            "--unified=3",
+            "-M",
+        ];
+        args.extend(diff_args.iter().map(String::as_str));
+        args.push("--");
+        args.push(&entry.path);
+        if let Some(old_path) = &entry.old_path {
+            // Rename/copy detection needs both sides of the pair inside
+            // the pathspec-limited diff; a destination-only pathspec
+            // would degrade the change to a plain addition.
+            args.push(old_path);
+        }
+        let output = ctx.runner().run(&ctx.worktree_root, &args)?;
+        let (patch, truncated) = truncate_patch(&output.stdout, per_file_budget);
+        patches.push(SnapshotPatch {
+            path: entry.path.clone(),
+            status: entry.status,
+            binary: false,
+            patch: Some(patch),
+            truncated,
+        });
+    }
+    Ok(patches)
+}
+
+/// Revision arguments of `git diff` for the target mode (without the
+/// `diff` subcommand and flags; mirrors [`git_diff_entries`]).
+///
+/// Every commit-based mode names both sides explicitly: a single
+/// revision argument would compare against the working tree instead of
+/// the resolved head side.
+fn patch_args(ctx: &RepoContext, resolved: &ResolvedSnapshot) -> Vec<String> {
+    match (&resolved.base, &resolved.target) {
+        (SnapshotBase::EmptyTree, SnapshotTarget::Working) => Vec::new(),
+        (_, SnapshotTarget::Working) => vec!["HEAD".to_string()],
+        (_, SnapshotTarget::Index) => vec!["--cached".to_string()],
+        (base, SnapshotTarget::Commit { oid, .. }) => {
+            let base_rev = match base {
+                SnapshotBase::EmptyTree => ctx.empty_tree_oid(),
+                SnapshotBase::Commit { oid: base_oid, .. } => Ok(base_oid.clone()),
+            };
+            vec![base_rev.unwrap_or_else(|_| oid.clone()), oid.clone()]
+        }
+    }
+}
+
+/// Truncate patch text to a byte budget on a char boundary, marking the
+/// truncation deterministically.
+fn truncate_patch(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_owned(), false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = text[..end].to_owned();
+    truncated.push_str(&format!(
+        "\n\u{2026} [diff truncated after {max_bytes} bytes]"
+    ));
+    (truncated, true)
+}
+
+/// Synthesize the unified added-file patch of content that exists only on
+/// the target side (`diff` against `/dev/null`), bounded to the budget.
+///
+/// Returns `None` for non-UTF-8 content.
+fn synthesize_added_patch(
+    content: &[u8],
+    path: &str,
+    per_file_budget: usize,
+) -> Option<(String, bool)> {
+    let text = std::str::from_utf8(content).ok()?;
+    let mut patch = format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n");
+    if text.is_empty() {
+        // An empty file has no hunks.
+        return Some(truncate_patch(&patch, per_file_budget));
+    }
+    let has_final_newline = text.ends_with('\n');
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    let lines: Vec<&str> = body.split('\n').collect();
+    // Git's unified-diff convention omits the count when it is one.
+    let count = if lines.len() == 1 {
+        "1".to_string()
+    } else {
+        format!("1,{}", lines.len())
+    };
+    patch.push_str(&format!("@@ -0,0 +{count} @@\n"));
+    for (index, line) in lines.iter().enumerate() {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+        if index + 1 == lines.len() && !has_final_newline {
+            patch.push_str("\\ No newline at end of file\n");
+        }
+    }
+    Some(truncate_patch(&patch, per_file_budget))
 }
 
 /// Compute the diff between the base and target sides of a resolved
@@ -1038,6 +1236,357 @@ mod tests {
             .head_commit
             .as_deref(),
             Some(topic_tip.as_str())
+        );
+    }
+
+    fn patches_for(
+        ctx: &RepoContext,
+        spec: &SnapshotSpec,
+        per_file_budget: usize,
+    ) -> Vec<SnapshotPatch> {
+        let resolved = resolve_snapshot(ctx, spec).unwrap();
+        let entries = snapshot_diff(ctx, &resolved).unwrap();
+        snapshot_patches(ctx, &resolved, &entries, 16, per_file_budget).unwrap()
+    }
+
+    fn patch_of<'a>(patches: &'a [SnapshotPatch], path: &str) -> &'a SnapshotPatch {
+        patches
+            .iter()
+            .find(|patch| patch.path == path)
+            .unwrap_or_else(|| panic!("no patch for `{path}` in {patches:?}"))
+    }
+
+    #[test]
+    fn renamed_paths_patch_with_both_sides_of_the_pair() {
+        let fixture = Fixture::repo("patch-rename");
+        write_file(&fixture.root, "old.txt", "l1\nl2\nl3\nl4\nl5\n");
+        commit_all(&fixture.root, "one");
+        git_in(&fixture.root, &["mv", "old.txt", "new.txt"]);
+        write_file(&fixture.root, "new.txt", "l1\nl2-mod\nl3\nl4\nl5\n");
+        git_in(&fixture.root, &["add", "new.txt"]);
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(&ctx, &SnapshotSpec::Staged, 16 * 1024);
+        assert_eq!(patches.len(), 1, "one renamed entry: {patches:?}");
+        let patch = &patches[0];
+        assert_eq!(patch.status, DiffStatus::Renamed);
+        assert_eq!(patch.path, "new.txt");
+        let text = patch.patch.as_deref().expect("textual patch");
+        // The patch shows the rename, not a degraded plain addition.
+        assert!(text.contains("rename from old.txt"), "{text}");
+        assert!(text.contains("rename to new.txt"), "{text}");
+        assert!(text.contains("-l2"), "{text}");
+        assert!(text.contains("+l2-mod"), "{text}");
+    }
+
+    #[test]
+    fn working_patches_cover_modified_and_untracked_paths() {
+        let fixture = Fixture::repo("patch-working");
+        write_file(
+            &fixture.root,
+            "src/mod.rs",
+            "fn one() {
+    1
+}
+",
+        );
+        commit_all(&fixture.root, "one");
+        write_file(
+            &fixture.root,
+            "src/mod.rs",
+            "fn one() {
+    2
+}
+",
+        );
+        write_file(
+            &fixture.root,
+            "src/new.rs",
+            "pub fn fresh() {}
+",
+        );
+        // A staged-new file is part of the final state through the
+        // index: git patches it (not the untracked synthesis).
+        write_file(
+            &fixture.root,
+            "src/staged-new.rs",
+            "pub fn staged() {}
+",
+        );
+        git_in(&fixture.root, &["add", "src/staged-new.rs"]);
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(&ctx, &SnapshotSpec::Working, 16 * 1024);
+
+        let modified = patch_of(&patches, "src/mod.rs");
+        assert_eq!(modified.status, DiffStatus::Modified);
+        assert!(!modified.truncated);
+        let text = modified.patch.as_deref().expect("textual patch");
+        assert!(text.contains("--- a/src/mod.rs"), "{text}");
+        assert!(text.contains("+++ b/src/mod.rs"), "{text}");
+        assert!(text.contains("-    1"), "{text}");
+        assert!(text.contains("+    2"), "{text}");
+
+        let staged = patch_of(&patches, "src/staged-new.rs");
+        let text = staged.patch.as_deref().expect("textual patch");
+        assert!(text.contains("new file mode"), "{text}");
+        assert!(text.contains("+pub fn staged()"), "{text}");
+
+        // Untracked additions never appear in `git diff` output; their
+        // added-file patch is synthesized from the target snapshot.
+        let added = patch_of(&patches, "src/new.rs");
+        assert_eq!(added.status, DiffStatus::Added);
+        let text = added.patch.as_deref().expect("textual patch");
+        assert!(text.contains("--- /dev/null"), "{text}");
+        assert!(text.contains("+++ b/src/new.rs"), "{text}");
+        assert!(text.contains("@@ -0,0 +1 @@"), "{text}");
+        assert!(text.contains("+pub fn fresh() {}"), "{text}");
+        assert!(!text.contains("No newline"), "{text}");
+    }
+
+    #[test]
+    fn untracked_patch_without_final_newline_is_marked() {
+        let fixture = Fixture::repo("patch-untracked-nonl");
+        write_file(
+            &fixture.root,
+            "keep.txt",
+            "keep
+",
+        );
+        commit_all(&fixture.root, "one");
+        write_file(
+            &fixture.root,
+            "no-newline.txt",
+            "first
+second",
+        );
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(&ctx, &SnapshotSpec::Working, 16 * 1024);
+        let text = patch_of(&patches, "no-newline.txt")
+            .patch
+            .as_deref()
+            .expect("textual patch");
+        assert!(text.contains("@@ -0,0 +1,2 @@"), "{text}");
+        assert!(
+            text.contains("+second\n\\ No newline at end of file"),
+            "{text}"
+        );
+
+        // An empty untracked file has headers only.
+        write_file(&fixture.root, "empty.txt", "");
+        let patches = patches_for(&ctx, &SnapshotSpec::Working, 16 * 1024);
+        let text = patch_of(&patches, "empty.txt")
+            .patch
+            .as_deref()
+            .expect("textual patch");
+        assert!(text.contains("+++ b/empty.txt"), "{text}");
+        assert!(!text.contains("@@"), "{text}");
+    }
+
+    #[test]
+    fn staged_patches_review_only_the_index() {
+        let fixture = Fixture::repo("patch-staged");
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "committed
+",
+        );
+        commit_all(&fixture.root, "one");
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "staged
+",
+        );
+        git_in(&fixture.root, &["add", "a.txt"]);
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "staged then dirtied
+",
+        );
+        write_file(
+            &fixture.root,
+            "worktree-only.txt",
+            "untracked
+",
+        );
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(&ctx, &SnapshotSpec::Staged, 16 * 1024);
+        assert_eq!(patches.len(), 1, "only the staged change: {patches:?}");
+        let text = patches[0].patch.as_deref().expect("textual patch");
+        assert!(text.contains("+staged"), "{text}");
+        assert!(!text.contains("dirtied"), "{text}");
+    }
+
+    #[test]
+    fn commit_patches_use_the_first_parent_and_the_empty_tree_for_roots() {
+        let fixture = Fixture::repo("patch-commit");
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "one
+",
+        );
+        let root = commit_all(&fixture.root, "root");
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "two
+",
+        );
+        write_file(
+            &fixture.root,
+            "b.txt",
+            "added
+",
+        );
+        git_in(&fixture.root, &["add", "--all"]);
+        let second = commit_all(&fixture.root, "second");
+
+        let ctx = ctx_of(&fixture);
+
+        // Root commit: everything is an addition against the empty tree.
+        let patches = patches_for(
+            &ctx,
+            &SnapshotSpec::Commit {
+                revision: root.clone(),
+            },
+            16 * 1024,
+        );
+        assert_eq!(patches.len(), 1);
+        let text = patches[0].patch.as_deref().expect("textual patch");
+        assert!(text.contains("+one"), "{text}");
+
+        // Historical commit: the working tree may have moved on; the
+        // patch contains exactly the committed change.
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "much later content
+",
+        );
+        let patches = patches_for(
+            &ctx,
+            &SnapshotSpec::Commit {
+                revision: second.clone(),
+            },
+            16 * 1024,
+        );
+        let paths: Vec<&str> = patches.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+        let text = patch_of(&patches, "a.txt")
+            .patch
+            .as_deref()
+            .expect("textual patch");
+        assert!(text.contains("-one"), "{text}");
+        assert!(text.contains("+two"), "{text}");
+        assert!(!text.contains("much later"), "{text}");
+    }
+
+    #[test]
+    fn range_patches_compare_the_two_named_trees() {
+        let fixture = Fixture::repo("patch-range");
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "base
+",
+        );
+        let base = commit_all(&fixture.root, "base");
+        write_file(
+            &fixture.root,
+            "a.txt",
+            "changed
+",
+        );
+        let head = commit_all(&fixture.root, "head");
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(
+            &ctx,
+            &SnapshotSpec::Range {
+                spec: format!("{base}..{head}"),
+            },
+            16 * 1024,
+        );
+        let text = patch_of(&patches, "a.txt")
+            .patch
+            .as_deref()
+            .expect("textual patch");
+        assert!(text.contains("-base"), "{text}");
+        assert!(text.contains("+changed"), "{text}");
+    }
+
+    #[test]
+    fn binary_and_truncated_patches_are_bounded() {
+        let fixture = Fixture::repo("patch-bounds");
+        write_file(
+            &fixture.root,
+            "small.txt",
+            "x
+",
+        );
+        commit_all(&fixture.root, "one");
+        write_file(
+            &fixture.root,
+            "small.txt",
+            "y
+",
+        );
+        write_file(&fixture.root, "blob.bin", "\0binary\0");
+        write_file(&fixture.root, "big.txt", &"line\n".repeat(2000));
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(&ctx, &SnapshotSpec::Working, 512);
+
+        let binary = patch_of(&patches, "blob.bin");
+        assert!(binary.binary);
+        assert_eq!(binary.patch, None);
+
+        let big = patch_of(&patches, "big.txt");
+        assert!(big.truncated);
+        let text = big.patch.as_deref().expect("textual patch");
+        assert!(text.len() < 600, "{}", text.len());
+        assert!(text.contains("diff truncated after 512 bytes"), "{text}");
+
+        // The entry cap bounds how many paths are patched.
+        let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).unwrap();
+        let entries = snapshot_diff(&ctx, &resolved).unwrap();
+        let capped = snapshot_patches(&ctx, &resolved, &entries, 1, 4096).unwrap();
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].path, "big.txt", "entries stay path-sorted");
+    }
+
+    #[test]
+    fn unborn_working_patches_synthesize_every_final_state_file() {
+        let fixture = Fixture::repo("patch-unborn");
+        write_file(
+            &fixture.root,
+            "staged.txt",
+            "staged content
+",
+        );
+        git_in(&fixture.root, &["add", "staged.txt"]);
+        write_file(&fixture.root, "untracked.txt", "untracked content");
+
+        let ctx = ctx_of(&fixture);
+        let patches = patches_for(&ctx, &SnapshotSpec::Working, 16 * 1024);
+        let paths: Vec<&str> = patches.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, ["staged.txt", "untracked.txt"]);
+        for patch in &patches {
+            let text = patch.patch.as_deref().expect("textual patch");
+            assert!(text.contains("--- /dev/null"), "{text}");
+        }
+        assert!(
+            patch_of(&patches, "staged.txt")
+                .patch
+                .as_deref()
+                .unwrap()
+                .contains("+staged content")
         );
     }
 }

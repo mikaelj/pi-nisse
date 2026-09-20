@@ -1,4 +1,4 @@
-//! End-to-end review orchestration (plan sections 58 and 59).
+//! End-to-end review orchestration (plan sections 58–60).
 //!
 //! [`run_plan_review`] executes the frozen review pipeline for a plan:
 //!
@@ -34,6 +34,16 @@
 //! 18. persist the local review event in the shared cache (plan
 //!     section 57).
 //!
+//! [`run_code_review`] executes the same frozen pipeline for a code
+//! review (plan section 60) over any of the five snapshot modes: the
+//! deterministic diff of the resolved snapshot replaces the plan as the
+//! primary review input and routing signal (`working`, `staged`,
+//! `commit`, `range`, `branch`; plan section 25), reviewer initial
+//! context starts from the real unified diff plus related source
+//! retrieved for the changed symbols and paths (plan section 23), and
+//! finding validation proves every diff-evidence path against the exact
+//! review scope.
+//!
 //! This order is stable. No step consults an LLM for orchestration:
 //! every routing, jury, budget, and persistence decision is
 //! deterministic Rust, and LLM output enters only as validated
@@ -50,7 +60,12 @@ use crate::domain::ids::new_ulid;
 use crate::domain::records::{ProjectRecord, RoutingHint};
 use crate::domain::review::{ReviewKind, ReviewResult, Severity};
 use crate::domain::reviewer::{DynamicDomainDescription, ReviewerExecutionSpec, ReviewerProfile};
-use crate::git::{RepoContext, ResolvedSnapshot, SnapshotReader};
+use crate::domain::snapshot::SnapshotMode;
+use crate::git::{
+    DiffStatus, RepoContext, ResolvedSnapshot, SnapshotPatch, SnapshotReader, snapshot_diff,
+    snapshot_patches,
+};
+use crate::index::artifact::PARSER_VERSION;
 use crate::index::refresh_index;
 use crate::retrieval::Retriever;
 use crate::retrieval::query::{
@@ -355,11 +370,23 @@ pub fn run_plan_review(
                 .profile(&seat.reviewer_id)
                 .expect("jury construction validated every seat against the catalog");
             let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
-                domain_description.clone()
+                domain_description.as_ref()
             } else {
                 None
             };
-            reviewer_spec(profile, &plan_entry, &shared_context, &catalog, description)
+            let seat = seat_plan(
+                profile,
+                plan_review_instructions(&profile.base_instructions),
+                description,
+            );
+            let context = initial_context(
+                std::slice::from_ref(&plan_entry),
+                &shared_context,
+                &catalog,
+                &seat.practice_tags,
+                &INITIAL_CONTEXT_BUDGET,
+            );
+            execution_spec(profile, seat, context)
         })
         .collect();
 
@@ -441,6 +468,12 @@ pub fn run_plan_review(
     };
 
     // 18. Persist the local review event (regenerable shared cache).
+    let source = json!({
+        "plan_source": match plan.path.as_deref() {
+            Some(path) => json!({ "path": path }),
+            None => json!({ "stdin": true }),
+        },
+    });
     let event = ReviewEvent {
         result: &result,
         routing_input: &routing_input,
@@ -453,9 +486,9 @@ pub fn run_plan_review(
         rejected: &rejected,
         synthesis_diagnostics: &synthesis.diagnostics,
         diagnostics: &diagnostics,
-        plan_path: plan.path.as_deref(),
+        source: &source,
     };
-    persist_review_event(paths, &event)?;
+    persist_review_event(paths, &event).map_err(PlanReviewError::Cache)?;
 
     let _ = host.shutdown(Duration::from_secs(5));
 
@@ -586,24 +619,36 @@ fn active_lesson_hints(active: &[&StoredRecord]) -> Vec<RoutingHint> {
         .collect()
 }
 
-/// Build one juror's execution spec from its profile, the shared
-/// retrieved context, and (for the dynamic expert) the normalized
-/// domain description combined with the static template (plan section
-/// 19: the description can never add tools, providers, or
-/// capabilities — those come only from the static profile).
-fn reviewer_spec(
+/// One reviewer seat's adjusted methodology for a review: the static
+/// profile combined with review-kind instructions and, for the dynamic
+/// expert, the constrained domain description.
+struct SeatPlan {
+    /// Seat specialization label.
+    specialization: String,
+    /// Full reviewer instructions.
+    instructions: String,
+    /// Checklist items (static first, domain risks appended).
+    checklist: Vec<String>,
+    /// Practice tags whose packs may enter the reviewer's context.
+    practice_tags: Vec<String>,
+}
+
+/// Combine a reviewer profile with review-kind instructions and an
+/// optional constrained domain description (plan section 19: the
+/// description can never add tools, providers, or capabilities — those
+/// come only from the static profile; the static checklist items always
+/// come first).
+fn seat_plan(
     profile: &ReviewerProfile,
-    plan_entry: &ContextEntry,
-    shared: &ContextBundle,
-    catalog: &Catalog,
-    description: Option<DynamicDomainDescription>,
-) -> ReviewerExecutionSpec {
+    kind_instructions: String,
+    description: Option<&DynamicDomainDescription>,
+) -> SeatPlan {
     let mut specialization = profile.description.clone();
-    let mut instructions = plan_review_instructions(&profile.base_instructions);
+    let mut instructions = kind_instructions;
     let mut checklist = profile.checklist.clone();
     let mut practice_tags: Vec<String> = profile.practice_tags.clone();
 
-    if let Some(description) = &description {
+    if let Some(description) = description {
         specialization = format!(
             "domain expert: {}",
             bounded(&description.domain_label, MAX_DESCRIPTOR_BYTES)
@@ -635,13 +680,26 @@ fn reviewer_spec(
         practice_tags.extend(description.relevant_practice_tags.iter().cloned());
     }
 
-    let initial_context = initial_context(plan_entry, shared, catalog, &practice_tags);
-
-    ReviewerExecutionSpec {
-        reviewer_id: profile.id.clone(),
+    SeatPlan {
         specialization: bounded(&specialization, MAX_DESCRIPTOR_BYTES * 2),
         instructions,
         checklist,
+        practice_tags,
+    }
+}
+
+/// Assemble one juror's final execution spec from its seat plan and
+/// assembled initial context (plan section 18).
+fn execution_spec(
+    profile: &ReviewerProfile,
+    seat: SeatPlan,
+    initial_context: ContextBundle,
+) -> ReviewerExecutionSpec {
+    ReviewerExecutionSpec {
+        reviewer_id: profile.id.clone(),
+        specialization: seat.specialization,
+        instructions: seat.instructions,
+        checklist: seat.checklist,
         model_profile: profile.default_model_profile.clone(),
         thinking_level: profile.default_thinking_level,
         initial_context: initial_context.entries,
@@ -663,16 +721,25 @@ your context. Cite plan sections or project source as evidence."
     )
 }
 
+/// Reviewer instructions for a code review: the static base
+/// instructions plus the frozen code-review framing.
+fn code_review_instructions(base: &str) -> String {
+    format!(
+        "{base}\n\n## Review kind: code\n\nThis is a code review of concrete changes. The \nunified diff entries in the initial context are the primary review input; they describe exactly \nwhat changed between the review's base and target snapshots. Review the change itself and its \ninteraction with the surrounding project source also present in your context. Cite diff paths \n(with line ranges taken from the diff hunks) or project source as evidence."
+    )
+}
+
 /// Assemble one reviewer's bounded initial context (plan section 23):
-/// the plan first, then the shared retrieved context, then the
+/// the review input first, then the shared retrieved context, then the
 /// practices of the reviewer's (possibly domain-extended) tags.
 fn initial_context(
-    plan_entry: &ContextEntry,
+    input_entries: &[ContextEntry],
     shared: &ContextBundle,
     catalog: &Catalog,
     practice_tags: &[String],
+    budget: &ContextBudget,
 ) -> ContextBundle {
-    let mut candidates = vec![plan_entry.clone()];
+    let mut candidates = input_entries.to_vec();
     candidates.extend(shared.entries.iter().cloned());
     let mut practices = 0usize;
     for tag in practice_tags {
@@ -680,9 +747,7 @@ fn initial_context(
             continue;
         };
         for practice in &pack.practices {
-            if practices >= MAX_PRACTICES_PER_REVIEWER
-                || candidates.len() >= INITIAL_CONTEXT_BUDGET.max_entries
-            {
+            if practices >= MAX_PRACTICES_PER_REVIEWER || candidates.len() >= budget.max_entries {
                 break;
             }
             practices += 1;
@@ -702,7 +767,651 @@ fn initial_context(
             });
         }
     }
-    assemble_bundle(candidates, &INITIAL_CONTEXT_BUDGET)
+    assemble_bundle(candidates, budget)
+}
+
+// ---------------------------------------------------------------------
+// Code review (plan section 60)
+// ---------------------------------------------------------------------
+
+/// Maximum changed paths reported to routing and the domain description.
+pub const MAX_ROUTING_CHANGED_PATHS: usize = 64;
+
+/// Maximum changed paths queried for their defined symbols.
+pub const MAX_SYMBOL_PATHS: usize = 64;
+
+/// Maximum changed symbols reported to routing and retrieval.
+pub const MAX_CHANGED_SYMBOLS: usize = 32;
+
+/// Maximum commit subjects used as request descriptors.
+pub const MAX_COMMIT_SUBJECTS: usize = 8;
+
+/// Maximum request descriptors derived from one code change.
+pub const MAX_CODE_DESCRIPTORS: usize = 32;
+
+/// Maximum changed paths whose unified diff enters reviewer context.
+pub const MAX_DIFF_FILES_IN_CONTEXT: usize = 32;
+
+/// Per-file byte budget of one unified diff in reviewer context.
+pub const DIFF_ENTRY_MAX_BYTES: usize = 16 * 1024;
+
+/// Aggregate byte budget of the diff portion of reviewer context.
+pub const DIFF_TOTAL_MAX_BYTES: usize = 64 * 1024;
+
+/// Code review failures.
+#[derive(Debug, Error)]
+pub enum CodeReviewError {
+    /// The review scope is unusable (empty diff, malformed revision).
+    #[error("invalid review scope: {0}")]
+    InvalidScope(String),
+
+    /// A Git operation failed.
+    #[error(transparent)]
+    Git(#[from] crate::git::GitError),
+
+    /// The source index could not be refreshed.
+    #[error(transparent)]
+    Index(#[from] crate::index::IndexError),
+
+    /// Retrieval failed.
+    #[error(transparent)]
+    Retrieval(#[from] crate::retrieval::RetrievalError),
+
+    /// The bundled catalog failed to load.
+    #[error(transparent)]
+    Catalog(#[from] super::catalog::CatalogError),
+
+    /// Durable records failed to load.
+    #[error(transparent)]
+    Records(#[from] crate::storage::records::RecordStoreError),
+
+    /// Jury construction failed (routing produced an inconsistent
+    /// decision; treated as an internal invariant violation).
+    #[error(transparent)]
+    Jury(#[from] super::plan::JuryPlanError),
+
+    /// The Pi review host boundary failed.
+    #[error(transparent)]
+    Host(#[from] HostError),
+
+    /// Fewer than two valid independent reviewer reports exist (plan
+    /// section 36). The review fails explicitly instead of guessing.
+    #[error(
+        "review `{review_id}` cannot continue: only {valid} valid independent reviewer report(s) exist; at least 2 are required; {}",
+        failures.join("; ")
+    )]
+    TooFewValidReports {
+        /// The failed review.
+        review_id: String,
+        /// Number of valid reports.
+        valid: usize,
+        /// Why the other reviewers failed (after their retry).
+        failures: Vec<String>,
+    },
+
+    /// A regenerable cache database could not be read or written.
+    #[error("local cache failure: {0}")]
+    Cache(String),
+}
+
+/// Everything the code-review pipeline needs besides the repository.
+#[derive(Debug, Clone)]
+pub struct CodeReviewOptions {
+    /// How to launch the Pi review host child process.
+    pub launch: PiHostLaunch,
+    /// Bounds of the consolidation pipeline.
+    pub consolidation: ConsolidationOptions,
+    /// Resolved model profiles forwarded to the host through
+    /// `host_config` (from trusted local configuration; reviewer
+    /// sessions never inherit a model).
+    pub model_profiles: BTreeMap<String, crate::domain::model::ModelProfile>,
+}
+
+impl CodeReviewOptions {
+    /// Options for `launch` with default consolidation bounds and no
+    /// configured model profiles.
+    pub fn new(launch: PiHostLaunch) -> Self {
+        CodeReviewOptions {
+            launch,
+            consolidation: ConsolidationOptions::default(),
+            model_profiles: BTreeMap::new(),
+        }
+    }
+}
+
+/// The completed code review: the public result plus the deterministic
+/// bookkeeping recorded with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeReviewOutcome {
+    /// The review result returned to callers.
+    pub result: ReviewResult,
+    /// The routing decision that selected the jury.
+    pub decision: crate::domain::routing::RoutingDecision,
+    /// The jury that reviewed the change.
+    pub jury: crate::domain::jury::JuryPlan,
+    /// The dynamic domain description used by the expert seat, when the
+    /// fallback fired and the session succeeded.
+    pub domain_description: Option<DynamicDomainDescription>,
+    /// All changed paths of the review scope (the authority for diff
+    /// evidence validation), in path order.
+    pub changed_paths: Vec<String>,
+    /// Diagnostics of the run (domain-description fallbacks, synthesis
+    /// fallbacks; rejected findings are recorded in the review event).
+    pub diagnostics: Vec<String>,
+}
+
+/// Run the complete code-review pipeline (plan section 60) over the
+/// already-resolved snapshot of any of the five modes.
+///
+/// The pipeline is the frozen order of plan section 58 with the diff of
+/// the resolved snapshot in place of the plan: the real unified diff is
+/// the primary reviewer input and routing signal, retrieval starts from
+/// the changed symbols and paths, and every diff-evidence path is
+/// validated against the exact review scope.
+pub fn run_code_review(
+    ctx: &RepoContext,
+    resolved: &ResolvedSnapshot,
+    paths: &StoragePaths,
+    options: &CodeReviewOptions,
+) -> Result<CodeReviewOutcome, CodeReviewError> {
+    // 3. Refresh the source index for exactly the target snapshot.
+    refresh_index(ctx, resolved, paths)?;
+
+    // 4. Deterministic request/diff descriptors.
+    let diff = snapshot_diff(ctx, resolved)?;
+    if diff.is_empty() {
+        return Err(CodeReviewError::InvalidScope(
+            "the review scope contains no changes to review".to_string(),
+        ));
+    }
+    let changed_paths: Vec<String> = diff.iter().map(|entry| entry.path.clone()).collect();
+    let routing_paths: Vec<String> = changed_paths
+        .iter()
+        .take(MAX_ROUTING_CHANGED_PATHS)
+        .cloned()
+        .collect();
+    let subjects = commit_subjects(ctx, resolved)?;
+    let descriptors = code_descriptors(subjects, &routing_paths);
+    let languages = changed_languages(paths, &routing_paths)?;
+    let symbols = changed_symbols(paths, &routing_paths)?;
+
+    // 5. Durable records + preliminary facts/lessons retrieval.
+    let catalog = Catalog::bundled()?;
+    let records = RecordStore::new(&ctx.worktree_root).load()?;
+    let retriever = Retriever::open(resolved, paths)?;
+    retriever.sync_records(&records)?;
+    retriever.sync_practices(&catalog)?;
+    let query = RetrievalQuery {
+        text: retrieval_text(&descriptors, &symbols),
+        changed_symbols: symbols.clone(),
+        changed_paths: routing_paths.clone(),
+    };
+    let shared_context = retriever.lookup(&query)?;
+    let active = crate::storage::records::active_records(&records);
+
+    // 6. Routing input.
+    let routing_input = crate::domain::routing::RoutingInput {
+        descriptors: descriptors.clone(),
+        changed_paths: routing_paths.clone(),
+        languages: languages.clone(),
+        changed_symbols: symbols.clone(),
+        deterministic_tags: record_tags(&shared_context, &active),
+        lessons: active_lesson_hints(&active),
+    };
+
+    // 7. Deterministic routing; 8. jury rules.
+    let decision = RulesClassifier::new(catalog.clone()).classify(&routing_input);
+    let jury = build_jury_plan(&decision, &catalog)?;
+
+    // 11. Start the Pi host early so every semantic job shares it.
+    let mut host = HostProcess::spawn(&options.launch)?;
+    host.wait_ready(HOST_READY_TIMEOUT)?;
+    let host_config = HostConfigPayload::from_config_profiles(&options.model_profiles);
+    host.send_host_config(&host_config)?;
+
+    // 12. Constrained dynamic-domain description for the fallback seat.
+    let mut diagnostics: Vec<String> = Vec::new();
+    let mut domain_description: Option<DynamicDomainDescription> = None;
+    if jury.uses_dynamic_fallback() {
+        let expert = catalog.dynamic_domain_expert();
+        let payload = DomainDescriptionPayload {
+            description_id: new_ulid(),
+            timeout_ms: DOMAIN_DESCRIPTION_TIMEOUT_MS,
+            model_profile: expert.default_model_profile.clone(),
+            thinking_level: expert.default_thinking_level,
+            descriptors: descriptors.clone(),
+            changed_paths: routing_paths.clone(),
+            languages: languages.clone(),
+        };
+        host.start_domain_description(&payload)?;
+        let budget = Duration::from_millis(DOMAIN_DESCRIPTION_TIMEOUT_MS + 10_000);
+        let outcome = host.complete_domain_description(&payload.description_id, budget)?;
+        match normalize_domain_description(outcome.description, &catalog) {
+            Some(normalized) => domain_description = Some(normalized),
+            None => {
+                let reason = outcome
+                    .error
+                    .as_ref()
+                    .map(|error| format!("{}: {}", error.code, error.message))
+                    .unwrap_or_else(|| "the description was not usable".to_string());
+                diagnostics.push(format!(
+                    "dynamic domain description fell back to the static template: {reason}"
+                ));
+            }
+        }
+    }
+
+    // 9./10. Execution specs: the real diff leads the initial context,
+    // followed by related source retrieved for the change.
+    let known_record_ids: BTreeSet<String> = records
+        .iter()
+        .map(StoredRecord::id)
+        .map(str::to_string)
+        .collect();
+    let patches = snapshot_patches(
+        ctx,
+        resolved,
+        &diff,
+        MAX_DIFF_FILES_IN_CONTEXT,
+        DIFF_ENTRY_MAX_BYTES,
+    )?;
+    let diff_context = diff_context_entries(&patches);
+    let specs: Vec<ReviewerExecutionSpec> = jury
+        .seats
+        .iter()
+        .map(|seat| {
+            let profile = catalog
+                .profile(&seat.reviewer_id)
+                .expect("jury construction validated every seat against the catalog");
+            let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
+                domain_description.as_ref()
+            } else {
+                None
+            };
+            let seat = seat_plan(
+                profile,
+                code_review_instructions(&profile.base_instructions),
+                description,
+            );
+            let context = code_initial_context(
+                &diff_context,
+                &shared_context,
+                &catalog,
+                &seat.practice_tags,
+            );
+            execution_spec(profile, seat, context)
+        })
+        .collect();
+
+    // 13. Execute reviewers independently (frozen one-retry policy).
+    let review_id = new_ulid();
+    let payload = StartReviewPayload {
+        review_id: review_id.clone(),
+        kind: ReviewKind::Code,
+        reviewers: specs.clone(),
+    };
+    let tool_reader = SnapshotReader::new(ctx, resolved)?;
+    let mut tool_server =
+        ReviewerToolServer::new(review_id.clone(), &specs, retriever, tool_reader);
+    let mut serve = |request: &ToolRequestPayload| -> ToolResponsePayload {
+        // `complete_review` stamps the authoritative request id.
+        tool_server.handle("", request)
+    };
+    let outcomes =
+        super::execution::execute_review(&mut host, &payload, &mut serve, REVIEW_ROUND_TIMEOUT)?;
+
+    // 14. At least two valid independent reports (plan section 36).
+    let mut reports = Vec::new();
+    let mut failures = Vec::new();
+    for (reviewer_id, outcome) in &outcomes {
+        match outcome {
+            ReviewerOutcome::Completed(report) => {
+                reports.push((reviewer_id.clone(), report.clone()));
+            }
+            ReviewerOutcome::Failed(error) => failures.push(format!(
+                "reviewer `{reviewer_id}` failed after its retry ({}: {})",
+                error.code, error.message
+            )),
+        }
+    }
+    if reports.len() < 2 {
+        return Err(CodeReviewError::TooFewValidReports {
+            review_id,
+            valid: reports.len(),
+            failures,
+        });
+    }
+
+    // 15. Validate every report against the exact snapshot; diff
+    // evidence must cite a path of the review scope (plan section 37).
+    let validation_reader = SnapshotReader::new(ctx, resolved)?;
+    let changed_set: BTreeSet<String> = changed_paths.iter().cloned().collect();
+    let validation_context = ValidationContext {
+        reader: &validation_reader,
+        object_format: ctx.object_format()?,
+        changed_paths: Some(&changed_set),
+        known_record_ids: &known_record_ids,
+    };
+    let mut validated: Vec<ValidatedFinding> = Vec::new();
+    let mut rejected: Vec<RejectedFinding> = Vec::new();
+    for (reviewer_id, report) in &reports {
+        let validation = validate_report(&validation_context, reviewer_id, report);
+        validated.extend(validation.accepted);
+        rejected.extend(validation.rejected);
+    }
+
+    // 16. Consolidation (equivalence checks + synthesis, bounded).
+    let synthesis = consolidate(
+        &mut host,
+        ReviewKind::Code,
+        &validated,
+        &options.consolidation,
+    )?;
+    diagnostics.extend(synthesis.diagnostics.iter().map(|d| d.message.clone()));
+
+    // 17. ReviewResult.
+    let result = ReviewResult {
+        review_id: review_id.clone(),
+        kind: ReviewKind::Code,
+        created_at: crate::domain::time::now_utc_rfc3339(),
+        snapshot: resolved.descriptor.clone(),
+        summary: synthesis.summary.clone(),
+        findings: synthesis.findings.clone(),
+    };
+
+    // 18. Persist the local review event (regenerable shared cache).
+    let source = json!({
+        "code_source": {
+            "mode": resolved.descriptor.mode_label(),
+            "descriptors": descriptors,
+            "changed_path_count": diff.len(),
+            "changed_paths": changed_paths,
+        },
+    });
+    let event = ReviewEvent {
+        result: &result,
+        routing_input: &routing_input,
+        decision: &decision,
+        jury: &jury,
+        domain_description: domain_description.as_ref(),
+        specs: &specs,
+        outcomes: &outcomes,
+        validated: &validated,
+        rejected: &rejected,
+        synthesis_diagnostics: &synthesis.diagnostics,
+        diagnostics: &diagnostics,
+        source: &source,
+    };
+    persist_review_event(paths, &event).map_err(CodeReviewError::Cache)?;
+
+    let _ = host.shutdown(Duration::from_secs(5));
+
+    Ok(CodeReviewOutcome {
+        result,
+        decision,
+        jury,
+        domain_description,
+        changed_paths,
+        diagnostics,
+    })
+}
+
+/// Commit subjects of the review scope, when the mode knows them: the
+/// reviewed commit's subject for `commit`, and the bounded subjects of
+/// the included commits (newest first) for `range` and `branch`.
+/// `working`/`staged` changes carry no commit message.
+fn commit_subjects(
+    ctx: &RepoContext,
+    resolved: &ResolvedSnapshot,
+) -> Result<Vec<String>, CodeReviewError> {
+    let descriptor = &resolved.descriptor;
+    match descriptor.mode {
+        SnapshotMode::Commit => {
+            let Some(head) = &descriptor.head_commit else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![ctx.commit_subject(head)?])
+        }
+        SnapshotMode::Range | SnapshotMode::Branch => {
+            let (Some(base), Some(head)) = (&descriptor.base_commit, &descriptor.head_commit)
+            else {
+                return Ok(Vec::new());
+            };
+            Ok(ctx.commit_subjects_between(base, head, MAX_COMMIT_SUBJECTS)?)
+        }
+        SnapshotMode::Working | SnapshotMode::Staged => Ok(Vec::new()),
+    }
+}
+
+/// Deterministic request descriptors of a code change: the commit
+/// subjects of the scope (when known) followed by the space-separated
+/// path tokens of every changed path, all bounded.
+fn code_descriptors(subjects: Vec<String>, changed_paths: &[String]) -> Vec<String> {
+    let mut descriptors: Vec<String> = Vec::new();
+    for subject in subjects {
+        let subject = subject.trim();
+        if subject.is_empty() {
+            continue;
+        }
+        if descriptors.len() >= MAX_CODE_DESCRIPTORS {
+            break;
+        }
+        descriptors.push(bounded(subject, MAX_DESCRIPTOR_BYTES));
+    }
+    for path in changed_paths {
+        if descriptors.len() >= MAX_CODE_DESCRIPTORS {
+            break;
+        }
+        // Directory components, file stem, and extension become
+        // matchable words (for example `db/migrations/0010_users.sql`
+        // contributes `migrations` and `sql`).
+        descriptors.push(bounded(&path.replace('/', " "), MAX_DESCRIPTOR_BYTES));
+    }
+    descriptors
+}
+
+/// Free-text of the retrieval query: descriptors and changed symbol
+/// names, bounded to the query budget.
+fn retrieval_text(descriptors: &[String], symbols: &[String]) -> String {
+    let mut text = String::new();
+    for part in descriptors.iter().chain(symbols) {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(part);
+    }
+    truncate_text(&text, MAX_QUERY_BYTES).to_owned()
+}
+
+/// Distinct index languages of the changed paths, read from the
+/// worktree manifest of the freshly refreshed target snapshot.
+fn changed_languages(
+    paths: &StoragePaths,
+    changed: &[String],
+) -> Result<Vec<String>, CodeReviewError> {
+    let cache = |err: rusqlite::Error| CodeReviewError::Cache(err.to_string());
+    let db = open_or_recover(&paths.worktree, DbKind::Worktree)
+        .map_err(|err| CodeReviewError::Cache(format!("{}: {err}", err)))?;
+    let mut languages: BTreeSet<String> = BTreeSet::new();
+    let mut stmt = db
+        .conn
+        .prepare(
+            "SELECT pc.language FROM path_content pc \n             JOIN manifest m ON m.path = pc.path AND m.content_key = pc.content_key \n             WHERE pc.path = ?1 AND pc.language IS NOT NULL",
+        )
+        .map_err(cache)?;
+    for path in changed {
+        let rows = stmt
+            .query_map([path], |row| row.get::<_, String>(0))
+            .map_err(cache)?;
+        for language in rows {
+            let language = language.map_err(cache)?;
+            if languages.insert(language) && languages.len() >= MAX_ROUTING_LANGUAGES {
+                break;
+            }
+        }
+    }
+    Ok(languages.into_iter().take(MAX_ROUTING_LANGUAGES).collect())
+}
+
+/// Symbols defined by the changed paths of the target snapshot, read
+/// through the worktree manifest (membership) and the shared
+/// content-addressed symbol table, bounded and sorted.
+fn changed_symbols(
+    paths: &StoragePaths,
+    changed: &[String],
+) -> Result<Vec<String>, CodeReviewError> {
+    let worktree = open_or_recover(&paths.worktree, DbKind::Worktree)
+        .map_err(|err| CodeReviewError::Cache(format!("{}: {err}", err)))?;
+    let mut content_keys: Vec<(String, String)> = Vec::new();
+    {
+        let cache = |err: rusqlite::Error| CodeReviewError::Cache(err.to_string());
+        let mut stmt = worktree
+            .conn
+            .prepare(
+                "SELECT pc.content_key, pc.language FROM path_content pc \n                 JOIN manifest m ON m.path = pc.path AND m.content_key = pc.content_key \n                 WHERE pc.path = ?1 AND pc.language IS NOT NULL",
+            )
+            .map_err(cache)?;
+        for path in changed.iter().take(MAX_SYMBOL_PATHS) {
+            let rows = stmt
+                .query_map([path], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(cache)?;
+            for row in rows {
+                let (key, language) = row.map_err(cache)?;
+                if !content_keys.contains(&(key.clone(), language.clone())) {
+                    content_keys.push((key, language));
+                }
+            }
+        }
+    }
+
+    let shared = open_or_recover(&paths.shared, DbKind::Shared)
+        .map_err(|err| CodeReviewError::Cache(format!("{}: {err}", err)))?;
+    let cache = |err: rusqlite::Error| CodeReviewError::Cache(err.to_string());
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut stmt = shared
+        .conn
+        .prepare(
+            "SELECT DISTINCT s.name FROM symbol s \n             JOIN parsed_artifact pa ON pa.id = s.parsed_artifact_id \n             WHERE pa.content_key = ?1 AND pa.language = ?2 AND pa.parser_version = ?3",
+        )
+        .map_err(cache)?;
+    for (content_key, language) in &content_keys {
+        let rows = stmt
+            .query_map(
+                rusqlite::params![content_key, language, PARSER_VERSION],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(cache)?;
+        for name in rows {
+            names.insert(name.map_err(cache)?);
+            if names.len() >= MAX_CHANGED_SYMBOLS {
+                return Ok(names.into_iter().take(MAX_CHANGED_SYMBOLS).collect());
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+/// Assemble the diff portion of the reviewer initial context: one
+/// bounded [`ContextKind::Diff`] entry per changed path, path order,
+/// within the aggregate diff budget. The diff is direct review input;
+/// it can never be crowded out by retrieved context.
+fn diff_context_entries(patches: &[SnapshotPatch]) -> ContextBundle {
+    let mut entries: Vec<ContextEntry> = Vec::new();
+    let mut total = 0usize;
+    let mut truncated = false;
+    for patch in patches {
+        if total >= DIFF_TOTAL_MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        let remaining = DIFF_TOTAL_MAX_BYTES - total;
+        let body = if patch.binary {
+            "binary content changed; no textual diff available".to_string()
+        } else if let Some(text) = patch.patch.as_deref() {
+            if text.is_empty() {
+                // Headers only (for example a mode-only change).
+                "changed with no textual diff (mode change only)".to_string()
+            } else {
+                text.to_owned()
+            }
+        } else {
+            "changed; no textual diff available".to_string()
+        };
+        let text = if body.len() > remaining {
+            truncated = true;
+            if remaining <= 64 {
+                break;
+            }
+            format!(
+                "{}\n\u{2026} [diff truncated]",
+                truncate_text(&body, remaining - 24)
+            )
+        } else {
+            body
+        };
+        total += text.len();
+        entries.push(ContextEntry {
+            kind: ContextKind::Diff,
+            title: format!("diff: {} ({})", patch.path, diff_status_label(patch.status)),
+            path: Some(patch.path.clone()),
+            symbol: None,
+            line_start: None,
+            line_end: None,
+            record_id: None,
+            practice_id: None,
+            text,
+            score: 1.0,
+        });
+    }
+    ContextBundle {
+        entries,
+        truncated,
+        text_bytes: total,
+    }
+}
+
+/// Stable wire label of a diff status.
+fn diff_status_label(status: DiffStatus) -> &'static str {
+    match status {
+        DiffStatus::Added => "added",
+        DiffStatus::Deleted => "deleted",
+        DiffStatus::Modified => "modified",
+        DiffStatus::Renamed => "renamed",
+        DiffStatus::Copied => "copied",
+        DiffStatus::TypeChanged => "type-changed",
+    }
+}
+
+/// Assemble one code reviewer's bounded initial context: the diff
+/// entries first (direct review input), then the shared retrieved
+/// context and the reviewer's practices fitted into the remaining
+/// budget of the shared initial-context bound.
+fn code_initial_context(
+    diff_context: &ContextBundle,
+    shared: &ContextBundle,
+    catalog: &Catalog,
+    practice_tags: &[String],
+) -> ContextBundle {
+    let budget = ContextBudget {
+        max_entries: INITIAL_CONTEXT_BUDGET
+            .max_entries
+            .saturating_sub(diff_context.entries.len()),
+        max_entry_text_bytes: ContextBudget::default().max_entry_text_bytes,
+        max_total_text_bytes: INITIAL_CONTEXT_BUDGET
+            .max_total_text_bytes
+            .saturating_sub(diff_context.text_bytes),
+    };
+    let rest = initial_context(&[], shared, catalog, practice_tags, &budget);
+    let mut entries = diff_context.entries.clone();
+    let text_bytes = diff_context.text_bytes + rest.text_bytes;
+    entries.extend(rest.entries);
+    ContextBundle {
+        entries,
+        truncated: diff_context.truncated || rest.truncated,
+        text_bytes,
+    }
 }
 
 /// Normalize a host-provided dynamic domain description against the
@@ -757,24 +1466,19 @@ struct ReviewEvent<'a> {
     rejected: &'a [RejectedFinding],
     synthesis_diagnostics: &'a [crate::domain::finding::SynthesisDiagnostic],
     diagnostics: &'a [String],
-    plan_path: Option<&'a str>,
+    /// Review-input provenance (`plan_source`/`code_source` payload).
+    source: &'a serde_json::Value,
 }
 
 /// Persist the local review event in the shared cache (regenerable
 /// local state, never durable project knowledge).
-fn persist_review_event(
-    paths: &StoragePaths,
-    event: &ReviewEvent<'_>,
-) -> Result<(), PlanReviewError> {
-    let cache = |err: rusqlite::Error| PlanReviewError::Cache(err.to_string());
-    let db = open_or_recover(&paths.shared, DbKind::Shared)
-        .map_err(|err| PlanReviewError::Cache(format!("{}: {err}", err)))?;
+fn persist_review_event(paths: &StoragePaths, event: &ReviewEvent<'_>) -> Result<(), String> {
+    let cache = |err: rusqlite::Error| err.to_string();
+    let db =
+        open_or_recover(&paths.shared, DbKind::Shared).map_err(|err| format!("{}: {err}", err))?;
     let payload = json!({
         "schema": 1,
-        "plan_source": match event.plan_path {
-            Some(path) => json!({ "path": path }),
-            None => json!({ "stdin": true }),
-        },
+        "source": event.source,
         "routing_input": {
             "descriptors": event.routing_input.descriptors,
             "languages": event.routing_input.languages,
@@ -855,7 +1559,7 @@ fn persist_review_event(
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 event.result.review_id,
-                "plan",
+                kind_label(event.result.kind),
                 serde_json::to_string(&event.result.snapshot).expect("descriptor serializes"),
                 serde_json::to_string(&payload).expect("event payload serializes"),
                 event.result.created_at,
@@ -951,15 +1655,15 @@ fn kind_label(kind: ReviewKind) -> &'static str {
 /// (tests select the deterministic fake/scripted runtimes; production
 /// defaults to real Pi sessions). Invalid values are typed errors,
 /// never guesses.
-pub fn host_launch_from_env() -> Result<PiHostLaunch, PlanReviewError> {
+pub fn host_launch_from_env() -> Result<PiHostLaunch, String> {
     let runtime = std::env::var("NISSE_PI_HOST_RUNTIME").unwrap_or_else(|_| "pi".to_string());
     let runtime = match runtime.as_str() {
         "fake" => HostRuntime::Fake,
         "pi" => HostRuntime::Pi,
         other => {
-            return Err(PlanReviewError::InvalidPlan(format!(
+            return Err(format!(
                 "NISSE_PI_HOST_RUNTIME must be `fake` or `pi`, got `{other}`"
-            )));
+            ));
         }
     };
     let program = std::env::var("NISSE_PI_HOST_PROGRAM").unwrap_or_else(|_| "node".to_string());
@@ -1130,5 +1834,202 @@ mod tests {
             findings: Vec::new(),
         };
         assert!(render_review_text(&empty).contains("findings: none"));
+    }
+
+    #[test]
+    fn code_descriptors_lead_with_subjects_then_path_tokens() {
+        let subjects = vec![
+            "Fix the race on the shared queue".to_string(),
+            String::new(),
+            "  \n".to_string(),
+            format!("{}", "x".repeat(MAX_DESCRIPTOR_BYTES + 10)),
+        ];
+        let descriptors = code_descriptors(
+            subjects,
+            &[
+                "db/migrations/0010_users.sql".to_string(),
+                "src/queue/mod.rs".to_string(),
+            ],
+        );
+        assert_eq!(
+            descriptors[0],
+            "Fix the race on the shared queue".to_string()
+        );
+        // Empty subjects are skipped; oversized ones are bounded.
+        assert_eq!(descriptors[1].len(), MAX_DESCRIPTOR_BYTES);
+        assert!(descriptors.contains(&"db migrations 0010_users.sql".to_string()));
+        assert!(descriptors.contains(&"src queue mod.rs".to_string()));
+
+        // The descriptor list is bounded.
+        let many: Vec<String> = (0..100).map(|i| format!("dir{i}/file{i}.rs")).collect();
+        assert_eq!(
+            code_descriptors(Vec::new(), &many).len(),
+            MAX_CODE_DESCRIPTORS
+        );
+    }
+
+    #[test]
+    fn retrieval_text_joins_and_bounds_descriptors_and_symbols() {
+        let text = retrieval_text(&["alpha beta".to_string()], &["enqueue".to_string()]);
+        assert_eq!(text, "alpha beta enqueue");
+
+        let big: Vec<String> = (0..1000)
+            .map(|index| format!("descriptor{index}"))
+            .collect();
+        assert!(retrieval_text(&big, &[]).len() <= MAX_QUERY_BYTES);
+    }
+
+    fn patch(path: &str, status: DiffStatus, text: Option<&str>, binary: bool) -> SnapshotPatch {
+        SnapshotPatch {
+            path: path.to_string(),
+            status,
+            binary,
+            patch: text.map(str::to_owned),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn diff_context_entries_lead_with_real_diffs_and_mark_binary() {
+        let patches = vec![
+            patch(
+                "src/queue.rs",
+                DiffStatus::Modified,
+                Some("--- a/src/queue.rs\n+++ b/src/queue.rs\n@@ -1,3 +1,4 @@\n- old\n+ new"),
+                false,
+            ),
+            patch("assets/blob.bin", DiffStatus::Modified, None, true),
+            patch("mode.sh", DiffStatus::Modified, Some(""), false),
+        ];
+        let bundle = diff_context_entries(&patches);
+        assert_eq!(bundle.entries.len(), 3);
+        assert!(!bundle.truncated);
+        let first = &bundle.entries[0];
+        assert_eq!(first.kind, ContextKind::Diff);
+        assert_eq!(first.path.as_deref(), Some("src/queue.rs"));
+        assert_eq!(first.title, "diff: src/queue.rs (modified)");
+        assert!(first.text.contains("+ new"));
+        assert_eq!(first.score, 1.0);
+        assert_eq!(
+            bundle.entries[1].text,
+            "binary content changed; no textual diff available"
+        );
+        assert_eq!(
+            bundle.entries[2].text,
+            "changed with no textual diff (mode change only)"
+        );
+        assert!(bundle.text_bytes > 0);
+    }
+
+    #[test]
+    fn diff_context_entries_honor_the_aggregate_budget() {
+        // Uneven sizes force the last admitted entry to overflow the
+        // aggregate budget and be truncated to fit.
+        let filler = "x".repeat(15_000);
+        let patches: Vec<SnapshotPatch> = (0..8)
+            .map(|index| {
+                patch(
+                    &format!("src/file{index:02}.rs"),
+                    DiffStatus::Modified,
+                    Some(&filler),
+                    false,
+                )
+            })
+            .collect();
+        let bundle = diff_context_entries(&patches);
+        assert!(bundle.text_bytes <= DIFF_TOTAL_MAX_BYTES);
+        assert!(bundle.truncated, "entries beyond the budget are dropped");
+        assert_eq!(
+            bundle.entries.len(),
+            5,
+            "four full entries plus one truncated"
+        );
+        // The last admitted entry is truncated to fit exactly.
+        let last = bundle.entries.last().unwrap();
+        assert!(
+            last.text.contains("[diff truncated]"),
+            "{}",
+            last.text.len()
+        );
+
+        // Exact fits do not count as truncation.
+        let exact = "x".repeat(DIFF_ENTRY_MAX_BYTES);
+        let patches: Vec<SnapshotPatch> = (0..4)
+            .map(|index| {
+                patch(
+                    &format!("src/fit{index}.rs"),
+                    DiffStatus::Modified,
+                    Some(&exact),
+                    false,
+                )
+            })
+            .collect();
+        let bundle = diff_context_entries(&patches);
+        assert_eq!(bundle.entries.len(), 4);
+        assert!(!bundle.truncated);
+        assert_eq!(bundle.text_bytes, DIFF_TOTAL_MAX_BYTES);
+    }
+
+    #[test]
+    fn code_initial_context_pins_diffs_and_assembles_the_rest() {
+        let catalog = Catalog::bundled().unwrap();
+        let diff_entry = ContextEntry {
+            kind: ContextKind::Diff,
+            title: "diff: src/queue.rs (modified)".to_string(),
+            path: Some("src/queue.rs".to_string()),
+            symbol: None,
+            line_start: None,
+            line_end: None,
+            record_id: None,
+            practice_id: None,
+            text: "diff body".to_string(),
+            score: 1.0,
+        };
+        let diff_context = ContextBundle {
+            entries: vec![diff_entry.clone()],
+            truncated: false,
+            text_bytes: 9,
+        };
+        let shared = ContextBundle {
+            entries: vec![ContextEntry {
+                kind: ContextKind::SymbolDefinition,
+                title: "function enqueue".to_string(),
+                path: Some("src/queue.rs".to_string()),
+                symbol: Some("enqueue".to_string()),
+                line_start: Some(1),
+                line_end: Some(3),
+                record_id: None,
+                practice_id: None,
+                text: "fn enqueue()".to_string(),
+                score: 0.9,
+            }],
+            truncated: false,
+            text_bytes: 12,
+        };
+
+        let bundle = code_initial_context(
+            &diff_context,
+            &shared,
+            &catalog,
+            &["concurrency".to_string()],
+        );
+        // The diff is the leading entry and is never crowded out.
+        assert_eq!(bundle.entries.first(), Some(&diff_entry));
+        assert_eq!(bundle.entries[1].kind, ContextKind::SymbolDefinition);
+        assert!(bundle.entries.len() >= 3, "diff + symbol + practices");
+        assert!(
+            bundle.entries[2..]
+                .iter()
+                .all(|entry| entry.kind == ContextKind::Practice)
+        );
+        assert!(bundle.text_bytes > 9);
+    }
+
+    #[test]
+    fn code_review_instructions_frame_the_diff_as_primary_input() {
+        let instructions = code_review_instructions("Base instructions.");
+        assert!(instructions.starts_with("Base instructions."));
+        assert!(instructions.contains("## Review kind: code"));
+        assert!(instructions.contains("unified diff entries"));
     }
 }

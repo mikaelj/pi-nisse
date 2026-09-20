@@ -26,6 +26,9 @@ pub enum ContextKind {
     /// The reviewed plan itself: the primary review input of a plan
     /// review (plan sections 23 and 59).
     Plan,
+    /// The unified diff of one changed path: the primary review input
+    /// of a code review (plan sections 23 and 60).
+    Diff,
     /// A supported (or conflicting) durable project fact.
     ProjectFact,
     /// A durable project lesson.
@@ -46,6 +49,7 @@ impl ContextKind {
             ContextKind::SourceSkeleton => "source-skeleton",
             ContextKind::Source => "source",
             ContextKind::Plan => "plan",
+            ContextKind::Diff => "diff",
             ContextKind::ProjectFact => "project-fact",
             ContextKind::ProjectLesson => "project-lesson",
             ContextKind::Practice => "practice",
@@ -54,16 +58,16 @@ impl ContextKind {
     }
 
     /// Context-priority rank (plan section 31): review input first
-    /// (the plan and consolidated finding groups are direct review
-    /// input, never retrieval signals), then affected source, verified
-    /// facts, directly related source, lessons, and built-in practices.
-    /// Lower ranks sort first on equal scores. `Source` and
+    /// (the plan, the diff, and consolidated finding groups are direct
+    /// review input, never retrieval signals), then affected source,
+    /// verified facts, directly related source, lessons, and built-in
+    /// practices. Lower ranks sort first on equal scores. `Source` and
     /// `SymbolReference` share the rank of directly related source: both
     /// are exact, reviewer-requested target-snapshot content rather than
     /// pre-selected affected source.
     pub fn priority(self) -> u8 {
         match self {
-            ContextKind::Plan | ContextKind::FindingGroup => 0,
+            ContextKind::Plan | ContextKind::Diff | ContextKind::FindingGroup => 0,
             ContextKind::SymbolDefinition => 0,
             ContextKind::ProjectFact => 1,
             ContextKind::SourceSkeleton => 2,
@@ -166,6 +170,7 @@ mod tests {
             (ContextKind::SourceSkeleton, "\"source_skeleton\""),
             (ContextKind::Source, "\"source\""),
             (ContextKind::Plan, "\"plan\""),
+            (ContextKind::Diff, "\"diff\""),
             (ContextKind::ProjectFact, "\"project_fact\""),
             (ContextKind::ProjectLesson, "\"project_lesson\""),
             (ContextKind::Practice, "\"practice\""),
@@ -186,11 +191,13 @@ mod tests {
 
     #[test]
     fn context_priority_follows_plan_ordering() {
-        // Review input first: the plan outranks every retrieved signal.
+        // Review input first: plan and diff outrank every retrieved
+        // signal.
         assert_eq!(
             ContextKind::Plan.priority(),
             ContextKind::FindingGroup.priority()
         );
+        assert_eq!(ContextKind::Plan.priority(), ContextKind::Diff.priority());
         // Affected source, then verified facts, directly related source,
         // lessons, built-in practices (plan section 31).
         assert!(ContextKind::SymbolDefinition.priority() < ContextKind::ProjectFact.priority());
