@@ -87,6 +87,38 @@ pub(crate) fn stdout_trimmed(output: std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// Whether two paths denote the same location regardless of path form.
+///
+/// Git prints Windows paths with forward slashes and no verbatim prefix
+/// (`C:/repo/.git`), while `Path::canonicalize` produces verbatim paths
+/// (`\\\\?\\C:\\repo\\.git`). Direct `PathBuf` equality therefore fails on
+/// Windows even for identical locations. This helper canonicalizes both
+/// sides when possible and otherwise falls back to a normalized
+/// case-insensitive comparison, so tests assert location identity on every
+/// platform (milestone 27 audit: paths).
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    if a == b {
+        return true;
+    }
+    normalize_path(&a) == normalize_path(&b)
+}
+
+/// Normalized textual form of a path for the `same_path` fallback:
+/// one separator style, lowercase (Windows paths are case-insensitive),
+/// no verbatim prefix.
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .to_lowercase()
+        .trim_start_matches("\\\\?\\")
+        .to_string()
+}
+
 /// Create a uniquely named temporary directory.
 fn tempdir(label: &str) -> TempDir {
     tempfile::Builder::new()

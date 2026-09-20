@@ -22,6 +22,7 @@ mod pi_tools;
 mod plan_review;
 mod query_binary;
 mod records_binary;
+mod windows_compat;
 
 use std::path::Path;
 use std::process::{Command, Output};

@@ -494,7 +494,9 @@ fn is_not_a_repository(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::testutil::{Fixture, commit_all, git_in, stdout_trimmed, write_file};
+    use crate::git::testutil::{
+        Fixture, commit_all, git_in, same_path, stdout_trimmed, write_file,
+    };
 
     #[test]
     fn discover_normal_repository_from_root_and_subdirectory() {
@@ -504,9 +506,12 @@ mod tests {
 
         let runner = GitRunner::new();
         let ctx = RepoContext::discover(&runner, &fixture.root).unwrap();
-        assert_eq!(ctx.worktree_root, fixture.root);
-        assert_eq!(ctx.git_dir, fixture.root.join(".git"));
-        assert_eq!(ctx.git_common_dir, fixture.root.join(".git"));
+        // Git prints paths in its own platform form (for example
+        // `C:/repo/.git` on Windows), so location equality goes through
+        // `same_path` instead of `PathBuf` equality.
+        assert!(same_path(&ctx.worktree_root, &fixture.root));
+        assert!(same_path(&ctx.git_dir, &fixture.root.join(".git")));
+        assert!(same_path(&ctx.git_common_dir, &fixture.root.join(".git")));
         assert_eq!(ctx.head.as_deref(), Some(oid.as_str()));
         assert_eq!(ctx.branch.as_deref(), Some(fixture.branch_name.as_str()));
         assert!(!ctx.detached);
@@ -515,7 +520,7 @@ mod tests {
         // Discovery from a subdirectory still resolves the worktree root.
         let sub = fixture.root.join("src");
         let ctx_sub = RepoContext::discover(&runner, &sub).unwrap();
-        assert_eq!(ctx_sub.worktree_root, fixture.root);
+        assert!(same_path(&ctx_sub.worktree_root, &fixture.root));
         assert_eq!(ctx_sub.head, ctx.head);
     }
 
@@ -582,22 +587,28 @@ mod tests {
         let runner = GitRunner::new();
 
         let main_ctx = RepoContext::discover(&runner, &fixture.root).unwrap();
-        assert_eq!(main_ctx.git_dir, fixture.root.join(".git"));
-        assert_eq!(main_ctx.git_common_dir, fixture.root.join(".git"));
+        assert!(same_path(&main_ctx.git_dir, &fixture.root.join(".git")));
+        assert!(same_path(
+            &main_ctx.git_common_dir,
+            &fixture.root.join(".git")
+        ));
 
         let wt_root = Path::new(&wt_path).canonicalize().unwrap();
         let wt_ctx = RepoContext::discover(&runner, &wt_root).unwrap();
-        assert_eq!(wt_ctx.worktree_root, wt_root);
-        assert_eq!(
-            wt_ctx.git_dir,
-            fixture.root.join(".git").join("worktrees").join("wt")
-        );
+        assert!(same_path(&wt_ctx.worktree_root, &wt_root));
+        assert!(same_path(
+            &wt_ctx.git_dir,
+            &fixture.root.join(".git").join("worktrees").join("wt")
+        ));
         // The worktree git dir is separate and exists on disk.
         assert!(wt_ctx.git_dir.is_dir());
         assert_ne!(wt_ctx.git_dir, wt_ctx.git_common_dir);
         // Both worktrees share the same common dir.
         assert_eq!(wt_ctx.git_common_dir, main_ctx.git_common_dir);
-        assert_eq!(wt_ctx.git_common_dir, fixture.root.join(".git"));
+        assert!(same_path(
+            &wt_ctx.git_common_dir,
+            &fixture.root.join(".git")
+        ));
         assert_eq!(wt_ctx.branch.as_deref(), Some("topic"));
     }
 

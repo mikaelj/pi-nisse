@@ -1,0 +1,55 @@
+# Continuous integration for Nisse.
+#
+# The Rust quality gates (plan section 0.4) run on every platform,
+# including Windows x86_64 (plan milestone 27). The Windows job is the
+# Windows CI: the full test suite there covers paths with spaces,
+# non-ASCII path segments and file names, CRLF source content, linked
+# worktrees, the Pi-host child process, and the MCP stdio subprocess
+# (see tests/integration/windows_compat.rs).
+#
+# The default test suite requires no Internet access and no real LLM
+# provider: reviewer-dependent tests use the deterministic fake runtime
+# of the Pi host. Node.js is only needed because the host itself is a
+# TypeScript child process (Node >= 23.6 for type stripping).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is Windows x86_64 Server.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the exact toolchain pinned in rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Git is preinstalled on all runners; Node is required by the
+      # Pi-host child process spawned by reviewer tests.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint (clippy, warnings denied)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --all-features

@@ -23,15 +23,33 @@ fn ambient_git_dir_cannot_hijack_discovery() {
     let decoy = tempfile::tempdir().unwrap();
     run_git(decoy.path(), &["init", "--quiet", "."]);
 
-    let output = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    command
         .args(["--exact", "subtest_ambient_git_dir_cannot_hijack_discovery"])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("LC_ALL", "C")
         .env("GIT_DIR", decoy.path())
-        .env(SUBTEST_MARKER, "1")
-        .output()
-        .expect("failed to re-exec test binary");
+        .env(SUBTEST_MARKER, "1");
+    // Windows child processes need the core system variables to run at
+    // all (missing `SYSTEMROOT` breaks process initialization, and
+    // `TEMP` is where temporary repositories live). Propagating them
+    // keeps the controlled environment minimal on Unix while remaining
+    // functional on Windows (milestone 27 audit).
+    for key in [
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "COMSPEC",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    let output = command.output().expect("failed to re-exec test binary");
 
     assert!(
         output.status.success(),
@@ -70,7 +88,13 @@ fn subtest_ambient_git_dir_cannot_hijack_discovery() {
     // discovery must still resolve the real worktree.
     let ctx = RepoContext::discover(&GitRunner::new(), repo.path())
         .expect("discovery must ignore ambient GIT_DIR");
-    assert_eq!(ctx.worktree_root, canonical(repo.path()));
+    // Canonicalize both sides: Git prints paths in its own platform form
+    // (for example `C:/repo` on Windows) while `canonical` returns the
+    // verbatim filesystem form.
+    assert_eq!(
+        ctx.worktree_root.canonicalize().unwrap(),
+        canonical(repo.path())
+    );
     assert!(ctx.head.is_some());
 }
 

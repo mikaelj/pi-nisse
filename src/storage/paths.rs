@@ -46,7 +46,7 @@ impl StoragePaths {
 mod tests {
     use super::*;
     use crate::git::GitRunner;
-    use crate::git::testutil::{Fixture, commit_all, git_in, write_file};
+    use crate::git::testutil::{Fixture, commit_all, git_in, same_path, write_file};
 
     #[test]
     fn main_worktree_paths_live_under_git_nisse() {
@@ -56,18 +56,20 @@ mod tests {
 
         let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
         let paths = StoragePaths::for_repo(&ctx);
-        assert_eq!(
-            paths.shared,
-            fixture.root.join(".git").join("nisse").join("cache.sqlite")
-        );
-        assert_eq!(
-            paths.worktree,
-            fixture
+        // Git-printed path forms differ from filesystem forms on Windows;
+        // location equality goes through `same_path`.
+        assert!(same_path(
+            &paths.shared,
+            &fixture.root.join(".git").join("nisse").join("cache.sqlite")
+        ));
+        assert!(same_path(
+            &paths.worktree,
+            &fixture
                 .root
                 .join(".git")
                 .join("nisse")
                 .join("worktree.sqlite")
-        );
+        ));
     }
 
     #[test]
@@ -97,16 +99,16 @@ mod tests {
         assert_eq!(main_paths.shared, wt_paths.shared);
         // Worktree caches are private per worktree.
         assert_ne!(main_paths.worktree, wt_paths.worktree);
-        assert_eq!(
-            wt_paths.worktree,
-            fixture
+        assert!(same_path(
+            &wt_paths.worktree,
+            &fixture
                 .root
                 .join(".git")
                 .join("worktrees")
                 .join("wt")
                 .join("nisse")
                 .join("worktree.sqlite")
-        );
+        ));
     }
 
     #[test]
