@@ -1721,6 +1721,9 @@ pub fn render_review_text(result: &ReviewResult) -> String {
                 String::new()
             },
         ));
+        // The finding identifier makes `nisse feedback <review-id>
+        // <finding-id>` usable from the text output.
+        out.push_str(&format!("    id: {}\n", finding.id));
         out.push_str(&format!("    claim: {}\n", finding.claim));
         if !finding.recommendation.is_empty() {
             out.push_str(&format!("    recommendation: {}\n", finding.recommendation));
@@ -1937,6 +1940,8 @@ mod tests {
         assert!(text.contains("[high] Queue race (correctness, logic)"));
         assert!(text.contains("claim: Two contexts mutate the queue."));
         assert!(text.contains("evidence: plan at Concurrency"));
+        // Finding identifiers are rendered so feedback can target them.
+        assert!(text.contains("id: g1"), "{text}");
 
         let empty = ReviewResult {
             review_id: "02TEST".to_string(),

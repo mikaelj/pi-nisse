@@ -57,7 +57,11 @@ impl App {
                 }
             },
             Command::Query { query, json } => self.run_query(query, json),
-            Command::Feedback { .. } => Err(AppError::NotImplemented("nisse feedback".to_string())),
+            Command::Feedback {
+                review_id,
+                finding_id,
+                outcome,
+            } => self.run_feedback(review_id, finding_id, outcome),
             Command::Records { records } => match records {
                 crate::cli::RecordsCommand::List => self.run_records_list(),
                 crate::cli::RecordsCommand::Pending => self.run_records_pending(),
@@ -341,6 +345,67 @@ impl App {
         Ok(())
     }
 
+    /// Run `nisse feedback` (plan sections 49 and 50).
+    ///
+    /// Records a known outcome for one finding of a stored review as
+    /// immutable durable observations. Rust constructs every
+    /// authoritative observation field from the stored review, the
+    /// stored finding, the explicit outcome, and the review's snapshot
+    /// descriptors; LLMs construct nothing. Submission is idempotent,
+    /// outcomes are immutable, and without a contributor identity the
+    /// outcome remains pending locally (plan section 44) while the
+    /// command fails explicitly.
+    fn run_feedback(
+        &self,
+        review_id: String,
+        finding_id: String,
+        outcome: crate::cli::FeedbackOutcome,
+    ) -> Result<(), AppError> {
+        use crate::learning::feedback;
+
+        let Some(outcome) = outcome.outcome() else {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "exactly one feedback outcome flag is required"
+            )));
+        };
+
+        let (ctx, paths) = self.discover_storage()?;
+
+        // Contributor identity lives in trusted local configuration;
+        // feedback is noninteractive and never prompts.
+        let user_path = crate::config::paths::user_config_path();
+        let repo_path = crate::config::paths::repo_config_path(&ctx.git_common_dir);
+        let loaded =
+            crate::config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
+                AppError::Other(anyhow::anyhow!(
+                    "feedback failed to load configuration: {err}"
+                ))
+            })?;
+        let contributor = loaded
+            .config
+            .contributor
+            .as_ref()
+            .map(|contributor| contributor.id.clone());
+
+        let recording = feedback::record_feedback(
+            &ctx,
+            &paths,
+            &review_id,
+            &finding_id,
+            outcome,
+            contributor.as_deref(),
+        )
+        .map_err(|err| AppError::Other(anyhow::anyhow!("feedback failed: {err}")))?;
+
+        print_to_stdout(&feedback::render_feedback(
+            &review_id,
+            &finding_id,
+            outcome,
+            &recording,
+        ));
+        Ok(())
+    }
+
     /// Run `nisse cache status`.
     ///
     /// The report is written to stdout. Status never mutates a database;
@@ -537,15 +602,6 @@ mod tests {
         let app = App::new();
 
         let cases: Vec<Command> = vec![
-            Command::Feedback {
-                review_id: "01J8Z".into(),
-                finding_id: "01J8Y".into(),
-                outcome: crate::cli::FeedbackOutcome {
-                    fixed: true,
-                    accepted: false,
-                    dismissed: false,
-                },
-            },
             Command::Records {
                 records: crate::cli::RecordsCommand::Compact,
             },

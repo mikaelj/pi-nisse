@@ -18,10 +18,10 @@ fn version_prints_to_stdout_with_zero_exit() {
 
 #[test]
 fn unimplemented_review_subcommand_fails_on_stderr_only() {
-    // `records pending` is implemented (milestone 18); every remaining
-    // future command must fail with a typed NotImplemented error.
+    // `records pending` (milestone 18) and `feedback` (milestone 19)
+    // are implemented; every remaining future command must fail with
+    // a typed NotImplemented error.
     for args in [
-        vec!["feedback", "01J8Z", "01J8Y", "--fixed"],
         vec!["records", "compact"],
         vec!["eval", "routing"],
         vec!["mcp"],
@@ -43,6 +43,29 @@ fn unimplemented_review_subcommand_fails_on_stderr_only() {
             "{args:?} must report a typed NotImplemented error on stderr"
         );
     }
+}
+
+#[test]
+fn feedback_outside_a_repository_requires_repository_context() {
+    // `nisse feedback` is implemented (milestone 19); outside a
+    // repository it fails with the typed repository error on stderr.
+    let dir = tempfile::Builder::new()
+        .prefix("nisse-cli-feedback-norepo-")
+        .tempdir()
+        .unwrap();
+    let out = super::run_nisse_in(
+        dir.path(),
+        &["feedback", "01J8Z", "01J8Y", "--fixed"],
+        dir.path(),
+    );
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "");
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("not inside a Git repository"),
+        "stderr must require repository context"
+    );
 }
 
 #[test]

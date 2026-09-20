@@ -806,16 +806,22 @@ pub fn render_pending(rows: &[PendingRow]) -> String {
         return out;
     }
     for row in rows {
-        let detail = if row.kind == PENDING_KIND {
-            format!(
+        let detail = match row.kind.as_str() {
+            crate::learning::feedback::PENDING_KIND => format!(
+                "pending review feedback ({}): review {} finding {} — {}",
+                row.payload["outcome"].as_str().unwrap_or("?"),
+                row.payload["review_id"].as_str().unwrap_or("?"),
+                row.payload["finding_id"].as_str().unwrap_or("?"),
+                row.payload["reason"].as_str().unwrap_or("?"),
+            ),
+            PENDING_KIND => format!(
                 "{} fact candidate ({}): {} — {}",
                 row.payload["disposition"].as_str().unwrap_or("?"),
                 row.payload["reviewer_id"].as_str().unwrap_or("?"),
                 row.payload["candidate"]["subject"].as_str().unwrap_or("?"),
                 row.payload["reason"].as_str().unwrap_or("?"),
-            )
-        } else {
-            row.kind.clone()
+            ),
+            other => other.to_string(),
         };
         out.push_str(&format!("#{} {} {}\n", row.id, row.created_at, detail));
     }

@@ -137,7 +137,8 @@ pub struct CodeScope {
     pub branch: Option<String>,
 }
 
-/// Feedback outcome: exactly one of `--fixed`, `--accepted`, `--dismissed`.
+/// Feedback outcome: exactly one of `--fixed`, `--accepted`,
+/// `--dismissed` (enforced by the required, single-choice group).
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 pub struct FeedbackOutcome {
@@ -152,6 +153,20 @@ pub struct FeedbackOutcome {
     /// Finding investigated and judged incorrect or not applicable.
     #[arg(long)]
     pub dismissed: bool,
+}
+
+impl FeedbackOutcome {
+    /// The frozen domain outcome of the parsed flags (plan section 49).
+    /// The CLI guarantees exactly one flag; `None` is unreachable for
+    /// parsed commands and callers reject it defensively.
+    pub fn outcome(&self) -> Option<crate::domain::records::FeedbackOutcome> {
+        match (self.fixed, self.accepted, self.dismissed) {
+            (true, false, false) => Some(crate::domain::records::FeedbackOutcome::Fixed),
+            (false, true, false) => Some(crate::domain::records::FeedbackOutcome::Accepted),
+            (false, false, true) => Some(crate::domain::records::FeedbackOutcome::Dismissed),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -344,6 +359,35 @@ mod tests {
         assert!(
             Cli::try_parse_from(["nisse", "feedback", "r1", "f1", "--fixed", "--dismissed"])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn feedback_flags_map_to_the_frozen_domain_outcomes() {
+        let cases = [
+            (vec!["--fixed"], "fixed"),
+            (vec!["--accepted"], "accepted"),
+            (vec!["--dismissed"], "dismissed"),
+        ];
+        for (flag, name) in cases {
+            let cli = Cli::try_parse_from(["nisse", "feedback", "r1", "f1", flag[0]]).unwrap();
+            match cli.command {
+                Command::Feedback { outcome, .. } => {
+                    assert_eq!(outcome.outcome().unwrap().as_str(), name);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+
+        // Defensive: an all-false flag set has no outcome.
+        assert!(
+            crate::cli::FeedbackOutcome {
+                fixed: false,
+                accepted: false,
+                dismissed: false
+            }
+            .outcome()
+            .is_none()
         );
     }
 

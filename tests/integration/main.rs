@@ -7,6 +7,7 @@ mod cli_binary;
 mod code_review;
 mod doctor_binary;
 mod facts_binary;
+mod feedback_binary;
 mod git_env;
 mod needle_binary;
 mod pi_host;
