@@ -15,13 +15,19 @@
 //!   ([`Retriever`](engine::Retriever));
 //! - [`rerank`] optionally cosine-reranks a bounded candidate set with
 //!   a configured embedding provider, backed by the vector cache of
-//!   the shared SQLite database.
+//!   the shared SQLite database;
+//! - [`fixtures`] holds the frozen retrieval evaluation fixtures and
+//!   their fixture repository (milestone 23);
+//! - [`eval`] runs those fixtures and measures the frozen evaluation
+//!   metrics (plan section 69).
 //!
 //! Embeddings are optional everywhere (permanent invariant 16); they
 //! only rerank a bounded candidate set on top of this baseline.
 
 pub mod engine;
 pub mod error;
+pub mod eval;
+pub mod fixtures;
 pub mod fts;
 pub mod membership;
 pub mod query;
@@ -29,6 +35,11 @@ pub mod rerank;
 
 pub use engine::Retriever;
 pub use error::RetrievalError;
+pub use eval::{
+    BASELINE_VARIANT, EMBEDDINGS_VARIANT, RETRIEVAL_TOP_K, RetrievalEvalError,
+    RetrievalFixtureOutcome, RetrievalVariantReport, SnapshotContents, count_snapshot_leakage,
+    render_retrieval_json, render_retrieval_report, run_retrieval_eval,
+};
 pub use membership::SnapshotMembership;
 pub use query::{
     ContextBudget, RetrievalQuery, assemble_bundle, compare_entries, fts_match_expr, render_json,

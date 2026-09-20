@@ -18,26 +18,22 @@ fn version_prints_to_stdout_with_zero_exit() {
 
 #[test]
 fn unimplemented_review_subcommand_fails_on_stderr_only() {
-    // `records compact` (milestone 22) is implemented; every remaining
-    // future command must fail with a typed NotImplemented error.
-    for args in [vec!["eval", "routing"], vec!["mcp"]] {
-        let out = run_nisse(&args);
-        assert!(
-            !out.status.success(),
-            "{args:?} must fail before its milestone"
-        );
-        assert_eq!(
-            String::from_utf8(out.stdout).unwrap(),
-            "",
-            "{args:?} must not write to stdout"
-        );
-        assert!(
-            String::from_utf8(out.stderr)
-                .unwrap()
-                .contains("not implemented"),
-            "{args:?} must report a typed NotImplemented error on stderr"
-        );
-    }
+    // `eval routing` and `eval retrieval` (milestone 23) are
+    // implemented; the MCP server remains a future command and must
+    // fail with a typed NotImplemented error.
+    let out = run_nisse(&["mcp"]);
+    assert!(!out.status.success(), "mcp must fail before its milestone");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "",
+        "mcp must not write to stdout"
+    );
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("not implemented"),
+        "mcp must report a typed NotImplemented error on stderr"
+    );
 }
 
 #[test]

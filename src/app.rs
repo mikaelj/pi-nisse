@@ -29,6 +29,11 @@ pub enum AppError {
     #[error("cache status found problems; see the report on stdout")]
     CacheUnhealthy,
 
+    /// `nisse eval <kind>` found failing fixtures in the mandatory
+    /// baseline; the report is printed to stdout.
+    #[error("eval {0} found failing baseline fixtures; see the report on stdout")]
+    EvalFailed(&'static str),
+
     /// Unclassified application-boundary failure.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -72,12 +77,8 @@ impl App {
                 crate::cli::CacheCommand::Clear => self.run_cache_clear(),
             },
             Command::Eval { eval } => match eval {
-                crate::cli::EvalCommand::Routing => {
-                    Err(AppError::NotImplemented("nisse eval routing".to_string()))
-                }
-                crate::cli::EvalCommand::Retrieval => {
-                    Err(AppError::NotImplemented("nisse eval retrieval".to_string()))
-                }
+                crate::cli::EvalCommand::Routing => self.run_eval_routing(),
+                crate::cli::EvalCommand::Retrieval => self.run_eval_retrieval(),
             },
             Command::Mcp => Err(AppError::NotImplemented("nisse mcp".to_string())),
         }
@@ -588,6 +589,86 @@ impl App {
         Ok(())
     }
 
+    /// Run `nisse eval routing` (plan section 69, milestone 23).
+    ///
+    /// Runs the frozen routing fixtures through the real
+    /// classification and jury construction pipeline and prints the
+    /// frozen metrics with a machine-readable JSON report. The
+    /// mandatory rules baseline always runs; a configured routing
+    /// provider (plan section 34) adds a comparison variant. The
+    /// command's exit status follows the mandatory baseline only —
+    /// Needle is never mandatory (permanent invariant 15).
+    fn run_eval_routing(&self) -> Result<(), AppError> {
+        let providers = self.eval_providers()?;
+        let variants = crate::routing::eval::run_routing_eval(
+            providers.routing.as_ref().map(|provider| provider.as_ref()),
+        )
+        .map_err(|err| AppError::Other(anyhow::anyhow!("eval routing failed: {err}")))?;
+        print_to_stdout(&crate::routing::eval::render_routing_report(&variants));
+
+        match variants.first() {
+            Some(baseline) if baseline.passed() => Ok(()),
+            Some(_) => Err(AppError::EvalFailed("routing")),
+            None => Err(AppError::Other(anyhow::anyhow!(
+                "eval routing produced no variants"
+            ))),
+        }
+    }
+
+    /// Run `nisse eval retrieval` (plan section 69, milestone 23).
+    ///
+    /// Builds the frozen fixture repository (real temporary Git
+    /// repositories; no network access), runs the frozen retrieval
+    /// fixtures through the real refresh/membership/ranking pipeline,
+    /// and prints the frozen metrics with a machine-readable JSON
+    /// report. Snapshot leakage always fails a fixture. The mandatory
+    /// baseline always runs; a configured embedding provider adds a
+    /// comparison variant whose failures are reported but never fail
+    /// the command (permanent invariant 16).
+    fn run_eval_retrieval(&self) -> Result<(), AppError> {
+        let providers = self.eval_providers()?;
+        let variants = crate::retrieval::eval::run_retrieval_eval(providers.embeddings)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("eval retrieval failed: {err}")))?;
+        print_to_stdout(&crate::retrieval::eval::render_retrieval_report(&variants));
+
+        match variants.first() {
+            Some(baseline) if baseline.passed() => Ok(()),
+            Some(_) => Err(AppError::EvalFailed("retrieval")),
+            None => Err(AppError::Other(anyhow::anyhow!(
+                "eval retrieval produced no variants"
+            ))),
+        }
+    }
+
+    /// Load the optional eval comparison providers from trusted local
+    /// configuration. Evaluation works from any directory; repository
+    /// configuration participates when the current directory is inside
+    /// a repository.
+    fn eval_providers(&self) -> Result<OptionalProviders, AppError> {
+        use crate::config;
+
+        let cwd = std::env::current_dir()
+            .map_err(|err| anyhow::anyhow!("failed to determine the current directory: {err}"))?;
+        let repo_path = match crate::git::RepoContext::discover(&crate::git::GitRunner::new(), &cwd)
+        {
+            Ok(ctx) => Some(config::paths::repo_config_path(&ctx.git_common_dir)),
+            Err(crate::git::GitError::NotARepository { .. }) => None,
+            Err(other) => {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "repository discovery failed: {other}"
+                )));
+            }
+        };
+        let user_path = config::paths::user_config_path();
+        let loaded =
+            config::load_config(user_path.as_deref(), repo_path.as_deref()).map_err(|err| {
+                AppError::Other(anyhow::anyhow!(
+                    "evaluation failed to load configuration: {err}"
+                ))
+            })?;
+        Ok(optional_providers(&loaded.config))
+    }
+
     /// Run `nisse doctor`.
     ///
     /// The report is written to stdout; failures additionally produce a
@@ -745,17 +826,9 @@ mod tests {
     fn every_frozen_command_is_typed_not_implemented() {
         let app = App::new();
 
-        // `records compact` is implemented (milestone 22); evaluation
-        // and MCP remain future milestones.
-        let cases: Vec<Command> = vec![
-            Command::Eval {
-                eval: crate::cli::EvalCommand::Routing,
-            },
-            Command::Eval {
-                eval: crate::cli::EvalCommand::Retrieval,
-            },
-            Command::Mcp,
-        ];
+        // Evaluation commands are implemented (milestone 23); the MCP
+        // server remains a future milestone.
+        let cases: Vec<Command> = vec![Command::Mcp];
 
         for command in cases {
             let err = app.run(command).unwrap_err();

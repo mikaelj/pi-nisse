@@ -7,6 +7,7 @@ mod cli_binary;
 mod code_review;
 mod compact_binary;
 mod doctor_binary;
+mod eval_binary;
 mod fact_staleness;
 mod facts_binary;
 mod feedback_binary;
