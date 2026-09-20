@@ -12,16 +12,20 @@
 //! - [`engine`] combines the signals — exact symbol, relation graph,
 //!   FTS over skeletons/records/practices, and changed-set boosts —
 //!   into bounded ranked [`ContextBundle`] values
-//!   ([`Retriever`](engine::Retriever)).
+//!   ([`Retriever`](engine::Retriever));
+//! - [`rerank`] optionally cosine-reranks a bounded candidate set with
+//!   a configured embedding provider, backed by the vector cache of
+//!   the shared SQLite database.
 //!
 //! Embeddings are optional everywhere (permanent invariant 16); they
-//! would only rerank a bounded candidate set on top of this baseline.
+//! only rerank a bounded candidate set on top of this baseline.
 
 pub mod engine;
 pub mod error;
 pub mod fts;
 pub mod membership;
 pub mod query;
+pub mod rerank;
 
 pub use engine::Retriever;
 pub use error::RetrievalError;
@@ -30,3 +34,4 @@ pub use query::{
     ContextBudget, RetrievalQuery, assemble_bundle, compare_entries, fts_match_expr, render_json,
     render_text, tokenize,
 };
+pub use rerank::{RerankError, RerankStats, rerank};

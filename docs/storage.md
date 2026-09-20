@@ -143,7 +143,14 @@ facts/lessons (`record_fts`), FTS5 over bundled practices
 boosts. Ranking is deterministic; conflicting facts are marked and
 downranked, superseded records are not retrieved as current knowledge,
 and every source entry is filtered through the target snapshot's
-membership (`path_content`) before it can enter a result. `nisse query`
+membership (`path_content`) before it can enter a result. When an
+embedding provider is configured, a bounded leading candidate set is
+cosine-reranked on top of this baseline; vectors are cached in the
+shared `embedding` table with their text stored as `text_chunk` rows
+under synthetic `emb:<sha256>` content keys (path sentinel
+`(embedding-cache)`, never part of the FTS index), keyed per embedding
+model so model or dimension changes never mix geometries. Provider
+failures degrade to the unchanged baseline ranking. `nisse query`
 refreshes the working-tree snapshot lazily and prints a bounded,
 ranked context bundle (`--json` for machine-readable output).
 

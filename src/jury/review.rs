@@ -10,7 +10,11 @@
 //! 5. load durable records and retrieve preliminary project
 //!    facts/lessons;
 //! 6. build the [`RoutingInput`];
-//! 7. route specialists with the mandatory rules classifier;
+//! 7. route specialists with the mandatory rules classifier and,
+//!    when configured, the optional provider blend (plan sections
+//!    33–34) — a provider may adjust scores but never bypass the
+//!    deterministic jury constraints, and provider failures keep the
+//!    rules decision;
 //! 8. enforce the jury rules deterministically (`quality` always, at
 //!    most three specialists, 2..=4 total, dynamic fallback);
 //! 9. build one [`ReviewerExecutionSpec`] per juror;
@@ -50,6 +54,7 @@
 //! reviewer reports and the constrained domain description.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -67,6 +72,8 @@ use crate::git::{
 };
 use crate::index::artifact::PARSER_VERSION;
 use crate::index::refresh_index;
+use crate::providers::routing::classify_with_optional_provider;
+use crate::providers::{EmbeddingProvider, RoutingClassifierProvider};
 use crate::retrieval::Retriever;
 use crate::retrieval::query::{
     ContextBudget, MAX_QUERY_BYTES, RetrievalQuery, assemble_bundle, truncate_text,
@@ -221,7 +228,9 @@ pub struct PlanInput {
 }
 
 /// Everything the plan-review pipeline needs besides the repository.
-#[derive(Debug, Clone)]
+/// (Not `Debug`: the optional provider handles are opaque trait
+/// objects.)
+#[derive(Clone)]
 pub struct PlanReviewOptions {
     /// How to launch the Pi review host child process.
     pub launch: PiHostLaunch,
@@ -231,16 +240,24 @@ pub struct PlanReviewOptions {
     /// `host_config` (from trusted local configuration; reviewer
     /// sessions never inherit a model).
     pub model_profiles: BTreeMap<String, crate::domain::model::ModelProfile>,
+    /// Optional routing provider blended into the rules decision
+    /// (plan sections 33–34). Failures fall back to rules-only routing.
+    pub routing_provider: Option<Arc<dyn RoutingClassifierProvider>>,
+    /// Optional embedding provider reranking retrieval results (plan
+    /// sections 30 and 34). Failures degrade to the baseline ranking.
+    pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl PlanReviewOptions {
     /// Options for `launch` with default consolidation bounds and no
-    /// configured model profiles.
+    /// configured model profiles or optional providers.
     pub fn new(launch: PiHostLaunch) -> Self {
         PlanReviewOptions {
             launch,
             consolidation: ConsolidationOptions::default(),
             model_profiles: BTreeMap::new(),
+            routing_provider: None,
+            embedding_provider: None,
         }
     }
 }
@@ -293,10 +310,17 @@ pub fn run_plan_review(
     // 4. Deterministic request descriptors.
     let descriptors = plan_descriptors(plan_text);
 
-    // 5. Durable records + preliminary facts/lessons retrieval.
+    // 5. Durable records + preliminary facts/lessons retrieval. An
+    // optional embedding provider may rerank the bounded candidate
+    // set; every provider failure degrades to the baseline ranking.
     let catalog = Catalog::bundled()?;
     let records = RecordStore::new(&ctx.worktree_root).load()?;
-    let retriever = Retriever::open(resolved, paths)?;
+    let retriever = match &options.embedding_provider {
+        Some(provider) => {
+            Retriever::open(resolved, paths)?.with_embedding_provider(provider.clone())
+        }
+        None => Retriever::open(resolved, paths)?,
+    };
     retriever.sync_records(&records)?;
     retriever.sync_practices(&catalog)?;
     let query = RetrievalQuery::from_text(truncate_text(plan_text, MAX_QUERY_BYTES));
@@ -313,8 +337,17 @@ pub fn run_plan_review(
         lessons: active_lesson_hints(&active),
     };
 
-    // 7. Deterministic routing; 8. jury rules.
-    let decision = RulesClassifier::new(catalog.clone()).classify(&routing_input);
+    // 7. Deterministic routing with the optional provider (plan
+    //    sections 33–34); 8. jury rules. The provider may only blend
+    //    scores — never bypass the jury constraints — and every
+    //    provider failure keeps the rules decision.
+    let rules_decision = RulesClassifier::new(catalog.clone()).classify(&routing_input);
+    let (decision, mut diagnostics) = classify_with_optional_provider(
+        rules_decision,
+        options.routing_provider.as_deref(),
+        &routing_input,
+        &catalog,
+    );
     let jury = build_jury_plan(&decision, &catalog)?;
 
     // 11. Start the Pi host early so every semantic job shares it.
@@ -324,7 +357,6 @@ pub fn run_plan_review(
     host.send_host_config(&host_config)?;
 
     // 12. Constrained dynamic-domain description for the fallback seat.
-    let mut diagnostics: Vec<String> = Vec::new();
     let mut domain_description: Option<DynamicDomainDescription> = None;
     if jury.uses_dynamic_fallback() {
         let expert = catalog.dynamic_domain_expert();
@@ -855,7 +887,9 @@ pub enum CodeReviewError {
 }
 
 /// Everything the code-review pipeline needs besides the repository.
-#[derive(Debug, Clone)]
+/// (Not `Debug`: the optional provider handles are opaque trait
+/// objects.)
+#[derive(Clone)]
 pub struct CodeReviewOptions {
     /// How to launch the Pi review host child process.
     pub launch: PiHostLaunch,
@@ -865,16 +899,24 @@ pub struct CodeReviewOptions {
     /// `host_config` (from trusted local configuration; reviewer
     /// sessions never inherit a model).
     pub model_profiles: BTreeMap<String, crate::domain::model::ModelProfile>,
+    /// Optional routing provider blended into the rules decision
+    /// (plan sections 33–34). Failures fall back to rules-only routing.
+    pub routing_provider: Option<Arc<dyn RoutingClassifierProvider>>,
+    /// Optional embedding provider reranking retrieval results (plan
+    /// sections 30 and 34). Failures degrade to the baseline ranking.
+    pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl CodeReviewOptions {
     /// Options for `launch` with default consolidation bounds and no
-    /// configured model profiles.
+    /// configured model profiles or optional providers.
     pub fn new(launch: PiHostLaunch) -> Self {
         CodeReviewOptions {
             launch,
             consolidation: ConsolidationOptions::default(),
             model_profiles: BTreeMap::new(),
+            routing_provider: None,
+            embedding_provider: None,
         }
     }
 }
@@ -935,10 +977,17 @@ pub fn run_code_review(
     let languages = changed_languages(paths, &routing_paths)?;
     let symbols = changed_symbols(paths, &routing_paths)?;
 
-    // 5. Durable records + preliminary facts/lessons retrieval.
+    // 5. Durable records + preliminary facts/lessons retrieval. An
+    // optional embedding provider may rerank the bounded candidate
+    // set; every provider failure degrades to the baseline ranking.
     let catalog = Catalog::bundled()?;
     let records = RecordStore::new(&ctx.worktree_root).load()?;
-    let retriever = Retriever::open(resolved, paths)?;
+    let retriever = match &options.embedding_provider {
+        Some(provider) => {
+            Retriever::open(resolved, paths)?.with_embedding_provider(provider.clone())
+        }
+        None => Retriever::open(resolved, paths)?,
+    };
     retriever.sync_records(&records)?;
     retriever.sync_practices(&catalog)?;
     let query = RetrievalQuery {
@@ -959,8 +1008,17 @@ pub fn run_code_review(
         lessons: active_lesson_hints(&active),
     };
 
-    // 7. Deterministic routing; 8. jury rules.
-    let decision = RulesClassifier::new(catalog.clone()).classify(&routing_input);
+    // 7. Deterministic routing with the optional provider (plan
+    //    sections 33–34); 8. jury rules. The provider may only blend
+    //    scores — never bypass the jury constraints — and every
+    //    provider failure keeps the rules decision.
+    let rules_decision = RulesClassifier::new(catalog.clone()).classify(&routing_input);
+    let (decision, mut diagnostics) = classify_with_optional_provider(
+        rules_decision,
+        options.routing_provider.as_deref(),
+        &routing_input,
+        &catalog,
+    );
     let jury = build_jury_plan(&decision, &catalog)?;
 
     // 11. Start the Pi host early so every semantic job shares it.
@@ -970,7 +1028,6 @@ pub fn run_code_review(
     host.send_host_config(&host_config)?;
 
     // 12. Constrained dynamic-domain description for the fallback seat.
-    let mut diagnostics: Vec<String> = Vec::new();
     let mut domain_description: Option<DynamicDomainDescription> = None;
     if jury.uses_dynamic_fallback() {
         let expert = catalog.dynamic_domain_expert();

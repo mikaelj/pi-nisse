@@ -105,8 +105,11 @@ impl App {
     /// Executes the complete plan-review pipeline against the current
     /// working-tree snapshot and prints the result (text, or the strict
     /// `ReviewResult` JSON with `--json`). The local review event is
-    /// persisted in the shared cache. Reviews never require Needle,
-    /// embeddings, or network access in the deterministic runtimes.
+    /// persisted in the shared cache. Optional providers (plan section
+    /// 34) improve routing and retrieval when configured; every
+    /// provider failure degrades to the deterministic behavior, so
+    /// reviews never require Needle, embeddings, or network access in
+    /// the deterministic runtimes.
     fn run_review_plan(&self, source: crate::cli::PlanSource, json: bool) -> Result<(), AppError> {
         use crate::config;
         use crate::git::{SnapshotSpec, resolve_snapshot};
@@ -125,7 +128,9 @@ impl App {
         })?;
 
         // Trusted local configuration supplies the model profiles the
-        // host may use; reviewer sessions never inherit a model.
+        // host may use; reviewer sessions never inherit a model. The
+        // optional classifier/embedding providers come from the same
+        // trusted configuration.
         let user_path = config::paths::user_config_path();
         let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
@@ -139,6 +144,9 @@ impl App {
             .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
         let mut options = PlanReviewOptions::new(launch);
         options.model_profiles = loaded.config.model_profiles.clone();
+        let providers = optional_providers(&loaded.config);
+        options.routing_provider = providers.routing;
+        options.embedding_provider = providers.embeddings;
 
         // The plan file participates in the working snapshot when it
         // lives inside the worktree (untracked non-ignored content is
@@ -169,8 +177,11 @@ impl App {
     /// snapshot mode (`--working`, `--staged`, `--commit`, `--range`,
     /// `--branch`) and prints the result (text, or the strict
     /// `ReviewResult` JSON with `--json`). The local review event is
-    /// persisted in the shared cache. Reviews never require Needle,
-    /// embeddings, or network access in the deterministic runtimes.
+    /// persisted in the shared cache. Optional providers (plan section
+    /// 34) improve routing and retrieval when configured; every
+    /// provider failure degrades to the deterministic behavior, so
+    /// reviews never require Needle, embeddings, or network access in
+    /// the deterministic runtimes.
     fn run_review_code(&self, scope: crate::cli::CodeScope, json: bool) -> Result<(), AppError> {
         use crate::config;
         use crate::git::resolve_snapshot;
@@ -189,7 +200,9 @@ impl App {
         })?;
 
         // Trusted local configuration supplies the model profiles the
-        // host may use; reviewer sessions never inherit a model.
+        // host may use; reviewer sessions never inherit a model. The
+        // optional classifier/embedding providers come from the same
+        // trusted configuration.
         let user_path = config::paths::user_config_path();
         let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
@@ -203,6 +216,9 @@ impl App {
             .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
         let mut options = CodeReviewOptions::new(launch);
         options.model_profiles = loaded.config.model_profiles.clone();
+        let providers = optional_providers(&loaded.config);
+        options.routing_provider = providers.routing;
+        options.embedding_provider = providers.embeddings;
 
         let outcome = run_code_review(&ctx, &resolved, &paths, &options)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
@@ -222,7 +238,9 @@ impl App {
     /// Queries the durable project knowledge and the source index of
     /// the current working-tree snapshot. The index is refreshed
     /// lazily on demand (plan section 28); retrieval is deterministic
-    /// and never requires embeddings or an LLM.
+    /// and never requires an LLM. A configured embedding provider
+    /// (plan section 34) reranks the bounded candidate set; provider
+    /// failures degrade to the baseline ranking.
     fn run_query(&self, query: String, json: bool) -> Result<(), AppError> {
         use crate::git::{SnapshotSpec, resolve_snapshot};
         use crate::index::refresh_index;
@@ -247,6 +265,18 @@ impl App {
 
         let retriever = Retriever::open(&resolved, &paths)
             .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
+        // Optional embedding provider from trusted local
+        // configuration; absent or failing providers change nothing.
+        let user_path = crate::config::paths::user_config_path();
+        let repo_path = crate::config::paths::repo_config_path(&ctx.git_common_dir);
+        let loaded =
+            crate::config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
+                AppError::Other(anyhow::anyhow!("query failed to load configuration: {err}"))
+            })?;
+        let retriever = match optional_providers(&loaded.config).embeddings {
+            Some(provider) => retriever.with_embedding_provider(provider),
+            None => retriever,
+        };
         retriever
             .sync_records(&records)
             .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
@@ -360,6 +390,43 @@ fn print_to_stdout(text: &str) {
     let mut stdout = std::io::stdout().lock();
     let _ = write!(stdout, "{text}");
     let _ = stdout.flush();
+}
+
+/// The optional provider adapters of a configuration (plan section
+/// 34): a routing classifier for the configured `[classifier]`
+/// section and an embedding provider for `[embeddings]`.
+///
+/// Construction performs no I/O; endpoint trust is enforced per
+/// request inside the adapters, and every failure degrades to the
+/// deterministic behavior.
+fn optional_providers(config: &crate::config::NisseConfig) -> OptionalProviders {
+    OptionalProviders {
+        routing: crate::providers::needle_adapter_from_config(
+            config.classifier.provider,
+            config.classifier.endpoint.as_deref(),
+            config.network.allow_non_private_endpoints,
+        )
+        .map(|adapter| {
+            std::sync::Arc::new(adapter)
+                as std::sync::Arc<dyn crate::providers::RoutingClassifierProvider>
+        }),
+        embeddings: crate::providers::needle_adapter_from_config(
+            config.embeddings.provider,
+            config.embeddings.endpoint.as_deref(),
+            config.network.allow_non_private_endpoints,
+        )
+        .map(|adapter| {
+            std::sync::Arc::new(adapter) as std::sync::Arc<dyn crate::providers::EmbeddingProvider>
+        }),
+    }
+}
+
+/// The optional providers of one configuration.
+struct OptionalProviders {
+    /// Optional routing classifier (`[classifier]`).
+    routing: Option<std::sync::Arc<dyn crate::providers::RoutingClassifierProvider>>,
+    /// Optional embedding provider (`[embeddings]`).
+    embeddings: Option<std::sync::Arc<dyn crate::providers::EmbeddingProvider>>,
 }
 
 /// Read the plan input from `--file <path>` or `--stdin` (exactly one

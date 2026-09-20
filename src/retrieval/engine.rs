@@ -32,10 +32,12 @@ use super::query::{
     ContextBudget, MAX_ENTRIES_PER_SIGNAL, RetrievalQuery, assemble_bundle, fts_match_expr,
     truncate_text,
 };
+use super::rerank::rerank;
 use crate::domain::context::{ContextEntry, ContextKind};
 use crate::git::ResolvedSnapshot;
 use crate::index::artifact::{PARSER_VERSION, ParsedArtifact};
 use crate::jury::catalog::Catalog;
+use crate::providers::EmbeddingProvider;
 use crate::storage::StoragePaths;
 use crate::storage::db::open_or_recover;
 use crate::storage::meta::{META_LAST_REFRESH_SNAPSHOT, meta_get};
@@ -72,6 +74,10 @@ pub struct Retriever {
     worktree: Connection,
     worktree_path: PathBuf,
     membership: SnapshotMembership,
+    /// Optional embedding provider reranking a bounded candidate set
+    /// (plan section 30). `None` — the default — keeps retrieval fully
+    /// deterministic without any provider.
+    embedding_provider: Option<std::sync::Arc<dyn EmbeddingProvider>>,
 }
 
 impl Retriever {
@@ -115,7 +121,20 @@ impl Retriever {
             worktree: worktree.conn,
             worktree_path: storage.worktree.clone(),
             membership,
+            embedding_provider: None,
         })
+    }
+
+    /// Attach an optional embedding provider (plan sections 30 and
+    /// 34). Every lookup then cosine-reranks a bounded candidate set;
+    /// any provider failure degrades to the unchanged baseline
+    /// ranking — retrieval never depends on the provider.
+    pub fn with_embedding_provider(
+        mut self,
+        provider: std::sync::Arc<dyn EmbeddingProvider>,
+    ) -> Self {
+        self.embedding_provider = Some(provider);
+        self
     }
 
     /// Synchronize the record full-text index with the durable records
@@ -178,6 +197,26 @@ impl Retriever {
         }
 
         apply_changed_set_boosts(&mut candidates, query);
+
+        // Optional embeddings refine the ranking of a bounded candidate
+        // set (plan section 30); failures degrade to the baseline.
+        if let Some(provider) = &self.embedding_provider {
+            match rerank(
+                &self.shared,
+                &self.shared_path,
+                provider.as_ref(),
+                &query.text,
+                &mut candidates,
+            ) {
+                Ok(stats) => {
+                    tracing::debug!(?stats, "optional embedding rerank applied");
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "optional embedding rerank skipped");
+                }
+            }
+        }
+
         let budget = ContextBudget::default();
         Ok(assemble_bundle(candidates, &budget))
     }
@@ -1163,5 +1202,97 @@ mod tests {
                 .all(|entry| entry.kind != ContextKind::SymbolDefinition
                     && entry.kind != ContextKind::SourceSkeleton)
         );
+    }
+    /// An optional embedding provider for rerank tests: deterministic
+    /// keyword vectors, or a scripted failure.
+    struct KeywordEmbedder {
+        fail: bool,
+    }
+
+    impl crate::providers::EmbeddingProvider for KeywordEmbedder {
+        fn name(&self) -> &'static str {
+            "test-keywords"
+        }
+
+        fn embed(
+            &self,
+            texts: &[&str],
+        ) -> Result<crate::providers::ProviderEmbeddings, crate::providers::ProviderError> {
+            if self.fail {
+                return Err(crate::providers::ProviderError::Transport {
+                    provider: self.name().to_string(),
+                    message: "scripted failure".to_string(),
+                });
+            }
+            Ok(crate::providers::ProviderEmbeddings {
+                model: "keywords".to_string(),
+                vectors: texts
+                    .iter()
+                    .map(|text| {
+                        if text.contains("alpha_fn") {
+                            vec![1.0, 0.0]
+                        } else {
+                            vec![0.0, 1.0]
+                        }
+                    })
+                    .collect(),
+            })
+        }
+    }
+
+    #[test]
+    fn optional_reranker_reorders_and_degrades_gracefully() {
+        let fixture = Fixture::repo("retr-rerank");
+        // The path tie-break puts the beta definition first in the
+        // baseline ranking; the embedding provider must lift the
+        // alpha definition above it for the `alpha_fn` query.
+        write_file(
+            &fixture.root,
+            "src/zz_alpha.rs",
+            "pub fn alpha_fn() -> u8 {\n    1\n}\n",
+        );
+        write_file(
+            &fixture.root,
+            "src/aa_beta.rs",
+            "pub fn beta_fn() -> u8 {\n    2\n}\n",
+        );
+        commit_all(&fixture.root, "one");
+
+        let (_ctx, _resolved, _storage, retriever) = prepare(&fixture, &SnapshotSpec::Working);
+        let query = RetrievalQuery::from_text("alpha_fn beta_fn");
+
+        let baseline = retriever.lookup(&query).unwrap();
+        assert_eq!(
+            baseline.entries[0].path.as_deref(),
+            Some("src/aa_beta.rs"),
+            "baseline tie-break is the path order"
+        );
+
+        // A failing provider degrades to exactly the baseline bundle.
+        let failing = Retriever::open(&_resolved, &_storage)
+            .unwrap()
+            .with_embedding_provider(std::sync::Arc::new(KeywordEmbedder { fail: true }));
+        let degraded = failing.lookup(&query).unwrap();
+        assert_eq!(degraded, baseline, "provider failure changes nothing");
+
+        // A working provider cosine-reranks the bounded candidate set:
+        // the alpha definition becomes the top entry.
+        let reranking = Retriever::open(&_resolved, &_storage)
+            .unwrap()
+            .with_embedding_provider(std::sync::Arc::new(KeywordEmbedder { fail: false }));
+        let reranked = reranking.lookup(&query).unwrap();
+        assert_eq!(reranked.entries[0].path.as_deref(), Some("src/zz_alpha.rs"));
+        assert!(reranked.entries[0].score > baseline.entries[0].score);
+        // The same entries are present; only their ranking changed.
+        let paths = |bundle: &ContextBundle| {
+            let mut paths: Vec<String> = bundle
+                .entries
+                .iter()
+                .map(|entry| entry.path.clone().unwrap_or_default())
+                .collect();
+            paths.sort();
+            paths
+        };
+        assert_eq!(paths(&reranked), paths(&baseline));
     }
 }

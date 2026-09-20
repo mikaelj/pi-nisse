@@ -94,7 +94,7 @@ impl RulesClassifier {
             .map(|tag| tag.to_lowercase())
             .collect();
 
-        let mut scores: Vec<RoutingScore> = self
+        let scores: Vec<RoutingScore> = self
             .catalog
             .profiles()
             .iter()
@@ -111,23 +111,38 @@ impl RulesClassifier {
             })
             .collect();
 
-        // Stable sort: equal scores keep frozen catalog order.
-        scores.sort_by(|a, b| b.score.total_cmp(&a.score));
+        finalize_decision(scores, self.threshold)
+    }
+}
 
-        let selected_specialists: Vec<String> = scores
-            .iter()
-            .filter(|score| score.score >= self.threshold)
-            .take(MAX_SELECTED_SPECIALISTS)
-            .map(|score| score.reviewer_id.clone())
-            .collect();
-        let dynamic_fallback = selected_specialists.is_empty();
+/// Sort scores best first (stable: equal scores keep frozen catalog
+/// order) and select the specialist set under the frozen jury bounds:
+/// only scores at or above `threshold` qualify, at most
+/// [`MAX_SELECTED_SPECIALISTS`](jury::plan::MAX_SELECTED_SPECIALISTS)
+/// are selected, and an empty selection means the dynamic fallback
+/// fires.
+///
+/// Shared by the mandatory rules classifier and the optional provider
+/// blend ([`crate::providers::routing`]) so the selection semantics can
+/// never diverge: a provider may adjust scores, never the selection
+/// rules.
+pub(crate) fn finalize_decision(mut scores: Vec<RoutingScore>, threshold: f64) -> RoutingDecision {
+    // Stable sort: equal scores keep frozen catalog order.
+    scores.sort_by(|a, b| b.score.total_cmp(&a.score));
 
-        RoutingDecision {
-            scores,
-            selected_specialists,
-            dynamic_fallback,
-            threshold: self.threshold,
-        }
+    let selected_specialists: Vec<String> = scores
+        .iter()
+        .filter(|score| score.score >= threshold)
+        .take(MAX_SELECTED_SPECIALISTS)
+        .map(|score| score.reviewer_id.clone())
+        .collect();
+    let dynamic_fallback = selected_specialists.is_empty();
+
+    RoutingDecision {
+        scores,
+        selected_specialists,
+        dynamic_fallback,
+        threshold,
     }
 }
 
