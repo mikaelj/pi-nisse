@@ -134,6 +134,7 @@ export const CONTEXT_KINDS = [
   "symbol_definition",
   "symbol_reference",
   "source_skeleton",
+  "source",
   "project_fact",
   "project_lesson",
   "practice",

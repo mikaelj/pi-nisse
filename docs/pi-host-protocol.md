@@ -127,9 +127,35 @@ The core answers with the request's envelope id:
 {"request_id":"<tool_request id>","ok":false,"error":{"code":"...","message":"..."}}
 ```
 
-Rust resolves lookups against the exact target snapshot and enforces
-capability grants, lookup counts, and byte budgets (reviewer-tools
-milestone). The host enforces per-call timeouts and cancellation.
+The core resolves lookups against the exact target snapshot and enforces
+the reviewer's capability grants, lookup count, and returned-context byte
+budget; the host enforces per-call timeouts and cancellation. Tool
+arguments are strict JSON objects (unknown fields rejected, both sides
+validate independently):
+
+| tool | arguments |
+| --- | --- |
+| `project_lookup` | `{"query": string}` (non-empty, ≤ 8 KiB) |
+| `symbol_lookup` | `{"symbol": string}` (non-empty, ≤ 512 B) |
+| `relation_lookup` | `{"symbol": string}` (non-empty, ≤ 512 B) |
+| `source_lookup` | `{"path": string, "range"?: {"line_start": 1-based line, "line_end": ≥ `line_start`}}` (`path` non-empty, ≤ 4 KiB; `range` inclusive, clamped to the file) |
+
+`source_lookup` returns one `ContextEntry` of kind `source` carrying the
+target-snapshot bytes of the selected lines (a `null`/omitted range means
+the whole file; a range starting past the last line is a successful empty
+answer; non-UTF-8 content fails as `binary_content`).
+
+Failure codes served by the core: `unknown_review`, `unknown_reviewer`,
+`capability_denied` (tool not in the reviewer's `allowed_capabilities`),
+`lookup_budget_exhausted` (`max_lookup_calls` spent),
+`context_budget_exhausted` (`max_returned_context_bytes` spent),
+`invalid_arguments`, `path_not_in_snapshot` (well-formed path that is not
+part of the target snapshot), `binary_content`, `retrieval_failed`,
+`git_failed`. A request whose arguments fail the schema consumes no
+lookup; every dispatched lookup consumes one call and its returned text
+bytes count against the byte budget regardless of outcome. Bundles are
+trimmed weakest-entry-first into the remaining budget (marked
+`truncated`), never enlarged.
 
 ### `cancel` (core → host)
 

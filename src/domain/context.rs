@@ -20,6 +20,9 @@ pub enum ContextKind {
     SymbolReference,
     /// A compact source skeleton matched by text search.
     SourceSkeleton,
+    /// Raw source content read back from the target snapshot by the
+    /// `source_lookup` reviewer tool (plan section 22).
+    Source,
     /// A supported (or conflicting) durable project fact.
     ProjectFact,
     /// A durable project lesson.
@@ -35,6 +38,7 @@ impl ContextKind {
             ContextKind::SymbolDefinition => "symbol-definition",
             ContextKind::SymbolReference => "symbol-reference",
             ContextKind::SourceSkeleton => "source-skeleton",
+            ContextKind::Source => "source",
             ContextKind::ProjectFact => "project-fact",
             ContextKind::ProjectLesson => "project-lesson",
             ContextKind::Practice => "practice",
@@ -44,12 +48,15 @@ impl ContextKind {
     /// Context-priority rank (plan section 31): affected source first,
     /// then verified facts, directly related source, lessons, and
     /// built-in practices. Lower ranks sort first on equal scores.
+    /// `Source` and `SymbolReference` share the rank of directly related
+    /// source: both are exact, reviewer-requested target-snapshot
+    /// content rather than pre-selected affected source.
     pub fn priority(self) -> u8 {
         match self {
             ContextKind::SymbolDefinition => 0,
             ContextKind::ProjectFact => 1,
             ContextKind::SourceSkeleton => 2,
-            ContextKind::SymbolReference => 3,
+            ContextKind::Source | ContextKind::SymbolReference => 3,
             ContextKind::ProjectLesson => 4,
             ContextKind::Practice => 5,
         }
@@ -146,6 +153,7 @@ mod tests {
             (ContextKind::SymbolDefinition, "\"symbol_definition\""),
             (ContextKind::SymbolReference, "\"symbol_reference\""),
             (ContextKind::SourceSkeleton, "\"source_skeleton\""),
+            (ContextKind::Source, "\"source\""),
             (ContextKind::ProjectFact, "\"project_fact\""),
             (ContextKind::ProjectLesson, "\"project_lesson\""),
             (ContextKind::Practice, "\"practice\""),
@@ -170,6 +178,11 @@ mod tests {
         assert!(ContextKind::SymbolDefinition.priority() < ContextKind::ProjectFact.priority());
         assert!(ContextKind::ProjectFact.priority() < ContextKind::SourceSkeleton.priority());
         assert!(ContextKind::SourceSkeleton.priority() < ContextKind::SymbolReference.priority());
+        // Raw source and references share the directly-related rank.
+        assert_eq!(
+            ContextKind::Source.priority(),
+            ContextKind::SymbolReference.priority()
+        );
         assert!(ContextKind::SymbolReference.priority() < ContextKind::ProjectLesson.priority());
         assert!(ContextKind::ProjectLesson.priority() < ContextKind::Practice.priority());
     }

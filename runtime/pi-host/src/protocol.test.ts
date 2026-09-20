@@ -162,6 +162,18 @@ test("context entries validate strictly", () => {
   });
   assert.equal(entry.path, undefined);
 
+  // Raw snapshot source served by `source_lookup` is a valid entry kind.
+  const source = validateContextEntry({
+    kind: "source",
+    title: "src/queue.rs",
+    path: "src/queue.rs",
+    line_start: 1,
+    line_end: 3,
+    text: "fn enqueue",
+    score: 1,
+  });
+  assert.equal(source.path, "src/queue.rs");
+
   assert.throws(
     () => validateContextEntry({ kind: "embedding", title: "x", text: "y", score: 1 }),
     ValidationError,
