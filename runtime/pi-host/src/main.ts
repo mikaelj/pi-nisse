@@ -16,6 +16,7 @@
 
 import * as readline from "node:readline";
 
+import { runFindingEquivalenceCheck, type EquivalenceDeps } from "./equivalence.ts";
 import {
   decodeIncomingMessage,
   encodeMessage,
@@ -35,9 +36,11 @@ import { ToolBridge } from "./tools.ts";
 import { parseFault, type HostRuntime } from "./types.ts";
 import {
   validateCancel,
+  validateFindingEquivalenceCheck,
   validateHostConfig,
   validateStartReview,
   ValidationError,
+  type FindingEquivalenceCheck,
   type HostConfig,
   type ReviewerExecutionSpec,
 } from "./structured.ts";
@@ -123,6 +126,11 @@ function resolvePiAgentFactory(): Promise<SessionAgentFactory> {
 
 function piSessionDeps(kind: "plan" | "code"): PiSessionDeps {
   return { models: hostModels, kind, resolveAgent: resolvePiAgentFactory };
+}
+
+/** Dependencies of pi-runtime equivalence sessions. */
+function equivalenceDeps(): EquivalenceDeps {
+  return { models: hostModels, resolveAgent: resolvePiAgentFactory };
 }
 
 function isCancelled(reviewId: string): boolean {
@@ -217,6 +225,27 @@ function handleHostConfig(payload: unknown): void {
   log(`host_config: stored ${hostModels.size} model profile(s)`);
 }
 
+/** Execute one equivalence check job: a completed result always answers
+ * the check, with `uncertain` plus an error when the session failed. */
+async function runEquivalenceJob(check: FindingEquivalenceCheck): Promise<void> {
+  try {
+    const result = await runFindingEquivalenceCheck(options.runtime, check, equivalenceDeps());
+    send("finding_equivalence_completed", nextId(), {
+      check_id: check.check_id,
+      verdict: result.verdict,
+      ...(result.error !== undefined ? { error: result.error } : {}),
+    });
+  } catch (err) {
+    // Unexpected internal failures are protocol-level host errors.
+    sendHostError(
+      ERROR_CODES.internal,
+      `equivalence check \`${check.check_id}\` failed unexpectedly: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
   switch (message.type) {
     case "host_config":
@@ -225,6 +254,11 @@ function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
     case "start_review":
       handleStartReview(message.payload);
       return;
+    case "start_finding_equivalence_check": {
+      const check = validateFindingEquivalenceCheck(message.payload);
+      void runEquivalenceJob(check);
+      return;
+    }
     case "tool_response":
       bridge.handleResponse(message.payload);
       return;

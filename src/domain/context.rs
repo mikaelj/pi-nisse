@@ -29,6 +29,9 @@ pub enum ContextKind {
     ProjectLesson,
     /// A statement from a built-in practice pack.
     Practice,
+    /// A consolidated group of validated reviewer findings, used as the
+    /// input of the non-juror synthesis session (plan section 38).
+    FindingGroup,
 }
 
 impl ContextKind {
@@ -42,6 +45,7 @@ impl ContextKind {
             ContextKind::ProjectFact => "project-fact",
             ContextKind::ProjectLesson => "project-lesson",
             ContextKind::Practice => "practice",
+            ContextKind::FindingGroup => "finding-group",
         }
     }
 
@@ -59,6 +63,9 @@ impl ContextKind {
             ContextKind::Source | ContextKind::SymbolReference => 3,
             ContextKind::ProjectLesson => 4,
             ContextKind::Practice => 5,
+            // Finding-group entries are direct review input of the
+            // synthesis session, never a retrieval signal.
+            ContextKind::FindingGroup => 0,
         }
     }
 }
@@ -157,6 +164,7 @@ mod tests {
             (ContextKind::ProjectFact, "\"project_fact\""),
             (ContextKind::ProjectLesson, "\"project_lesson\""),
             (ContextKind::Practice, "\"practice\""),
+            (ContextKind::FindingGroup, "\"finding_group\""),
         ] {
             assert_eq!(serde_json::to_string(&kind).unwrap(), name);
             let back: ContextKind = serde_json::from_str(name).unwrap();

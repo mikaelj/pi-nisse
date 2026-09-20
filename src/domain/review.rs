@@ -47,6 +47,31 @@ pub enum ImpactClass {
     Other,
 }
 
+impl ImpactClass {
+    /// The maximum severity this impact class may carry (plan section 14).
+    ///
+    /// `style` is capped at `low`; `maintainability` and `test_gap` at
+    /// `medium`; `performance`, `compatibility`, and `other` at `high`.
+    /// Only `correctness`, `security`, `data_loss`, `deadlock`, and
+    /// `crash` may reach `blocker`, and even then only when concrete
+    /// evidence supports the finding (enforced separately by the
+    /// evidence requirement for high/blocker findings, plan section 15).
+    pub fn max_severity(self) -> Severity {
+        match self {
+            ImpactClass::Style => Severity::Low,
+            ImpactClass::Maintainability | ImpactClass::TestGap => Severity::Medium,
+            ImpactClass::Performance | ImpactClass::Compatibility | ImpactClass::Other => {
+                Severity::High
+            }
+            ImpactClass::Correctness
+            | ImpactClass::Security
+            | ImpactClass::DataLoss
+            | ImpactClass::Deadlock
+            | ImpactClass::Crash => Severity::Blocker,
+        }
+    }
+}
+
 /// The final result of a review.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReviewResult {
@@ -189,6 +214,29 @@ mod tests {
     fn impact_class_rejects_unknown_variants() {
         assert!(serde_json::from_str::<ImpactClass>("\"availability\"").is_err());
         assert!(serde_json::from_str::<ImpactClass>("\"DataLoss\"").is_err());
+    }
+
+    #[test]
+    fn maximum_severity_policy_follows_plan_section_14() {
+        for (class, max) in [
+            (ImpactClass::Style, Severity::Low),
+            (ImpactClass::Maintainability, Severity::Medium),
+            (ImpactClass::TestGap, Severity::Medium),
+            (ImpactClass::Performance, Severity::High),
+            (ImpactClass::Compatibility, Severity::High),
+            (ImpactClass::Other, Severity::High),
+            (ImpactClass::Correctness, Severity::Blocker),
+            (ImpactClass::Security, Severity::Blocker),
+            (ImpactClass::DataLoss, Severity::Blocker),
+            (ImpactClass::Deadlock, Severity::Blocker),
+            (ImpactClass::Crash, Severity::Blocker),
+        ] {
+            assert_eq!(
+                class.max_severity(),
+                max,
+                "maximum severity policy mismatch for {class:?}"
+            );
+        }
     }
 
     #[test]

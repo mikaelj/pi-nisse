@@ -16,16 +16,19 @@
 //!
 //! The vocabulary below is the complete frozen set from plan section 21.
 //! Message types belonging to later milestones are declared as constants so
-//! both sides agree on the vocabulary, but this milestone only implements
-//! the core review loop: `host_ready`, `start_review`, `reviewer_started`,
+//! both sides agree on the vocabulary. This milestone implements the core
+//! review loop (`host_ready`, `start_review`, `reviewer_started`,
 //! `reviewer_completed`, `reviewer_failed`, `tool_request`,
-//! `tool_response`, `cancel`, and `host_error`. Receiving a
+//! `tool_response`, `cancel`, `host_error`) and the narrow
+//! `start_finding_equivalence_check` / `finding_equivalence_completed`
+//! exchange of finding consolidation (plan section 38). Receiving a
 //! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::domain::context::ContextBundle;
+use crate::domain::finding::ReviewerFinding;
 use crate::domain::model::ModelProfile;
 use crate::domain::report::ReviewerReport;
 use crate::domain::review::ReviewKind;
@@ -323,6 +326,15 @@ pub enum HostEvent {
         /// The request payload.
         payload: ToolRequestPayload,
     },
+    /// A narrow finding-equivalence check finished.
+    FindingEquivalenceCompleted {
+        /// Correlation identifier of the answered check.
+        check_id: String,
+        /// The verdict; `uncertain` when the check fell back.
+        verdict: EquivalenceVerdict,
+        /// Why the verdict fell back to `uncertain`.
+        error: Option<HostErrorInfo>,
+    },
     /// The host reported a protocol-level failure.
     HostError(HostErrorInfo),
 }
@@ -568,6 +580,32 @@ pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> 
             require_valid_error(&payload.error, &invalid)?;
             Ok(HostEvent::HostError(payload.error))
         }
+        host_to_rust::FINDING_EQUIVALENCE_COMPLETED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                check_id: String,
+                verdict: EquivalenceVerdict,
+                #[serde(default)]
+                error: Option<HostErrorInfo>,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.check_id, "check_id", &invalid)?;
+            if let Some(error) = &payload.error {
+                require_valid_error(error, &invalid)?;
+                if payload.verdict != EquivalenceVerdict::Uncertain {
+                    return Err(invalid(
+                        "`error` is only permitted with the `uncertain` verdict".to_string(),
+                    ));
+                }
+            }
+            Ok(HostEvent::FindingEquivalenceCompleted {
+                check_id: payload.check_id,
+                verdict: payload.verdict,
+                error: payload.error,
+            })
+        }
         other => Err(ProtocolError::UnsupportedMessageType(other.to_string())),
     }
 }
@@ -609,6 +647,63 @@ fn encode_message(message_type: &str, id: &str, payload: &impl Serialize) -> Str
     map.insert("id".to_string(), serde_json::json!(id));
     map.insert("type".to_string(), serde_json::json!(message_type));
     serde_json::to_string(&object).expect("message lines serialize")
+}
+
+/// Verdict of a narrow finding-equivalence check (plan section 38.5).
+///
+/// Only `Same` findings may be grouped. `Uncertain` is also the forced
+/// verdict of a check whose session failed: uncertainty produces less
+/// automation, never guessed grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EquivalenceVerdict {
+    /// The two findings describe the same underlying issue.
+    Same,
+    /// The two findings describe different issues.
+    Different,
+    /// The relationship could not be determined.
+    Uncertain,
+}
+
+/// One finding of an equivalence check, with its reviewer provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EquivalenceFinding {
+    /// Reviewer that produced the finding.
+    pub reviewer_id: String,
+    /// The finding itself.
+    pub finding: ReviewerFinding,
+}
+
+/// `start_finding_equivalence_check` payload: exactly two validated
+/// findings and the explicit bounds of the narrow session that compares
+/// them. Rust owns the check identity, the model selection, and the
+/// timeout; the host executes exactly what it is given.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FindingEquivalenceCheckPayload {
+    /// Correlation identifier of this check (assigned by Rust).
+    pub check_id: String,
+    /// Session timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Explicitly configured model profile for the session.
+    pub model_profile: String,
+    /// Explicit thinking level for the session.
+    pub thinking_level: crate::domain::model::ThinkingLevel,
+    /// First finding of the comparison.
+    pub finding_a: EquivalenceFinding,
+    /// Second finding of the comparison.
+    pub finding_b: EquivalenceFinding,
+}
+
+/// The resolved outcome of one equivalence check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindingEquivalenceOutcome {
+    /// Correlation identifier of the check.
+    pub check_id: String,
+    /// The verdict.
+    pub verdict: EquivalenceVerdict,
+    /// Why the verdict fell back to `uncertain`, when the check's
+    /// session failed.
+    pub error: Option<HostErrorInfo>,
 }
 
 /// A Rust-to-host `host_config` message.
@@ -671,6 +766,31 @@ impl ToolResponseMessage {
     /// Serialize to one JSONL line.
     pub fn to_line(&self) -> String {
         encode_message(rust_to_host::TOOL_RESPONSE, &self.id, &self.payload)
+    }
+}
+
+/// A Rust-to-host `start_finding_equivalence_check` message.
+#[derive(Debug, Clone)]
+pub struct StartFindingEquivalenceCheckMessage {
+    /// Envelope id.
+    pub id: String,
+    /// Payload: the check to execute.
+    pub payload: FindingEquivalenceCheckPayload,
+}
+
+impl StartFindingEquivalenceCheckMessage {
+    /// Build the message for `payload` with an explicit envelope id.
+    pub fn new(id: String, payload: FindingEquivalenceCheckPayload) -> Self {
+        StartFindingEquivalenceCheckMessage { id, payload }
+    }
+
+    /// Serialize to one JSONL line.
+    pub fn to_line(&self) -> String {
+        encode_message(
+            rust_to_host::START_FINDING_EQUIVALENCE_CHECK,
+            &self.id,
+            &self.payload,
+        )
     }
 }
 
@@ -926,6 +1046,91 @@ mod tests {
         let back: HostConfigPayload = serde_json::from_value(value).unwrap();
         assert_eq!(back, payload);
         assert!(serde_json::from_str::<HostConfigPayload>("{\"profiles\":{}}").is_err());
+    }
+
+    #[test]
+    fn finding_equivalence_messages_roundtrip_strictly() {
+        let finding = serde_json::json!({
+            "id": "q-1",
+            "impact_class": "correctness",
+            "proposed_severity": "info",
+            "category": "logic",
+            "title": "Off by one",
+            "claim": "Drops the last element.",
+            "explanation": "Wraparound uses >.",
+            "recommendation": "Use >=.",
+            "evidence": []
+        });
+        let payload = FindingEquivalenceCheckPayload {
+            check_id: "chk-1".to_string(),
+            timeout_ms: 30_000,
+            model_profile: "standard".to_string(),
+            thinking_level: crate::domain::model::ThinkingLevel::Low,
+            finding_a: EquivalenceFinding {
+                reviewer_id: "quality".to_string(),
+                finding: serde_json::from_value(finding.clone()).unwrap(),
+            },
+            finding_b: EquivalenceFinding {
+                reviewer_id: "concurrency".to_string(),
+                finding: serde_json::from_value(finding).unwrap(),
+            },
+        };
+        let line = StartFindingEquivalenceCheckMessage::new("m-4".to_string(), payload).to_line();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["type"], "start_finding_equivalence_check");
+        assert_eq!(value["id"], "m-4");
+        assert_eq!(value["check_id"], "chk-1");
+        assert_eq!(value["timeout_ms"], 30_000);
+        assert_eq!(value["model_profile"], "standard");
+        assert_eq!(value["thinking_level"], "low");
+        assert_eq!(value["finding_a"]["reviewer_id"], "quality");
+        assert!(!line.contains('\n'), "messages must be single lines");
+        let back: FindingEquivalenceCheckPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(back.check_id, "chk-1");
+
+        // Completion parses for every verdict without an error.
+        for (verdict, name) in [
+            (EquivalenceVerdict::Same, "same"),
+            (EquivalenceVerdict::Different, "different"),
+            (EquivalenceVerdict::Uncertain, "uncertain"),
+        ] {
+            let line = format!(
+                r#"{{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"{name}"}}"#
+            );
+            let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
+            assert_eq!(
+                event,
+                HostEvent::FindingEquivalenceCompleted {
+                    check_id: "chk-1".to_string(),
+                    verdict,
+                    error: None,
+                }
+            );
+        }
+
+        // An error is only permitted with the uncertain verdict.
+        let fallback = r#"{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"uncertain","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let event = parse_host_event(Envelope::parse_host_line(fallback).unwrap()).unwrap();
+        assert!(matches!(
+            event,
+            HostEvent::FindingEquivalenceCompleted { error: Some(_), .. }
+        ));
+        let inconsistent = fallback.replace("\"uncertain\"", "\"same\"");
+        let err = parse_host_event(Envelope::parse_host_line(&inconsistent).unwrap()).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+
+        // Unknown verdicts and empty check ids are rejected.
+        for bad in [
+            r#"{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"maybe"}"#,
+            r#"{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"","verdict":"same"}"#,
+        ] {
+            let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
+            assert!(
+                matches!(err, ProtocolError::InvalidPayload { .. }),
+                "{err:?}"
+            );
+        }
     }
 
     #[test]

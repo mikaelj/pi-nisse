@@ -61,6 +61,55 @@ pub struct FinalFinding {
     pub cross_validated: bool,
 }
 
+/// Which stage of the consolidation pipeline produced a diagnostic
+/// (plan section 38).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SynthesisStage {
+    /// A narrow finding-equivalence check.
+    Equivalence,
+    /// The final finding synthesis session.
+    Synthesis,
+}
+
+/// A retained diagnostic of the consolidation pipeline: why an outcome
+/// fell back to deterministic behavior, why a synthesized entry was
+/// rejected, or why an equivalence check failed. Diagnostics never
+/// change review content; they make conservative degradation observable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SynthesisDiagnostic {
+    /// Pipeline stage that produced this diagnostic.
+    pub stage: SynthesisStage,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+impl SynthesisDiagnostic {
+    /// Build a diagnostic for `stage`.
+    pub fn new(stage: SynthesisStage, message: impl Into<String>) -> Self {
+        SynthesisDiagnostic {
+            stage,
+            message: message.into(),
+        }
+    }
+}
+
+/// The result of consolidating validated reviewer findings into final
+/// findings (plan section 38).
+///
+/// Synthesis may only restate, clarify, combine, and lower severity of
+/// existing validated findings; every [`FinalFinding`] preserves its
+/// source provenance. Diagnostics record every conservative fallback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SynthesisResult {
+    /// Synthesized review summary.
+    pub summary: String,
+    /// Consolidated final findings.
+    pub findings: Vec<FinalFinding>,
+    /// Retained diagnostics of the consolidation pipeline.
+    pub diagnostics: Vec<SynthesisDiagnostic>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +196,38 @@ mod tests {
         assert!(json.contains("\"source_finding_ids\":[\"q-1\",\"s-2\"]"));
         assert!(json.contains("\"reviewer_ids\":[\"quality\",\"security\"]"));
         assert!(json.contains("\"cross_validated\":true"));
+    }
+
+    #[test]
+    fn synthesis_result_roundtrip() {
+        let result = SynthesisResult {
+            summary: "One consolidated finding.".to_string(),
+            findings: vec![FinalFinding {
+                id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                impact_class: ImpactClass::Correctness,
+                severity: Severity::Medium,
+                category: "logic".to_string(),
+                title: "Off-by-one".to_string(),
+                claim: "Drops the last element.".to_string(),
+                explanation: "Wraparound check is wrong.".to_string(),
+                recommendation: "Use >=.".to_string(),
+                evidence: Vec::new(),
+                source_finding_ids: vec!["quality/q-1".to_string()],
+                reviewer_ids: vec!["quality".to_string()],
+                cross_validated: false,
+            }],
+            diagnostics: vec![SynthesisDiagnostic::new(
+                SynthesisStage::Synthesis,
+                "synthesis session failed; deterministic wording used".to_string(),
+            )],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: SynthesisResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, back);
+        assert!(json.contains("\"stage\":\"synthesis\""));
+        assert!(json.contains("\"diagnostics\""));
+        let stage_json = serde_json::to_string(&SynthesisStage::Equivalence).unwrap();
+        assert_eq!(stage_json, "\"equivalence\"");
+        assert!(serde_json::from_str::<SynthesisStage>("\"merge\"").is_err());
     }
 }

@@ -138,6 +138,7 @@ export const CONTEXT_KINDS = [
   "project_fact",
   "project_lesson",
   "practice",
+  "finding_group",
 ] as const;
 
 export const SEVERITIES = ["info", "low", "medium", "high", "blocker"] as const;
@@ -169,6 +170,11 @@ export const REVIEWER_TOOLS = [
   "source_lookup",
   "relation_lookup",
 ] as const;
+
+/** Verdicts of the narrow finding-equivalence check (plan section 38). */
+export const EQUIVALENCE_VERDICTS = ["same", "different", "uncertain"] as const;
+
+export type EquivalenceVerdict = (typeof EQUIVALENCE_VERDICTS)[number];
 
 export type ReviewerTool = (typeof REVIEWER_TOOLS)[number];
 
@@ -250,6 +256,22 @@ export interface StartReview {
   readonly review_id: string;
   readonly kind: (typeof REVIEW_KINDS)[number];
   readonly reviewers: ReviewerExecutionSpec[];
+}
+
+/** One finding of an equivalence check, with reviewer provenance. */
+export interface EquivalenceFinding {
+  readonly reviewer_id: string;
+  readonly finding: ReviewerFinding;
+}
+
+/** The `start_finding_equivalence_check` payload (plan section 38). */
+export interface FindingEquivalenceCheck {
+  readonly check_id: string;
+  readonly timeout_ms: number;
+  readonly model_profile: string;
+  readonly thinking_level: (typeof THINKING_LEVELS)[number];
+  readonly finding_a: EquivalenceFinding;
+  readonly finding_b: EquivalenceFinding;
 }
 
 /** A model profile entry from the Rust core's `host_config` message. */
@@ -455,6 +477,31 @@ export function validateStartReview(value: unknown): StartReview {
     review_id: requireNonEmptyString(object, "review_id"),
     kind: requireEnum(object, "kind", REVIEW_KINDS),
     reviewers: reviewers.map(validateReviewerExecutionSpec),
+  };
+}
+
+/** Validate one finding of an equivalence check. */
+export function validateEquivalenceFinding(value: unknown): EquivalenceFinding {
+  const object = requireObject(value, "equivalence finding");
+  const finding = requireObject(object["finding"], "equivalence finding `finding`");
+  return {
+    reviewer_id: requireNonEmptyString(object, "reviewer_id"),
+    finding: validateReviewerFinding(finding),
+  };
+}
+
+/** Validate a `start_finding_equivalence_check` payload. */
+export function validateFindingEquivalenceCheck(value: unknown): FindingEquivalenceCheck {
+  const object = requireObject(value, "start_finding_equivalence_check payload");
+  const findingA = requireObject(object["finding_a"], "`finding_a`");
+  const findingB = requireObject(object["finding_b"], "`finding_b`");
+  return {
+    check_id: requireNonEmptyString(object, "check_id"),
+    timeout_ms: requirePositiveInteger(object, "timeout_ms"),
+    model_profile: requireNonEmptyString(object, "model_profile"),
+    thinking_level: requireEnum(object, "thinking_level", THINKING_LEVELS),
+    finding_a: validateEquivalenceFinding(findingA),
+    finding_b: validateEquivalenceFinding(findingB),
   };
 }
 

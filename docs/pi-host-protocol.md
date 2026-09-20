@@ -44,7 +44,7 @@ Nisse Core → host:
 | `start_fact_verification` | reserved |
 | `start_fact_synthesis` | reserved |
 | `start_domain_description` | reserved |
-| `start_finding_equivalence_check` | reserved |
+| `start_finding_equivalence_check` | active |
 | `tool_response` | active |
 | `cancel` | active |
 
@@ -60,7 +60,7 @@ Host → Nisse Core:
 | `fact_verification_completed` | reserved |
 | `fact_synthesis_completed` | reserved |
 | `domain_description_completed` | reserved |
-| `finding_equivalence_completed` | reserved |
+| `finding_equivalence_completed` | active |
 | `host_error` | active |
 
 Sending a vocabulary-but-reserved message is refused deterministically
@@ -157,6 +157,55 @@ bytes count against the byte budget regardless of outcome. Bundles are
 trimmed weakest-entry-first into the remaining budget (marked
 `truncated`), never enlarged.
 
+### `start_finding_equivalence_check` / `finding_equivalence_completed` (plan section 38)
+
+The narrow equivalence check of finding consolidation. The core sends
+one message per candidate pair (correlation by `check_id`):
+
+```json
+{
+  "check_id": "<id>", "timeout_ms": 5000,
+  "model_profile": "standard", "thinking_level": "low",
+  "finding_a": {"reviewer_id": "quality", "finding": <ReviewerFinding>},
+  "finding_b": {"reviewer_id": "concurrency", "finding": <ReviewerFinding>}
+}
+```
+
+The host runs one isolated non-juror session (identity
+`finding-equivalence`): the model profile and thinking level come
+explicitly from the payload, no tools are granted, and the output must
+be exactly `{"verdict":"same"|"different"|"uncertain"}` — parsed
+strictly with exactly one constrained repair attempt under the payload
+timeout. Every check is answered:
+
+```json
+{"check_id": "<id>", "verdict": "same"}
+{"check_id": "<id>", "verdict": "uncertain", "error": {"code": "...", "message": "..."}}
+```
+
+A session that failed (timeout, unresolved model profile, output that
+stayed malformed after the repair) completes with the forced `uncertain`
+verdict plus an `error` describing the failure — an `error` is only
+permitted with `uncertain`. Uncertainty never merges findings; the core
+records a diagnostic and leaves the pair ungrouped. Protocol-level
+failures (malformed payloads, unknown or duplicate `check_id`s in the
+batch window) remain `host_error` / typed core errors.
+
+### Final synthesis session (convention)
+
+Finding synthesis (plan section 38 step 7) has no dedicated protocol
+message in the frozen vocabulary. It runs through the ordinary
+`start_review` exchange with exactly one execution spec whose
+`reviewer_id` is the stable non-juror identity `synthesizer`: no
+capabilities, no lookup budget, and the finding groups rendered as
+initial-context entries of kind `finding_group` (the entry text carries
+the group keys the report must reference). The core validates the
+returned `ReviewerReport` against the supplied groups — synthesized
+findings may only reference known group keys, may not change the impact
+class, and may only lower severity; every other final-finding field is
+computed deterministically by the core from the validated source
+findings.
+
 ### `cancel` (core → host)
 
 `{"review_id":"<id>"}` cancels one review; `{}` cancels everything. The
@@ -215,6 +264,14 @@ Fake reviewer faults:
 - `NISSE_FAKE_REVIEWER_ATTEMPTS_FILE=<path>`: every session appends one
   JSON line `{reviewer_id, attempt}` so tests can prove how often a
   reviewer actually ran.
+
+Fake equivalence-check faults:
+
+- `NISSE_FAKE_EQUIVALENCE_VERDICTS=same,different`: verdicts consumed
+  in order (one per check); missing or exhausted entries answer
+  `uncertain`;
+- `NISSE_FAKE_EQUIVALENCE_FAIL=1`: every check completes with
+  `uncertain` plus a scripted error (exercises the fallback path).
 
 ## Pi reviewer runtime
 

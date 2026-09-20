@@ -23,9 +23,10 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use super::protocol::{
-    self, CancelMessage, CancelPayload, HostConfigMessage, HostConfigPayload, HostEvent, HostReady,
-    HostRuntime, ProtocolError, StartReviewMessage, StartReviewPayload, ToolRequestPayload,
-    ToolResponseMessage, ToolResponsePayload,
+    self, CancelMessage, CancelPayload, FindingEquivalenceCheckPayload, FindingEquivalenceOutcome,
+    HostConfigMessage, HostConfigPayload, HostEvent, HostReady, HostRuntime, ProtocolError,
+    StartFindingEquivalenceCheckMessage, StartReviewMessage, StartReviewPayload,
+    ToolRequestPayload, ToolResponseMessage, ToolResponsePayload,
 };
 use crate::domain::report::ReviewerReport;
 
@@ -289,6 +290,16 @@ impl HostProcess {
         self.write_line(&line)
     }
 
+    /// Send `start_finding_equivalence_check` for one narrow comparison.
+    pub fn start_finding_equivalence_check(
+        &mut self,
+        payload: &FindingEquivalenceCheckPayload,
+    ) -> Result<(), HostError> {
+        let id = crate::domain::ids::new_ulid();
+        let line = StartFindingEquivalenceCheckMessage::new(id, payload.clone()).to_line();
+        self.write_line(&line)
+    }
+
     /// Send `tool_response`.
     pub fn send_tool_response(&mut self, payload: &ToolResponsePayload) -> Result<(), HostError> {
         let id = crate::domain::ids::new_ulid();
@@ -464,6 +475,13 @@ impl HostProcess {
                         reason: "duplicate `host_ready` after startup".to_string(),
                     });
                 }
+                HostEvent::FindingEquivalenceCompleted { check_id, .. } => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "finding_equivalence_completed for check `{check_id}` arrived while driving review `{review_id}`"
+                        ),
+                    });
+                }
                 HostEvent::HostError(info) => {
                     return Err(HostError::HostReportedError {
                         code: info.code,
@@ -473,6 +491,83 @@ impl HostProcess {
             }
         }
         Ok(outcomes)
+    }
+
+    /// Drive one batch of finding-equivalence checks to completion.
+    ///
+    /// Waits until every check in `expected` (the correlation ids of the
+    /// checks already sent) has reported `finding_equivalence_completed`.
+    /// Checks execute independently in the host; a check whose session
+    /// failed completes with the `uncertain` verdict plus an error
+    /// rather than failing the batch. Protocol-level failures, child
+    /// death, reviewer traffic, and unknown check ids are typed errors.
+    /// The returned outcomes keep the order of `expected`.
+    pub fn complete_equivalence_checks(
+        &mut self,
+        expected: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<FindingEquivalenceOutcome>, HostError> {
+        if !self.ready {
+            return Err(HostError::UnexpectedHostMessage {
+                reason: "complete_equivalence_checks called before host_ready".to_string(),
+            });
+        }
+        let deadline = Instant::now() + timeout;
+        let mut pending: Vec<String> = expected.to_vec();
+        let mut outcomes: Vec<FindingEquivalenceOutcome> = Vec::new();
+
+        while !pending.is_empty() {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| HostError::Timeout {
+                    what: "finding-equivalence checks to complete".to_string(),
+                })?;
+            match self.recv_event(remaining)? {
+                HostEvent::FindingEquivalenceCompleted {
+                    check_id,
+                    verdict,
+                    error,
+                } => {
+                    let Some(index) = pending.iter().position(|id| *id == check_id) else {
+                        return Err(HostError::UnexpectedHostMessage {
+                            reason: format!(
+                                "finding_equivalence_completed for unknown or duplicate check `{check_id}`"
+                            ),
+                        });
+                    };
+                    pending.swap_remove(index);
+                    outcomes.push(FindingEquivalenceOutcome {
+                        check_id,
+                        verdict,
+                        error,
+                    });
+                }
+                HostEvent::HostError(info) => {
+                    return Err(HostError::HostReportedError {
+                        code: info.code,
+                        message: info.message,
+                    });
+                }
+                other => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "received `{}` while driving finding-equivalence checks",
+                            event_type_name(&other)
+                        ),
+                    });
+                }
+            }
+        }
+
+        let by_check: std::collections::BTreeMap<String, FindingEquivalenceOutcome> = outcomes
+            .into_iter()
+            .map(|outcome| (outcome.check_id.clone(), outcome))
+            .collect();
+        Ok(expected
+            .iter()
+            .map(|check_id| by_check.get(check_id).cloned())
+            .collect::<Option<Vec<_>>>()
+            .expect("every expected check resolved"))
     }
 
     /// Gracefully shut down: close stdin, wait up to `timeout` for the
@@ -548,6 +643,7 @@ fn event_type_name(event: &HostEvent) -> &'static str {
         HostEvent::ReviewerCompleted { .. } => "reviewer_completed",
         HostEvent::ReviewerFailed { .. } => "reviewer_failed",
         HostEvent::ToolRequest { .. } => "tool_request",
+        HostEvent::FindingEquivalenceCompleted { .. } => "finding_equivalence_completed",
         HostEvent::HostError(_) => "host_error",
     }
 }
