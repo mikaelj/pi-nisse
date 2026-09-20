@@ -1,0 +1,43 @@
+{
+	"$comment": "Frozen Main Pi task-workflow policy (Nisse plan sections 2-4, 62-66, milestone 25). The nisse SKILL.md policy text and the extension tool behavior must both align with these values; the alignment test (workflow-policy.test.ts) enforces it.",
+	"schema_version": 1,
+	"tools": [
+		"nisse_review_plan",
+		"nisse_review_code",
+		"nisse_query_project",
+		"nisse_feedback"
+	],
+	"severities": ["blocker", "high", "medium", "low", "info"],
+	"blocking_severities": ["blocker", "high"],
+	"plan_review_loop": {
+		"tool": "nisse_review_plan",
+		"max_attempts": 3,
+		"exit_condition": "no blocker or high findings",
+		"limit_reached": "stop before implementation, explain unresolved findings, ask the user for direction"
+	},
+	"code_review_loop": {
+		"tool": "nisse_review_code",
+		"max_attempts": 3,
+		"exit_condition": "no blocker or high findings",
+		"limit_reached": "do not claim completion, report unresolved findings, ask the user for direction"
+	},
+	"feedback": {
+		"outcomes": ["fixed", "accepted", "dismissed"],
+		"known_fixed": "fixed",
+		"known_valid_but_deferred": "accepted",
+		"known_invalid": "dismissed",
+		"unknown": "submit nothing"
+	},
+	"substantial_workflow": [
+		"understand",
+		"draft plan",
+		"plan review",
+		"implement",
+		"test",
+		"code review",
+		"finish"
+	],
+	"trivial_workflow": ["implement", "test", "finish"],
+	"trivial_override": "an explicit user instruction to use Nisse always runs the review workflow",
+	"core_mode_invariant": "Nisse Core exposes review/query/feedback operations only; it has no Plan or Build task mode"
+}

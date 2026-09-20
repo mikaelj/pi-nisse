@@ -39,6 +39,20 @@ heuristics.
 
 ## Workflow for substantial tasks
 
+The frozen phase sequence — do not reorder, skip, or unbound these
+phases, and do not invent a different review loop:
+
+    understand
+      → draft plan
+      → plan-review loop     (max 3 attempts; stop for the user if unresolved)
+      → implement
+      → project tests
+      → code-review loop     (max 3 attempts; stop for the user if unresolved)
+      → finish
+
+These bounds are the Nisse workflow contract for Main Pi. The loops
+above are the only review loops; follow them exactly.
+
 ### 1. Understand
 
 Investigate the task and project until you understand the requested
@@ -51,6 +65,9 @@ and modules, interfaces, data flow, compatibility constraints, tests,
 migration strategy, error handling, rollout implications.
 
 ### 3. Plan-review loop (max 3 attempts)
+
+Every `nisse_review_plan` call — the first included — consumes one of
+the three attempts.
 
 1. Call `nisse_review_plan` with the complete plan text.
 2. Inspect the findings, focusing on severity `blocker` and `high`.
@@ -77,6 +94,9 @@ review. If basic tests fail, fix them first.
 
 ### 6. Code-review loop (max 3 attempts)
 
+Every `nisse_review_code` call — the first included — consumes one of
+the three attempts.
+
 1. Call `nisse_review_code` (default scope `working`: HEAD vs the final
    working tree; use `staged` to review only the index, `commit`,
    `range`, or `branch` for history).
@@ -93,17 +113,20 @@ If blocker/high findings remain after the **third** attempt: do **not**
 claim the task is complete; report the unresolved findings to the user
 and ask for direction.
 
-### 7. Complete
+### 7. Finish
 
 Report the task complete only when: implementation tests pass, no
 unresolved blocker/high finding remains, and both bounded review loops
-finished successfully.
+finished successfully. Anything else — including either loop hitting
+its attempt limit — means the task is **not** complete and the user
+must hear about the unresolved findings.
 
 ## Trivial tasks
 
 For trivial work (see the guidance above) you may work without Nisse:
-understand → implement → test → done — unless the user explicitly asks
-for Nisse.
+understand → implement → test → finish. Do not invoke any Nisse tool
+for a trivial task **unless the user explicitly asks for Nisse** — an
+explicit request always runs the substantial-task workflow above.
 
 ## Feedback semantics
 

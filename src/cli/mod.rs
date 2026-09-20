@@ -438,4 +438,45 @@ mod tests {
         let doctor = Cli::try_parse_from(["nisse", "doctor"]).unwrap();
         assert!(matches!(doctor.command, Command::Doctor));
     }
+
+    #[test]
+    fn command_surface_is_frozen_and_has_no_task_mode() {
+        use clap::CommandFactory;
+
+        // Nisse Core is operation-based (plan sections 1, 3, 26, 71): its
+        // CLI surface is exactly the frozen §61 set and must never grow a
+        // Plan/Build task-mode or workflow-state command. That policy
+        // belongs to the Main Pi skill (milestone 25).
+        let mut app = Cli::command();
+        let mut names: Vec<String> = app
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "cache", "doctor", "eval", "feedback", "mcp", "query", "records", "review"
+            ]
+        );
+
+        let review = app
+            .find_subcommand_mut("review")
+            .expect("review subcommand");
+        let mut review_names: Vec<String> = review
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect();
+        review_names.sort();
+        // `review plan` reviews a plan document; it is not a Plan mode.
+        assert_eq!(review_names, vec!["code", "plan"]);
+
+        for forbidden in ["plan-mode", "build", "task", "mode"] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "task-mode command `{forbidden}` must not exist"
+            );
+            assert!(!review_names.contains(&forbidden.to_string()));
+        }
+    }
 }
