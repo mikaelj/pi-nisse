@@ -19,7 +19,8 @@ use nisse::domain::review::ReviewKind;
 use nisse::domain::reviewer::{ReviewerCapability, ReviewerExecutionSpec};
 use nisse::jury::host::{HostError, HostProcess, PiHostLaunch};
 use nisse::jury::protocol::{
-    FactVerificationPayload, HostEvent, HostRuntime, StartReviewPayload, ToolResponsePayload,
+    FactVerificationPayload, HostConfigPayload, HostEvent, HostRuntime, StartReviewPayload,
+    ToolResponsePayload,
 };
 
 fn host_script() -> PathBuf {
@@ -446,6 +447,72 @@ fn child_crash_before_ready_is_a_typed_error() {
         }
         other => panic!("expected ChildTerminated, got {other:?}"),
     }
+}
+
+// Linger fixtures: a Node child cannot close its stdio fds while alive
+// (libuv refuses to close fds 0-2), so the end-to-end linger scenarios
+// use small POSIX shell fixtures that close the real descriptor and keep
+// running. `sh` is unavailable on Windows, where the cross-platform
+// `reap_child` unit test in src/jury/host.rs covers the bounded
+// kill-and-reap mechanics instead.
+fn linger_launch(fixture: &str) -> PiHostLaunch {
+    PiHostLaunch::new(
+        "sh",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/host")
+            .join(fixture),
+        HostRuntime::Fake,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn stdout_eof_with_lingering_child_returns_within_the_reap_budget() {
+    // `linger-eof.sh` closes stdout, then lives on for ~15 s. The old
+    // unbounded `wait()` blocked here for the child's whole lifetime;
+    // the bounded reaper must return a typed error (after killing the
+    // child) well inside that window. The bound is generous so slow CI
+    // runners cannot flake; the fixture lingers for 15 s.
+    let mut host = HostProcess::spawn(&linger_launch("linger-eof.sh")).expect("spawn failed");
+    let started = std::time::Instant::now();
+    let err = host.wait_ready(READY_TIMEOUT).expect_err("must terminate");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(err, HostError::ChildTerminated { .. }),
+        "expected ChildTerminated, got {err:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "bounded reap took {elapsed:?} (err {err:?}); the fixture lingers 15 s, so this must be the reaper, not the child exiting"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn broken_stdin_pipe_with_lingering_child_returns_within_the_reap_budget() {
+    // `linger-pipe.sh` closes stdin BEFORE announcing host_ready, so the
+    // core's first stdin write after reading the announcement hits a
+    // closed pipe deterministically while the child still lives.
+    let mut host = HostProcess::spawn(&linger_launch("linger-pipe.sh")).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+
+    let payload = HostConfigPayload::from_config_profiles(&Default::default());
+    let started = std::time::Instant::now();
+    let err = host
+        .send_host_config(&payload)
+        .expect_err("write must fail on the closed pipe");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(
+            err,
+            HostError::ChildTerminated { .. } | HostError::WriteFailed(_)
+        ),
+        "expected ChildTerminated or WriteFailed, got {err:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "bounded reap took {elapsed:?}; the fixture lingers 15 s, so this must be the reaper, not the child exiting"
+    );
 }
 
 #[test]

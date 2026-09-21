@@ -40,6 +40,48 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum stderr retained for diagnostics; older bytes are dropped.
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
 
+/// Maximum time a terminal-error path polls a still-running host child
+/// before killing it (and, after the kill, polls once more). Every other
+/// host interaction is deadline-bounded; child reaping must be too, or a
+/// child that closes its pipes without exiting would hang the caller
+/// indefinitely.
+const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Poll interval of the bounded reaper (`try_wait` loop).
+const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Reap the host child within a bounded budget.
+///
+/// Polls `try_wait` for [`CHILD_REAP_TIMEOUT`]; on expiry kills the child
+/// and polls for one more window. A well-behaved exiting child still
+/// yields its real exit status because the poll observes it.
+///
+/// Returning `None` means the child survived even the kill (a pathological
+/// case): the status is unknown, the child's pipe write ends stay open so
+/// the reader/stderr threads may remain blocked until process exit, and
+/// the owning [`HostProcess`] must be discarded. `None` never blocks the
+/// caller for longer than about `2 * CHILD_REAP_TIMEOUT`.
+fn reap_child(child: &mut Child) -> Option<ExitStatus> {
+    let poll = |child: &mut Child| -> Option<ExitStatus> {
+        let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
+        loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(CHILD_REAP_POLL_INTERVAL);
+        }
+    };
+    if let Some(status) = poll(child) {
+        return Some(status);
+    }
+    // Already-exited children make kill() error; that is fine.
+    let _ = child.kill();
+    poll(child)
+}
+
 /// How to launch the Pi review host child process.
 #[derive(Debug, Clone)]
 pub struct PiHostLaunch {
@@ -266,13 +308,15 @@ impl HostProcess {
             .and_then(|()| stdin.flush())
         {
             // A broken pipe almost always means the child died; report the
-            // termination instead of a bare write error when possible.
-            return Err(match self.child.wait() {
-                Ok(status) => HostError::ChildTerminated {
+            // termination instead of a bare write error when possible. The
+            // reap is bounded: a child that broke the pipe but still runs
+            // is killed instead of blocking this write path forever.
+            return Err(match reap_child(&mut self.child) {
+                Some(status) => HostError::ChildTerminated {
                     waiting_for: "stdin write".to_string(),
                     status: exit_status_text(&status),
                 },
-                Err(_) => HostError::WriteFailed(err),
+                None => HostError::WriteFailed(err),
             });
         }
         Ok(())
@@ -362,7 +406,7 @@ impl HostProcess {
             }
             Ok(ChannelEvent::Malformed { reason }) => Err(HostError::MalformedHostLine { reason }),
             Ok(ChannelEvent::ReadFailed(message)) => {
-                let status = self.child.wait().ok();
+                let status = reap_child(&mut self.child);
                 Err(HostError::ChildTerminated {
                     waiting_for: format!("host output (read error: {message})"),
                     status: status
@@ -371,7 +415,7 @@ impl HostProcess {
                 })
             }
             Ok(ChannelEvent::Eof) => {
-                let status = self.child.wait().ok();
+                let status = reap_child(&mut self.child);
                 Err(HostError::ChildTerminated {
                     waiting_for: "host output".to_string(),
                     status: status
@@ -383,7 +427,7 @@ impl HostProcess {
                 what: "the next host event".to_string(),
             }),
             Err(RecvTimeoutError::Disconnected) => {
-                let status = self.child.wait().ok();
+                let status = reap_child(&mut self.child);
                 Err(HostError::ChildTerminated {
                     waiting_for: "host output".to_string(),
                     status: status
@@ -832,8 +876,13 @@ impl HostProcess {
 
     fn kill_and_reap(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.join_threads();
+        // Bounded reap: a child that somehow survives the kill must not
+        // block Drop (or the shutdown-timeout path) forever. When the reap
+        // gives up, the reader/stderr threads stay blocked on the child's
+        // still-open pipes and are left to drain at process exit.
+        if reap_child(&mut self.child).is_some() {
+            self.join_threads();
+        }
     }
 
     fn join_threads(&mut self) {
@@ -987,5 +1036,29 @@ mod tests {
         assert!(debug.contains("--runtime"));
         assert!(debug.contains("fake"));
         assert!(debug.contains("NISSE_PI_HOST_FAULT"));
+    }
+
+    #[test]
+    fn reap_child_kills_a_lingering_child_within_the_budget() {
+        // A child that simply never exits (like a host that ignores its
+        // deadline) must be killed and reaped within roughly two reap
+        // budgets, never waited on indefinitely. Cross-platform (the
+        // linger fixtures in tests/integration cover the full EOF/EPIPE
+        // paths on POSIX).
+        let mut child = Command::new("node")
+            .args(["-e", "setTimeout(() => {}, 15000)"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawning the lingering node child failed");
+        let started = Instant::now();
+        let status = reap_child(&mut child);
+        let elapsed = started.elapsed();
+        let status = status.expect("the lingering child must be killed and reaped");
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "bounded reap took {elapsed:?} (status {status})"
+        );
     }
 }
