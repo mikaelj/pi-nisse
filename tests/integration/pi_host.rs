@@ -455,6 +455,7 @@ fn child_crash_before_ready_is_a_typed_error() {
 // running. `sh` is unavailable on Windows, where the cross-platform
 // `reap_child` unit test in src/jury/host.rs covers the bounded
 // kill-and-reap mechanics instead.
+#[cfg(unix)]
 fn linger_launch(fixture: &str) -> PiHostLaunch {
     PiHostLaunch::new(
         "sh",

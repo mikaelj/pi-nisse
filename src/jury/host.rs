@@ -886,11 +886,31 @@ impl HostProcess {
     }
 
     fn join_threads(&mut self) {
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-        if let Some(handle) = self.stderr_handle.take() {
-            let _ = handle.join();
+        // Bounded join: a dead child does not guarantee the pipe write
+        // ends are closed (a leaked descendant may hold them), so the
+        // reader/stderr threads may legitimately outlive the child. Poll
+        // `is_finished` for one reap budget and then abandon the handle
+        // (detached threads drain on their own or at process exit)
+        // instead of blocking Drop forever.
+        let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
+        for handle in [self.reader.take(), self.stderr_handle.take()]
+            .into_iter()
+            .flatten()
+        {
+            loop {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    tracing::warn!(
+                        "host reader/stderr thread did not finish within the reap budget; \
+                         abandoning it (a descendant may hold the pipe)"
+                    );
+                    break;
+                }
+                std::thread::sleep(CHILD_REAP_POLL_INTERVAL);
+            }
         }
     }
 }
