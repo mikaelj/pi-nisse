@@ -41,10 +41,11 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
 
 /// Maximum time a terminal-error path polls a still-running host child
-/// before killing it (and, after the kill, polls once more). Every other
-/// host interaction is deadline-bounded; child reaping must be too, or a
-/// child that closes its pipes without exiting would hang the caller
-/// indefinitely.
+/// before killing it (and, after the kill, polls once more). Reaping is
+/// bounded so a child that closes its pipes without exiting cannot hang
+/// the caller indefinitely. (Stdin writes remain ordinary blocking I/O:
+/// they rely on the child consuming its input, and a stalled child can
+/// still block a large write once the OS pipe buffer fills.)
 const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Poll interval of the bounded reaper (`try_wait` loop).
@@ -889,14 +890,14 @@ impl HostProcess {
         // Bounded join: a dead child does not guarantee the pipe write
         // ends are closed (a leaked descendant may hold them), so the
         // reader/stderr threads may legitimately outlive the child. Poll
-        // `is_finished` for one reap budget and then abandon the handle
-        // (detached threads drain on their own or at process exit)
-        // instead of blocking Drop forever.
-        let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
+        // `is_finished` for one reap budget per handle and then abandon
+        // the handle (detached threads drain on their own or at process
+        // exit) instead of blocking Drop forever.
         for handle in [self.reader.take(), self.stderr_handle.take()]
             .into_iter()
             .flatten()
         {
+            let deadline = Instant::now() + CHILD_REAP_TIMEOUT;
             loop {
                 if handle.is_finished() {
                     let _ = handle.join();

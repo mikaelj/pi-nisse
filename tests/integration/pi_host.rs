@@ -468,6 +468,22 @@ fn linger_launch(fixture: &str) -> PiHostLaunch {
 
 #[cfg(unix)]
 #[test]
+fn dropping_a_living_child_kills_and_reaps_within_the_budget() {
+    // `linger-silent.sh` never writes anything and lives ~15 s. No error
+    // path runs first, so Drop's kill_and_reap (and the bounded joins)
+    // must terminate on their own within the budget.
+    let host = HostProcess::spawn(&linger_launch("linger-silent.sh")).expect("spawn failed");
+    let started = std::time::Instant::now();
+    drop(host);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "bounded drop took {elapsed:?}; the fixture lingers 15 s with open pipes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn stdout_eof_with_lingering_child_returns_within_the_reap_budget() {
     // `linger-eof.sh` closes stdout, then lives on for ~15 s. The old
     // unbounded `wait()` blocked here for the child's whole lifetime;
