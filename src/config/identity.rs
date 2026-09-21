@@ -1,7 +1,8 @@
 //! Contributor identity: resolution, first-use prompt, and persistence
 //! (plan section 44).
 //!
-//! Contributor identity lives in the platform-native user config
+//! Contributor identity lives in the user config at
+//! `$HOME/.nisse/config.toml`
 //! ([`super::paths::user_config_path`]), never under the Git-tracked
 //! `.nisse/**` tree and never in repository configuration.
 //!
@@ -30,7 +31,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::{ContributorIdentity, is_valid_contributor_id};
-use crate::storage::fsutil::atomic_write_replace;
+use crate::storage::fsutil::atomic_write_replace_private;
 
 /// The frozen first-use prompt text.
 pub const IDENTITY_PROMPT: &str = "What should Nisse call you?";
@@ -96,7 +97,7 @@ pub fn resolve_or_prompt(
     let Some(path) = user_config_path else {
         tracing::warn!(
             contributor = %answer,
-            "no platform user config directory available; contributor identity not saved"
+            "no usable user config directory available; contributor identity not saved"
         );
         return Ok(IdentityOutcome::Unavailable);
     };
@@ -193,7 +194,7 @@ pub fn save_identity(path: &Path, id: &str) -> Result<(), IdentityError> {
     let rendered = toml::to_string(&table)
         .map_err(|err| fail(format!("cannot render the updated config: {err}")))?;
     ensure_config_dir(path)?;
-    atomic_write_replace(path, rendered.as_bytes())
+    atomic_write_replace_private(path, rendered.as_bytes())
         .map_err(|source| fail(format!("atomic write failed: {source}")))?;
     restrict_config_file_permissions(path);
     Ok(())
@@ -496,6 +497,31 @@ mod tests {
         let mut output = Vec::new();
         let outcome = resolve_or_prompt(None, None, true, &mut input, &mut output, None).unwrap();
         assert_eq!(outcome, IdentityOutcome::Unavailable);
+    }
+
+    #[test]
+    fn saving_creates_the_config_dir_with_restrictive_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        // A dotfile path whose parent chain does not exist yet — the
+        // situation of the very first save into $HOME/.nisse.
+        let path = dir.path().join("home").join(".nisse").join("config.toml");
+        save_identity(&path, "alice").unwrap();
+
+        assert!(path.is_file());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("id = \"alice\""));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(dir_mode & 0o777, 0o700, "config dir must be 0700");
+            let file_mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(file_mode & 0o777, 0o600, "config file must be 0600");
+        }
     }
 
     #[test]

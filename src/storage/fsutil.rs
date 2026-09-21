@@ -53,19 +53,53 @@ pub fn atomic_write_exclusive(path: &Path, bytes: &[u8]) -> io::Result<Exclusive
 /// Atomically replace a file with the given content.
 ///
 /// Publication uses `rename`, so readers observe either the old or the
-/// new content, never a partial write. This is the write path for
-/// trusted local configuration files.
+/// new content, never a partial write. The containing directory is
+/// synced after the rename so a crash cannot roll the publication back.
+/// This is the write path for trusted local configuration files.
 pub fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = parent_dir(path)?;
     fs::create_dir_all(parent)?;
     let temp = temp_path(parent);
     write_and_sync(&temp, bytes)?;
     match fs::rename(&temp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_parent_dir(parent),
         Err(err) => {
             let _ = fs::remove_file(&temp);
             Err(err)
         }
+    }
+}
+
+/// Atomically replace a file whose content is private (mode `0600` on
+/// Unix from creation, not only after a post-rename chmod).
+///
+/// Used for files that carry identity or authorization data: the
+/// temporary file is created with restrictive permissions, so no
+/// crash window ever leaves the published file group/world-readable.
+pub fn atomic_write_replace_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = parent_dir(path)?;
+    fs::create_dir_all(parent)?;
+    let temp = temp_path(parent);
+    write_and_sync_private(&temp, bytes)?;
+    match fs::rename(&temp, path) {
+        Ok(()) => sync_parent_dir(parent),
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+/// Best-effort directory sync after a publish: makes the rename (and
+/// any just-created directory entries below `parent`) durable. A
+/// failure to sync is not a publication failure.
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    match File::open(parent) {
+        Ok(dir) => {
+            let _ = dir.sync_all();
+            Ok(())
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -86,6 +120,27 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// [`write_and_sync`] creating the file with mode `0600` on Unix, so a
+/// private file never exists with looser permissions (not even between
+/// creation and a post-publish chmod).
+#[cfg(unix)]
+fn write_and_sync_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+#[cfg(not(unix))]
+fn write_and_sync_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_and_sync(path, bytes)
 }
 
 #[cfg(test)]

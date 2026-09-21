@@ -41,15 +41,10 @@ pub(crate) fn run_nisse(args: &[&str]) -> Output {
 /// Run the built `nisse` binary in `cwd` with an isolated home so that
 /// platform-native user config resolution is deterministic and offline.
 pub(crate) fn run_nisse_in(cwd: &Path, args: &[&str], home: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_nisse"))
-        .args(args)
-        .current_dir(cwd)
-        .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home.join("xdg"))
-        .env("APPDATA", home.join("appdata"))
-        .env("RUST_LOG", "off")
-        .output()
-        .expect("failed to spawn nisse binary")
+    // Delegates so both entry points provide the identical isolated
+    // environment (HOME and USERPROFILE point at `home`, so the
+    // Windows home resolution also stays isolated).
+    run_nisse_in_with_env(cwd, args, home, &[])
 }
 
 /// Run the built `nisse` binary in `cwd` with an isolated home and

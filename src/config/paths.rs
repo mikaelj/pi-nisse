@@ -98,18 +98,13 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    #[cfg(unix)]
     fn user_config_path_is_the_home_dotfile() {
         let guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", "/home/nisse-user") };
         let path = user_config_path();
-        if let Some(previous) = previous {
-            unsafe { std::env::set_var("HOME", previous) };
-        } else if let Some(home) = dirs::home_dir() {
-            unsafe { std::env::set_var("HOME", home) };
-        } else {
-            unsafe { std::env::remove_var("HOME") };
-        }
+        restore_home(previous);
         drop(guard);
 
         assert_eq!(
@@ -119,19 +114,35 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn user_config_path_is_the_home_dotfile() {
+        // Windows deliberately resolves through dirs::home_dir()
+        // (USERPROFILE), not $HOME (Git Bash/MSYS set HOME and could
+        // otherwise split the config across two files).
+        let expected = dirs::home_dir().map(|home| home.join(".nisse").join("config.toml"));
+        assert_eq!(user_config_path(), expected);
+        assert!(user_config_path().is_some_and(|path| path.is_absolute()));
+    }
+
+    /// Restore `HOME` to exactly what it was before a test changed it.
+    /// When it was unset it is removed — reading the current home via
+    /// `dirs::home_dir()` here would return the mutated test value.
+    fn restore_home(previous: Option<std::ffi::OsString>) {
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("HOME", previous) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+    }
+
+    #[test]
     fn empty_or_relative_home_falls_back_or_vanishes() {
         for home in ["", "relative/path"] {
             let guard = ENV_LOCK.lock().unwrap();
             let previous = std::env::var_os("HOME");
             unsafe { std::env::set_var("HOME", home) };
             let path = user_config_path();
-            if let Some(previous) = previous {
-                unsafe { std::env::set_var("HOME", previous) };
-            } else if let Some(home) = dirs::home_dir() {
-                unsafe { std::env::set_var("HOME", home) };
-            } else {
-                unsafe { std::env::remove_var("HOME") };
-            }
+            restore_home(previous);
             drop(guard);
 
             // Never a relative `.nisse/config.toml` resolved against the
@@ -146,7 +157,10 @@ mod tests {
 
     #[test]
     fn legacy_user_config_path_keeps_the_platform_shape() {
-        if let Some(path) = legacy_user_config_path() {
+        let guard = ENV_LOCK.lock().unwrap();
+        let path = legacy_user_config_path();
+        drop(guard);
+        if let Some(path) = path {
             assert!(path.ends_with(Path::new("nisse").join("config.toml")));
         }
     }
