@@ -34,8 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installs the exact toolchain pinned in rust-toolchain.toml.
+      # Installs the toolchain pinned in rust-toolchain.toml. Keep the
+      # value in sync with channel = "1.93.0" there; installing it directly
+      # avoids downloading an unused second toolchain on every run.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.0"
 
       - uses: Swatinem/rust-cache@v2
 
