@@ -1,6 +1,6 @@
 ---
 name: nisse
-description: Nisse local software-review engine. Use for substantial coding tasks: draft a plan, run a bounded Nisse plan review (max 3 attempts), implement, test, run a bounded Nisse code review (max 3 attempts), fix valid blocker/high findings, and submit known finding outcomes.
+description: "Nisse local software-review engine. Use for substantial coding tasks: draft a plan, run a bounded Nisse plan review (max 3 attempts), implement, test, run a bounded Nisse code review (max 3 attempts), fix valid blocker/high findings, and submit known finding outcomes."
 ---
 
 # Nisse — Local Software Review

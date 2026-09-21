@@ -280,6 +280,22 @@ with structured machine-readable I/O and return its stdout verbatim — no
 Nisse business logic is duplicated in TypeScript. The `nisse` binary is
 resolved from `PATH` (or `NISSE_BIN`).
 
+Install the package into Pi from a checkout:
+
+```
+pi install /absolute/path/to/integrations/pi
+# or try it once without installing:
+pi -e /absolute/path/to/integrations/pi
+```
+
+Use an absolute path — relative paths in Pi settings resolve against
+the settings file, not the shell's working directory. Verify with
+`pi list`. To share with a team, publish the package to npm (remove
+`"private": true` and set a real name in `integrations/pi/package.json`)
+or host it in its own git repository; a git source installs at the
+repository root, so the nested `integrations/pi` directory is not
+discovered in a git install of this repo.
+
 ### Main Pi workflow
 
 The [Nisse skill](integrations/pi/skills/nisse/SKILL.md) defines the
