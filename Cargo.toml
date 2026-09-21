@@ -46,6 +46,3 @@ tree-sitter-python = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-lua = "0.5"
 tree-sitter-html = "0.23"
-
-[dev-dependencies]
-tempfile = "3"
