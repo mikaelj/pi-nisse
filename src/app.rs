@@ -247,7 +247,7 @@ impl App {
         use crate::config;
         use crate::jury::review::host_launch_from_env;
 
-        let user_path = config::paths::effective_user_config_path();
+        let user_path = config::paths::user_config_paths().load;
         let repo_path = config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
             config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
@@ -332,7 +332,7 @@ impl App {
             .map_err(|err| AppError::Other(anyhow::anyhow!("query failed: {err}")))?;
         // Optional embedding provider from trusted local
         // configuration; absent or failing providers change nothing.
-        let user_path = crate::config::paths::effective_user_config_path();
+        let user_path = crate::config::paths::user_config_paths().load;
         let repo_path = crate::config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
             crate::config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
@@ -459,7 +459,7 @@ impl App {
 
         // Contributor identity lives in trusted local configuration;
         // feedback is noninteractive and never prompts.
-        let user_path = crate::config::paths::effective_user_config_path();
+        let user_path = crate::config::paths::user_config_paths().load;
         let repo_path = crate::config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
             crate::config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
@@ -508,7 +508,7 @@ impl App {
         // Trusted local configuration supplies the contributor
         // identity and the model profiles the semantic sessions may
         // use (reviewer sessions never inherit a model).
-        let user_path = crate::config::paths::effective_user_config_path();
+        let user_path = crate::config::paths::user_config_paths().load;
         let repo_path = crate::config::paths::repo_config_path(&ctx.git_common_dir);
         let loaded =
             crate::config::load_config(user_path.as_deref(), Some(&repo_path)).map_err(|err| {
@@ -540,7 +540,7 @@ impl App {
                 // Loading honors the legacy fallback, but an identity
                 // save always targets the dotfile path (which seeds
                 // itself from the legacy file on first write).
-                let save_path = crate::config::paths::user_config_path();
+                let save_path = crate::config::paths::user_config_paths().save;
                 let outcome = crate::config::identity::resolve_or_prompt(
                     None,
                     save_path.as_deref(),
@@ -728,7 +728,7 @@ impl App {
                 )));
             }
         };
-        let user_path = config::paths::effective_user_config_path();
+        let user_path = config::paths::user_config_paths().load;
         let loaded =
             config::load_config(user_path.as_deref(), repo_path.as_deref()).map_err(|err| {
                 AppError::Other(anyhow::anyhow!(
@@ -749,7 +749,7 @@ impl App {
         let cwd = std::env::current_dir()
             .map_err(|err| anyhow::anyhow!("failed to determine the current directory: {err}"))?;
         let git = config::git_probe::probe_git(&cwd);
-        let user_path = config::paths::effective_user_config_path();
+        let user_path = config::paths::user_config_paths().load;
         let repo_path = git
             .git_common_dir
             .as_ref()

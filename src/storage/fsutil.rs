@@ -53,9 +53,11 @@ pub fn atomic_write_exclusive(path: &Path, bytes: &[u8]) -> io::Result<Exclusive
 /// Atomically replace a file with the given content.
 ///
 /// Publication uses `rename`, so readers observe either the old or the
-/// new content, never a partial write. The containing directory is
-/// synced after the rename so a crash cannot roll the publication back.
-/// This is the write path for trusted local configuration files.
+/// new content, never a partial write. After the rename the containing
+/// directory is synced best-effort (Unix), narrowing — not eliminating —
+/// the crash window in which the rename could be rolled back; Windows
+/// has no directory sync here. This is the write path for trusted local
+/// configuration files.
 pub fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = parent_dir(path)?;
     fs::create_dir_all(parent)?;

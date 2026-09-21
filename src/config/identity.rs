@@ -239,12 +239,24 @@ fn base_config_table_with_seed(
         return toml::from_str(&text)
             .map_err(|err| fail(format!("existing config is not valid TOML: {err}")));
     }
-    if let Some(legacy) = legacy
-        .filter(|legacy| legacy.exists())
-        .and_then(|legacy| std::fs::read_to_string(legacy).ok())
-        .and_then(|seed| toml::from_str::<toml::Table>(&seed).ok())
-    {
-        return Ok(legacy);
+    if let Some(legacy) = legacy.filter(|legacy| legacy.exists()) {
+        let seed = std::fs::read_to_string(legacy)
+            .map_err(|source| source.to_string())
+            .and_then(|text| {
+                toml::from_str::<toml::Table>(&text).map_err(|err| format!("not valid TOML: {err}"))
+            });
+        match seed {
+            Ok(table) => return Ok(table),
+            Err(reason) => {
+                // Never fail the save over the seed, but never lose the
+                // legacy settings silently either.
+                tracing::warn!(
+                    legacy = %legacy.display(),
+                    reason,
+                    "legacy config could not be seeded into the new dotfile"
+                );
+            }
+        }
     }
     Ok(toml::Table::new())
 }
@@ -512,7 +524,7 @@ mod tests {
         // A dotfile path whose parent chain does not exist yet — the
         // situation of the very first save into $HOME/.nisse.
         let path = dir.path().join("home").join(".nisse").join("config.toml");
-        save_identity(&path, "alice").unwrap();
+        save_identity_seeded(&path, "alice", None).unwrap();
 
         assert!(path.is_file());
         let saved = std::fs::read_to_string(&path).unwrap();
@@ -606,8 +618,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        assert!(save_identity(&path, "../evil").is_err());
-        assert!(save_identity(&path, "alice").is_ok());
+        assert!(save_identity_seeded(&path, "../evil", None).is_err());
+        assert!(save_identity_seeded(&path, "alice", None).is_ok());
 
         std::fs::write(&path, "not [ toml").unwrap();
         let err = save_identity(&path, "alice").unwrap_err();

@@ -81,6 +81,26 @@ pub fn effective_user_config_path() -> Option<PathBuf> {
     Some(legacy)
 }
 
+/// The load path and the save path for user configuration, as one
+/// unit: loading honors the legacy fallback; writes always target the
+/// dotfile. Returning them together makes the migration-critical
+/// invariant structural instead of caller discipline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserConfigPaths {
+    /// The config file to LOAD (legacy fallback honored).
+    pub load: Option<PathBuf>,
+    /// The config file to WRITE (always the dotfile path).
+    pub save: Option<PathBuf>,
+}
+
+/// Resolve the user config load/save pair (see [`UserConfigPaths`]).
+pub fn user_config_paths() -> UserConfigPaths {
+    UserConfigPaths {
+        load: effective_user_config_path(),
+        save: user_config_path(),
+    }
+}
+
 /// Trusted repository-local configuration path under `$GIT_COMMON_DIR`
 /// (`$GIT_COMMON_DIR/nisse/config.toml`).
 ///
@@ -174,6 +194,26 @@ mod tests {
         drop(guard);
         if let Some(path) = path {
             assert!(path.ends_with(Path::new("nisse").join("config.toml")));
+        }
+    }
+
+    #[test]
+    fn load_and_save_paths_split_when_only_the_legacy_config_exists() {
+        // Legacy-only: loading falls back to the legacy file while the
+        // save target stays the dotfile (first-write seeding applies).
+        // With a dotfile present, both sides are the dotfile. Without
+        // either, both sides are the (nonexistent) dotfile path.
+        let dotfile = user_config_path();
+        let legacy = legacy_user_config_path();
+        let pair = user_config_paths();
+        if legacy.as_ref().is_some_and(|path| path.exists())
+            && !dotfile.as_ref().is_some_and(|path| path.exists())
+        {
+            assert_eq!(pair.load, legacy);
+            assert_eq!(pair.save, dotfile);
+        } else {
+            assert_eq!(pair.load, dotfile);
+            assert_eq!(pair.save, dotfile);
         }
     }
 
