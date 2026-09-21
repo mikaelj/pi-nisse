@@ -11,6 +11,7 @@ mod eval_binary;
 mod fact_staleness;
 mod facts_binary;
 mod feedback_binary;
+mod final_regression;
 mod git_env;
 mod lessons_binary;
 mod mcp_binary;

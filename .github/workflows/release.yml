@@ -1,0 +1,83 @@
+# Release builds for Nisse 1.0 (plan milestone 30).
+#
+# Builds release binaries for the frozen release targets "where
+# infrastructure supports" them (plan milestone 30):
+#
+#   macOS arm64     aarch64-apple-darwin       macos-latest (arm64)
+#   macOS x86_64    x86_64-apple-darwin        macos-15-intel
+#   Linux x86_64    x86_64-unknown-linux-gnu   ubuntu-latest
+#   Linux arm64     aarch64-unknown-linux-gnu  ubuntu-24.04-arm
+#   Windows x86_64  x86_64-pc-windows-msvc     windows-latest
+#
+# Quality gates (fmt/clippy/tests, TypeScript gates) are the job of
+# ci.yml and run on every push; this workflow only packages release
+# binaries. It runs on version tags (v*) and via manual dispatch, and
+# uploads one archive per target as workflow artifacts.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup then honors the exact pin in rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke-test the binary
+        run: cargo run --release --locked --target ${{ matrix.target }} -- --version
+
+      - name: Archive (unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar -czf "nisse-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" nisse
+
+      - name: Archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/nisse.exe" `
+            -DestinationPath "nisse-${{ matrix.target }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nisse-${{ matrix.target }}
+          path: |
+            nisse-${{ matrix.target }}.tar.gz
+            nisse-${{ matrix.target }}.zip
+          if-no-files-found: error

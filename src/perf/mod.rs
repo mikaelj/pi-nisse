@@ -446,30 +446,51 @@ fn observation_grouping_is_not_quadratic_in_observations() {
     // Lesson grouping is the deterministic heart of learning (plan
     // section 51) and runs on every review over every stored
     // observation; it must stay linear-ish in observation count.
-    let build = |per_group: usize| {
+    let build = |per_group: usize| -> Vec<ObservationRecord> {
         let mut all: Vec<ObservationRecord> = Vec::new();
         for reviewer in ["quality", "testing", "security", "concurrency"] {
             for category in ["race", "leak", "hang"] {
                 all.extend(observations(per_group, reviewer, category));
             }
         }
-        let refs: Vec<&ObservationRecord> = all.iter().collect();
-        let started = Instant::now();
-        let stats = compute_group_stats(&refs);
-        (started.elapsed(), stats, refs.len())
+        assert_eq!(all.len(), per_group * 12);
+        all
     };
 
-    let (small_duration, small_stats, small_count) = build(50);
-    assert_eq!(small_count, 600);
+    // Best-of-3 timing (like the sibling scaling tests) filters
+    // scheduler noise when the suite runs under parallel load.
+    let small = build(50);
+    let small_refs: Vec<&ObservationRecord> = small.iter().collect();
+    let small_stats = compute_group_stats(&small_refs);
     assert_eq!(small_stats.len(), 12, "one group per reviewer/category");
-    eprintln!("perf: grouping {small_count} observations: {small_duration:?}");
+    assert!(small_stats.iter().all(|group| group.support == 50));
+    let small_duration = min_of(
+        || compute_group_stats(&small_refs),
+        3,
+        |stats: Vec<_>| assert_eq!(stats.len(), 12),
+    );
+    eprintln!(
+        "perf: grouping {} observations: {:?}",
+        small_refs.len(),
+        small_duration
+    );
 
-    let (large_duration, large_stats, large_count) = build(200);
-    assert_eq!(large_count, 2400);
+    let large = build(200);
+    let large_refs: Vec<&ObservationRecord> = large.iter().collect();
+    let large_stats = compute_group_stats(&large_refs);
     assert_eq!(large_stats.len(), 12);
     // Every group's statistics are exact (unique observations counted).
     assert!(large_stats.iter().all(|group| group.support == 200));
-    eprintln!("perf: grouping {large_count} observations: {large_duration:?}");
+    let large_duration = min_of(
+        || compute_group_stats(&large_refs),
+        3,
+        |stats: Vec<_>| assert_eq!(stats.len(), 12),
+    );
+    eprintln!(
+        "perf: grouping {} observations: {:?}",
+        large_refs.len(),
+        large_duration
+    );
 
     assert_under(
         "observation grouping (2400 observations)",
