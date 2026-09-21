@@ -62,7 +62,10 @@ pub fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temp = temp_path(parent);
     write_and_sync(&temp, bytes)?;
     match fs::rename(&temp, path) {
-        Ok(()) => sync_parent_dir(parent),
+        Ok(()) => {
+            best_effort_parent_sync(parent);
+            Ok(())
+        }
         Err(err) => {
             let _ = fs::remove_file(&temp);
             Err(err)
@@ -82,7 +85,10 @@ pub fn atomic_write_replace_private(path: &Path, bytes: &[u8]) -> io::Result<()>
     let temp = temp_path(parent);
     write_and_sync_private(&temp, bytes)?;
     match fs::rename(&temp, path) {
-        Ok(()) => sync_parent_dir(parent),
+        Ok(()) => {
+            best_effort_parent_sync(parent);
+            Ok(())
+        }
         Err(err) => {
             let _ = fs::remove_file(&temp);
             Err(err)
@@ -91,15 +97,15 @@ pub fn atomic_write_replace_private(path: &Path, bytes: &[u8]) -> io::Result<()>
 }
 
 /// Best-effort directory sync after a publish: makes the rename (and
-/// any just-created directory entries below `parent`) durable. A
-/// failure to sync is not a publication failure.
-fn sync_parent_dir(parent: &Path) -> io::Result<()> {
-    match File::open(parent) {
-        Ok(dir) => {
-            let _ = dir.sync_all();
-            Ok(())
-        }
-        Err(err) => Err(err),
+/// any just-created directory entries below `parent`) durable when the
+/// platform allows opening the directory. Strictly best-effort — the
+/// file is already published at this point, so neither an open nor a
+/// sync failure may turn the publication into a reported failure
+/// (notably, `File::open` on a directory fails on Windows, where the
+/// sync is simply skipped).
+fn best_effort_parent_sync(parent: &Path) {
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
     }
 }
 
@@ -185,6 +191,27 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec!["record.json".to_string()]);
+    }
+
+    #[test]
+    fn private_replace_writes_content_with_restricted_mode_from_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.toml");
+        atomic_write_replace_private(&path, b"first").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+
+        atomic_write_replace_private(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+
+        // fsutil has no post-publish chmod, so asserting the final mode
+        // here proves the file was CREATED private (mode 0600 on Unix —
+        // no window with looser permissions ever existed).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

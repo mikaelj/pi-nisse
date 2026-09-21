@@ -161,6 +161,17 @@ fn prompt_identity(
 /// value round-trip so other settings survive; comments and formatting
 /// are not preserved. The write is atomic.
 pub fn save_identity(path: &Path, id: &str) -> Result<(), IdentityError> {
+    save_identity_seeded(path, id, legacy_seed_path().as_deref())
+}
+
+/// [`save_identity`] with an explicit legacy seed (test seam so the
+/// seeding wiring is exercised with a controlled fixture instead of
+/// the machine's real platform config directory).
+pub fn save_identity_seeded(
+    path: &Path,
+    id: &str,
+    legacy: Option<&Path>,
+) -> Result<(), IdentityError> {
     let fail = |message: String| IdentityError::Save {
         path: path.to_path_buf(),
         message,
@@ -170,7 +181,7 @@ pub fn save_identity(path: &Path, id: &str) -> Result<(), IdentityError> {
         return Err(fail(format!("`{id}` is not a valid contributor id")));
     }
 
-    let mut table = base_config_table(path)?;
+    let mut table = base_config_table_with_seed(path, legacy)?;
 
     let contributor = match table.get_mut("contributor") {
         Some(value) => value,
@@ -214,10 +225,6 @@ fn legacy_seed_path() -> Option<std::path::PathBuf> {
 ///   legacy file falls back to a fresh table; the legacy file itself
 ///   is never modified);
 /// - otherwise: a fresh table.
-fn base_config_table(path: &Path) -> Result<toml::Table, IdentityError> {
-    base_config_table_with_seed(path, legacy_seed_path().as_deref())
-}
-
 fn base_config_table_with_seed(
     path: &Path,
     legacy: Option<&Path>,
@@ -532,20 +539,25 @@ mod tests {
         std::fs::write(&legacy, "[performance]\nmax_concurrent_reviewers = 2\n").unwrap();
         let dotfile = dir.path().join("dotfile").join("config.toml");
 
-        // The new dotfile does not exist yet; the seed must carry the
-        // legacy settings into the first write, and the legacy file
-        // itself is never touched.
-        let table = base_config_table_with_seed(&dotfile, Some(&legacy)).unwrap();
-        assert_eq!(
-            table
-                .get("performance")
-                .and_then(|value| value.get("max_concurrent_reviewers")),
-            Some(&toml::Value::from(2))
-        );
+        // The full save path (table seed -> identity insert -> publish)
+        // with a controlled legacy fixture: the dotfile receives the
+        // legacy settings plus the identity, and the legacy file is
+        // never touched.
+        save_identity_seeded(&dotfile, "alice", Some(&legacy)).unwrap();
+        let saved = std::fs::read_to_string(&dotfile).unwrap();
+        assert!(saved.contains("id = \"alice\""));
+        assert!(saved.contains("max_concurrent_reviewers = 2"));
         assert_eq!(
             std::fs::read_to_string(&legacy).unwrap(),
             "[performance]\nmax_concurrent_reviewers = 2\n"
         );
+
+        // A second save round-trips the dotfile itself (the legacy seed
+        // is no longer consulted once the dotfile exists).
+        save_identity_seeded(&dotfile, "bob", Some(&legacy)).unwrap();
+        let saved = std::fs::read_to_string(&dotfile).unwrap();
+        assert!(saved.contains("id = \"bob\""));
+        assert!(saved.contains("max_concurrent_reviewers = 2"));
     }
 
     #[test]

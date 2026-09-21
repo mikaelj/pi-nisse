@@ -118,10 +118,22 @@ mod tests {
     fn user_config_path_is_the_home_dotfile() {
         // Windows deliberately resolves through dirs::home_dir()
         // (USERPROFILE), not $HOME (Git Bash/MSYS set HOME and could
-        // otherwise split the config across two files).
+        // otherwise split the config across two files). A sentinel HOME
+        // must NOT influence the result.
+        let guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "Z:\\nisse-sentinel-home") };
+        let path = user_config_path();
+        restore_home(previous);
+        drop(guard);
+
         let expected = dirs::home_dir().map(|home| home.join(".nisse").join("config.toml"));
-        assert_eq!(user_config_path(), expected);
-        assert!(user_config_path().is_some_and(|path| path.is_absolute()));
+        assert_eq!(path, expected);
+        assert!(path.is_some_and(|path| path.is_absolute()));
+        assert!(
+            !path.is_some_and(|path| path.starts_with("Z:\\nisse-sentinel-home")),
+            "$HOME must not win on Windows: {path:?}"
+        );
     }
 
     /// Restore `HOME` to exactly what it was before a test changed it.

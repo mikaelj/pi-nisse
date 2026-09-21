@@ -103,9 +103,11 @@ fn legacy_config_is_loaded_with_a_migration_notice() {
     // The legacy settings still apply...
     assert!(stdout.contains("user config loaded"));
     assert!(stdout.contains("`standard`: model=local-standard"));
-    // ...and every run says how to migrate.
-    assert!(
-        stderr.contains("move the file to migrate"),
+    // ...and exactly one per-run notice says how to migrate (doctor
+    // resolves the effective path at multiple sites in one process).
+    assert_eq!(
+        stderr.matches("move the file to migrate").count(),
+        1,
         "stderr: {stderr}"
     );
     assert!(stderr.contains(".nisse/config.toml"));
