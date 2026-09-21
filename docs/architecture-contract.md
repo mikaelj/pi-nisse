@@ -97,8 +97,10 @@ session fails, the static expert template is used unchanged.
 - **Trust**: `.nisse/**` is project data and can never configure commands,
   endpoints, credentials, or extensions. Runtime/provider configuration is
   local trusted TOML configuration with frozen precedence: repository-local
-  `$GIT_COMMON_DIR/nisse/config.toml`, then the platform-native user
-  config, then compiled defaults. Default model endpoints are loopback/
+  `$GIT_COMMON_DIR/nisse/config.toml`, then the user config at
+  `$HOME/.nisse/config.toml` (dotfile convention on every platform; the
+  legacy platform-native path is read with a migration notice for one
+  release), then compiled defaults. Default model endpoints are loopback/
   private only; hostnames are resolved before the trust decision, and
   `network.allow_non_private_endpoints` is the explicit override.
   `nisse doctor` reports Git availability, configuration validity, model

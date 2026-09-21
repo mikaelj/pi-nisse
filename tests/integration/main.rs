@@ -65,6 +65,7 @@ pub(crate) fn run_nisse_in_with_env(
     command.args(args).current_dir(cwd);
     command
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("XDG_CONFIG_HOME", home.join("xdg"))
         .env("APPDATA", home.join("appdata"))
         .env("RUST_LOG", "off")
@@ -78,6 +79,18 @@ pub(crate) fn run_nisse_in_with_env(
 /// Write the same user config into every platform-native location the
 /// `dirs` crate may consult (macOS, Linux/XDG, Windows).
 pub(crate) fn write_user_config(home: &Path, contents: &str) {
+    // The user config is `$HOME/.nisse/config.toml` on every platform
+    // (the harness sets HOME and USERPROFILE to the same isolated
+    // directory, so Windows resolves the same dotfile).
+    let path = home.join(".nisse").join("config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+/// Write a config at the LEGACY platform-native path (the pre-dotfile
+/// location, still read as a one-release fallback). All three platform
+/// shapes are written so the test works on every OS.
+pub(crate) fn write_legacy_user_config(home: &Path, contents: &str) {
     for relative in [
         "Library/Application Support/nisse/config.toml", // macOS
         "xdg/nisse/config.toml",                         // Linux

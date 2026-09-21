@@ -169,14 +169,7 @@ pub fn save_identity(path: &Path, id: &str) -> Result<(), IdentityError> {
         return Err(fail(format!("`{id}` is not a valid contributor id")));
     }
 
-    let mut table: toml::Table = if path.exists() {
-        let text = std::fs::read_to_string(path)
-            .map_err(|source| fail(format!("cannot read the existing config: {source}")))?;
-        toml::from_str(&text)
-            .map_err(|err| fail(format!("existing config is not valid TOML: {err}")))?
-    } else {
-        toml::Table::new()
-    };
+    let mut table = base_config_table(path)?;
 
     let contributor = match table.get_mut("contributor") {
         Some(value) => value,
@@ -199,9 +192,96 @@ pub fn save_identity(path: &Path, id: &str) -> Result<(), IdentityError> {
 
     let rendered = toml::to_string(&table)
         .map_err(|err| fail(format!("cannot render the updated config: {err}")))?;
+    ensure_config_dir(path)?;
     atomic_write_replace(path, rendered.as_bytes())
         .map_err(|source| fail(format!("atomic write failed: {source}")))?;
+    restrict_config_file_permissions(path);
     Ok(())
+}
+
+/// The legacy config used to seed a brand-new dotfile, when one exists.
+fn legacy_seed_path() -> Option<std::path::PathBuf> {
+    crate::config::paths::legacy_user_config_path().filter(|legacy| legacy.exists())
+}
+
+/// The base TOML table for a config write at `path`.
+///
+/// - `path` exists: its current contents (ordinary round-trip);
+/// - `path` is new and a legacy seed is given: the legacy contents, so
+///   the first persisted write to the dotfile while a legacy config
+///   exists never silently drops the user's settings (a malformed
+///   legacy file falls back to a fresh table; the legacy file itself
+///   is never modified);
+/// - otherwise: a fresh table.
+fn base_config_table(path: &Path) -> Result<toml::Table, IdentityError> {
+    base_config_table_with_seed(path, legacy_seed_path().as_deref())
+}
+
+fn base_config_table_with_seed(
+    path: &Path,
+    legacy: Option<&Path>,
+) -> Result<toml::Table, IdentityError> {
+    let fail = |message: String| IdentityError::Save {
+        path: path.to_path_buf(),
+        message,
+    };
+    if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|source| fail(format!("cannot read the existing config: {source}")))?;
+        return toml::from_str(&text)
+            .map_err(|err| fail(format!("existing config is not valid TOML: {err}")));
+    }
+    if let Some(legacy) = legacy
+        .filter(|legacy| legacy.exists())
+        .and_then(|legacy| std::fs::read_to_string(legacy).ok())
+        .and_then(|seed| toml::from_str::<toml::Table>(&seed).ok())
+    {
+        return Ok(legacy);
+    }
+    Ok(toml::Table::new())
+}
+
+/// Create the user config directory if it is missing.
+///
+/// On Unix the directory is created with mode `0700` (new components
+/// only; existing components keep their mode). This is the single
+/// creation point for the config directory until consent gating lands.
+fn ensure_config_dir(config_file: &Path) -> Result<(), IdentityError> {
+    let Some(parent) = config_file.parent() else {
+        return Ok(());
+    };
+    let result = if parent.exists() {
+        Ok(())
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700).recursive(true);
+            builder.create(parent)
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(parent)
+        }
+    };
+    result.map_err(|source| IdentityError::Save {
+        path: config_file.to_path_buf(),
+        message: format!("cannot create the config directory: {source}"),
+    })
+}
+
+/// Restrict the user config file to mode `0600` on Unix (it carries the
+/// contributor identity and, later, directory-consent allowlists). A
+/// failure to tighten permissions is not fatal: the write already
+/// succeeded atomically.
+fn restrict_config_file_permissions(config_file: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let restricted = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(config_file, restricted);
+    }
 }
 
 /// Derive a suggested contributor slug from a display name such as a
@@ -416,6 +496,48 @@ mod tests {
         let mut output = Vec::new();
         let outcome = resolve_or_prompt(None, None, true, &mut input, &mut output, None).unwrap();
         assert_eq!(outcome, IdentityOutcome::Unavailable);
+    }
+
+    #[test]
+    fn first_dotfile_write_seeds_from_a_legacy_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("legacy").join("config.toml");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "[performance]\nmax_concurrent_reviewers = 2\n").unwrap();
+        let dotfile = dir.path().join("dotfile").join("config.toml");
+
+        // The new dotfile does not exist yet; the seed must carry the
+        // legacy settings into the first write, and the legacy file
+        // itself is never touched.
+        let table = base_config_table_with_seed(&dotfile, Some(&legacy)).unwrap();
+        assert_eq!(
+            table
+                .get("performance")
+                .and_then(|value| value.get("max_concurrent_reviewers")),
+            Some(&toml::Value::from(2))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            "[performance]\nmax_concurrent_reviewers = 2\n"
+        );
+    }
+
+    #[test]
+    fn malformed_or_absent_seed_falls_back_to_a_fresh_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let dotfile = dir.path().join("dotfile").join("config.toml");
+
+        let malformed = dir.path().join("malformed.toml");
+        std::fs::write(&malformed, "this is [ not toml").unwrap();
+        let table = base_config_table_with_seed(&dotfile, Some(&malformed)).unwrap();
+        assert!(table.is_empty());
+
+        let absent = dir.path().join("absent.toml");
+        let table = base_config_table_with_seed(&dotfile, Some(&absent)).unwrap();
+        assert!(table.is_empty());
+
+        let table = base_config_table_with_seed(&dotfile, None).unwrap();
+        assert!(table.is_empty());
     }
 
     #[test]

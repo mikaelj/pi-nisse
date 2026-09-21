@@ -859,7 +859,9 @@ Configuration precedence:
 
 1. explicit CLI options;
 2. `$GIT_COMMON_DIR/nisse/config.toml`;
-3. platform-native user config;
+3. user config at `$HOME/.nisse/config.toml` (dotfile convention on
+   every platform, including macOS; the legacy platform-native path is
+   read with a per-run migration notice for one release);
 4. compiled defaults.
 
 Contributor identity lives in user config.

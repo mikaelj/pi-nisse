@@ -167,7 +167,7 @@ pipelines of plan sections 47–48.
 ## Contributor identity
 
 Author IDs refer to contributors. Contributor identity is trusted
-local configuration (platform-native user config), never stored under
+local configuration (`$HOME/.nisse/config.toml`), never stored under
 `.nisse/**`. When interactive use first needs an identity and none
 exists, Nisse asks `What should Nisse call you?` and saves the answer
 locally. Noninteractive runs never wait for input: without an identity,

@@ -114,9 +114,9 @@ Layered precedence, highest first (frozen in PLAN.md §11):
 1. explicit CLI options (the frozen CLI defines none);
 2. repository config: `$GIT_COMMON_DIR/nisse/config.toml` — local
    machine state inside the Git dir, never committed;
-3. platform-native user config
-   (`~/Library/Application Support/nisse/config.toml`,
-   `$XDG_CONFIG_HOME/nisse/config.toml`, or `%APPDATA%\nisse\config.toml`);
+3. user config: `~/.nisse/config.toml` on every platform (dotfile
+   convention, including macOS; a legacy platform-native config file,
+   if present, is still read with a per-run migration notice);
 4. compiled defaults.
 
 Example:

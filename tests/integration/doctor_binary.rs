@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::{run_nisse_in, write_user_config};
+use super::{run_nisse_in, write_legacy_user_config, write_user_config};
 
 const VALID_CONFIG: &str = r#"
 [contributor]
@@ -88,6 +88,49 @@ fn doctor_passes_with_valid_local_config() {
     assert!(stdout.contains("classifier: ok"));
     assert!(stdout.contains("not configured (deterministic rules-only routing)"));
     assert_eq!(stderr, "", "a passing doctor run must not write to stderr");
+}
+
+#[test]
+fn legacy_config_is_loaded_with_a_migration_notice() {
+    let home = tempfile::tempdir().unwrap();
+    write_legacy_user_config(home.path(), VALID_CONFIG);
+    let cwd = tempfile::tempdir().unwrap();
+
+    let out = run_nisse_in(cwd.path(), &["doctor"], home.path());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    // The legacy settings still apply...
+    assert!(stdout.contains("user config loaded"));
+    assert!(stdout.contains("`standard`: model=local-standard"));
+    // ...and every run says how to migrate.
+    assert!(
+        stderr.contains("move the file to migrate"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains(".nisse/config.toml"));
+}
+
+#[test]
+fn dotfile_config_wins_over_the_legacy_fallback() {
+    let home = tempfile::tempdir().unwrap();
+    write_legacy_user_config(home.path(), VALID_CONFIG);
+    write_user_config(
+        home.path(),
+        &VALID_CONFIG.replace("local-standard", "dotfile-standard"),
+    );
+    let cwd = tempfile::tempdir().unwrap();
+
+    let out = run_nisse_in(cwd.path(), &["doctor"], home.path());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("`standard`: model=dotfile-standard"));
+    assert!(!stdout.contains("model=local-standard"));
+    assert_eq!(
+        stderr, "",
+        "the migration notice must not print when the dotfile exists"
+    );
 }
 
 #[test]
