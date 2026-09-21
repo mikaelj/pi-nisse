@@ -53,3 +53,35 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets --all-features
+
+  # TypeScript gates (plan section 0.4): the Pi review host and the
+  # Pi integration package are shipped product surfaces, so their
+  # typecheck and test suites run on every push alongside the Rust
+  # gates. Node 24 satisfies both packages' engines >= 23.6.
+  typescript:
+    name: typescript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            runtime/pi-host/package-lock.json
+            integrations/pi/package-lock.json
+
+      - name: Typecheck and test (pi-host)
+        working-directory: runtime/pi-host
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test
+
+      - name: Typecheck and test (pi integration)
+        working-directory: integrations/pi
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test
