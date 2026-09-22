@@ -170,3 +170,24 @@ Repeated submissions for the same finding are idempotent.
 Blocker/high findings always carry concrete evidence. Judge validity
 before acting; when unsure, use `nisse_query_project` or read the cited
 evidence. Use `review_id` + `findings[].id` for feedback.
+
+## Directory-creation consent
+
+Nisse asks the user before creating any persistent directory (the
+`.nisse/**` record tree, the cache directories under `$GIT_DIR`, or
+`$HOME/.nisse`). In a normal Pi session the Nisse tools run
+noninteractively, so on a fresh repository:
+
+- `nisse_review_plan` / `nisse_review_code` / `nisse_feedback` may fail
+  with a typed `directory creation requires consent` error;
+- feedback outcomes defer to the local sidecar instead (the submission
+  succeeds; `nisse records pending` lists the deferred observations and
+  they flush once consent exists);
+- read-only commands (`nisse records pending`, `nisse records list`)
+  never demand consent.
+
+When this happens, tell the user to run `nisse doctor` in a terminal
+once per repository (it prompts and can remember grants), or to add the
+path to `[directories] allow_paths` in `$HOME/.nisse/config.toml`, or
+to set `NISSE_ALLOW_DIR_CREATION=1`. Never change local consent
+configuration on the user's behalf.

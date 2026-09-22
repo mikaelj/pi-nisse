@@ -6,7 +6,10 @@
 
 use std::path::Path;
 
-use super::{run_nisse_in, write_legacy_user_config, write_user_config};
+use super::{
+    run_nisse_in, run_nisse_in_with_env, run_nisse_with_stdin, write_legacy_user_config,
+    write_user_config,
+};
 
 const VALID_CONFIG: &str = r#"
 [contributor]
@@ -197,4 +200,110 @@ fn public_endpoint_is_rejected_unless_explicitly_allowed() {
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert!(stdout.contains("endpoint trust: ok"));
     assert!(stdout.contains("permitted by trusted local configuration override"));
+}
+
+/// A minimal Git repository (no Nisse state yet) with an isolated home.
+fn fresh_repo(label: &str) -> (tempfile::TempDir, std::path::PathBuf, tempfile::TempDir) {
+    let dir = tempfile::Builder::new().prefix(label).tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet", "-b", "main"])
+        .current_dir(&repo)
+        .env("LC_ALL", "C")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let home = tempfile::TempDir::new().unwrap();
+    write_user_config(home.path(), VALID_CONFIG);
+    (dir, repo, home)
+}
+
+#[test]
+fn doctor_reports_missing_directories_without_failing() {
+    let (_dir, repo, home) = fresh_repo("doctor-dirs-missing");
+
+    let out = run_nisse_in_with_env(
+        &repo,
+        &["doctor"],
+        home.path(),
+        &[("NISSE_ALLOW_DIR_CREATION", "\u{0}remove")],
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // Missing directories are a warning, never a doctor failure.
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("directories"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("missing (not consented)"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("NISSE_ALLOW_DIR_CREATION"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("user config (load)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("user config (save)"), "stdout:\n{stdout}");
+    assert!(
+        !stdout.contains("blanket consent"),
+        "no blanket line without the env: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_interactive_always_grants_and_persists_consent() {
+    let (_dir, repo, home) = fresh_repo("doctor-dirs-grant");
+
+    // Interactive doctor with "always" for each missing directory.
+    let out = run_nisse_with_stdin(
+        &repo,
+        &["doctor"],
+        home.path(),
+        &[
+            ("NISSE_ALLOW_DIR_CREATION", "\u{0}remove"),
+            ("NISSE_INTERACTIVE_CONSENT", "1"),
+        ],
+        b"a\na\n",
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("Nisse wants to create") && stderr.contains("[y]es / [a]lways / [n]o"),
+        "stderr: {stderr}"
+    );
+    assert!(stdout.contains("consented:"), "stdout:\n{stdout}");
+
+    // The grants persisted into the dotfile config.
+    let config = home.path().join(".nisse").join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("allow_paths"), "{text}");
+
+    // A later noninteractive doctor reports remembered consent and no
+    // missing directories.
+    let out = run_nisse_in_with_env(
+        &repo,
+        &["doctor"],
+        home.path(),
+        &[("NISSE_ALLOW_DIR_CREATION", "\u{0}remove")],
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("missing (not consented)"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn doctor_reports_pending_legacy_migration() {
+    let home = tempfile::tempdir().unwrap();
+    write_legacy_user_config(home.path(), VALID_CONFIG);
+    let cwd = tempfile::tempdir().unwrap();
+
+    let out = run_nisse_in(cwd.path(), &["doctor"], home.path());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("legacy config effective; migration pending"),
+        "stdout:\n{stdout}"
+    );
 }

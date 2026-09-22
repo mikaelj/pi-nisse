@@ -850,6 +850,14 @@ Reviewer sessions do not inherit Main Pi's active model automatically.
 
 Nisse selects an explicitly configured model profile.
 
+Nisse never creates a persistent directory without explicit user
+consent; interactive use asks (`[y]es / [a]lways / [n]o`), noninteractive
+use fails closed with a typed error or defers to pending local state
+when the deferral store already exists (user-requested plan change).
+Directory consent is remembered per canonical path in user config
+(`[directories] allow_paths`); `NISSE_ALLOW_DIR_CREATION=1` grants
+blanket consent (CI, tests, or explicit local intent).
+
 
 ======================================================================
 11. CONFIGURATION PRECEDENCE
@@ -1419,6 +1427,8 @@ Generated worktree-specific state:
 
     $GIT_DIR/nisse/
 
+(created only with directory-creation consent; see section 10)
+
 
 Do not assume `.git` is a directory.
 
@@ -1624,6 +1634,11 @@ Worktree tables include:
 SQLite is regenerable local state.
 
 It is not authoritative shared memory.
+
+Its directories are created only with directory-creation consent
+(see section 10); consent-deferred durable observations live in an
+append-only sidecar next to the shared database, outside the
+wipe-on-corruption cache.
 
 
 ======================================================================
@@ -2107,6 +2122,11 @@ Existing contributor IDs and Git identity may be hints.
 Noninteractive operation never waits for identity input.
 
 Learning remains pending locally when identity is unavailable.
+
+Saving the identity creates the user config directory and therefore
+requires directory-creation consent (see section 10); a noninteractive
+save without consent is skipped (unsaved for this run), never a
+blocking prompt.
 
 
 ======================================================================

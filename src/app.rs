@@ -769,7 +769,21 @@ impl App {
             .map(|common_dir| config::paths::repo_config_path(common_dir));
         let loaded = config::load_config(user_path.as_deref(), repo_path.as_deref());
         let resolver = SystemResolver;
-        let report = config::doctor::run_doctor(git, loaded, &resolver);
+        // Repository-derived directory locations for the `directories`
+        // check (consent prompts fire only in interactive runs).
+        let dirs = if git.in_repository {
+            crate::git::RepoContext::discover(&crate::git::GitRunner::new(), &cwd)
+                .ok()
+                .map(|ctx| config::doctor::DoctorDirs {
+                    worktree_root: Some(ctx.worktree_root.clone()),
+                    git_dir: Some(ctx.git_dir.clone()),
+                    git_common_dir: Some(ctx.git_common_dir.clone()),
+                })
+        } else {
+            None
+        }
+        .unwrap_or_default();
+        let report = config::doctor::run_doctor(git, loaded, &resolver, &dirs);
         print_to_stdout(&report.render());
 
         if report.has_failures() {

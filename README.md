@@ -161,6 +161,31 @@ exist); `fast` and `strongest` are optional. Each profile names a model,
 an endpoint, and an optional thinking level. `nisse doctor` reports the
 configured profiles.
 
+### Directory-creation consent
+
+Nisse never creates a persistent directory (the Git-tracked
+`.nisse/**` record tree, the `$GIT_DIR/nisse/` and
+`$GIT_COMMON_DIR/nisse/` caches, or `$HOME/.nisse` itself) without
+your explicit consent:
+
+- the first time a directory would be created, interactive runs ask
+  `Allow? [y]es / [a]lways / [n]o` (prompts go to stderr; `always`
+  remembers the canonical path in `[directories] allow_paths`);
+- noninteractive runs (subprocess callers, CI) fail closed with a
+  typed error naming the path — except feedback outcomes, which defer
+  to a local sidecar (`deferred-observations.jsonl` next to the shared
+  cache) and flush once consent is granted (`nisse records pending`
+  lists them);
+- `NISSE_ALLOW_DIR_CREATION=1` grants blanket consent (tests, CI, or
+  restoring the pre-consent behavior) — the repo's `.cargo/config.toml`
+  sets it for `cargo test`/`cargo run` in this checkout only;
+- run `nisse doctor` in a terminal to review and grant consent for
+  every directory Nisse would use in the current repository.
+
+Read-only commands (`nisse records pending`, `nisse records list`)
+never demand directory creation: with no pending store they simply
+report an empty listing.
+
 ### Local/LAN trust model
 
 By default Nisse trusts only model/provider endpoints that are — or

@@ -81,10 +81,24 @@ const CLASSIFIER_LABEL: &str = "classifier";
 const EMBEDDINGS_LABEL: &str = "embeddings";
 
 /// Run all doctor checks and produce the report.
+/// Repository-derived persistent-directory locations for the
+/// `directories` check (all optional: doctor works outside a
+/// repository too).
+#[derive(Debug, Clone, Default)]
+pub struct DoctorDirs {
+    /// Worktree root (record tree `.nisse/` lives here).
+    pub worktree_root: Option<std::path::PathBuf>,
+    /// `$GIT_DIR` (worktree cache directory lives here).
+    pub git_dir: Option<std::path::PathBuf>,
+    /// `$GIT_COMMON_DIR` (shared cache directory lives here).
+    pub git_common_dir: Option<std::path::PathBuf>,
+}
+
 pub fn run_doctor(
     git: GitProbe,
     loaded: Result<LoadedConfig, ConfigError>,
     resolver: &dyn HostResolver,
+    dirs: &DoctorDirs,
 ) -> DoctorReport {
     let mut checks = Vec::new();
     checks.push(git_check(&git));
@@ -117,8 +131,111 @@ pub fn run_doctor(
         loaded.config.network.allow_non_private_endpoints,
     ));
     checks.push(classifier_check(&loaded.config, &outcomes));
+    checks.push(directories_check(dirs));
 
     DoctorReport { checks }
+}
+
+/// Report (and, interactively, prompt for) every persistent directory
+/// Nisse may create for this environment: the `.nisse/**` record tree,
+/// both cache directories, and the user config directory. Existing
+/// directories are never re-asked; missing ones are consent-checked
+/// (interactive doctor runs prompt `[y]es / [a]lways / [n]o` here, and
+/// `always` persists the canonical path). Also reports the user-config
+/// load/save paths and any pending legacy migration or conflict.
+fn directories_check(dirs: &DoctorDirs) -> DoctorCheck {
+    use crate::config::consent::{Consent, blanket_consent, require_creation_consent};
+    use crate::config::paths::{legacy_user_config_path, user_config_path, user_config_paths};
+
+    let mut lines = Vec::new();
+    let mut warn = false;
+
+    // Candidate creation paths, deduplicated, stable order.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(root) = &dirs.worktree_root {
+        candidates.push(root.join(".nisse"));
+    }
+    if let Some(git_dir) = &dirs.git_dir {
+        candidates.push(git_dir.join("nisse"));
+    }
+    if let Some(common) = &dirs.git_common_dir {
+        let shared = common.join("nisse");
+        if !candidates.contains(&shared) {
+            candidates.push(shared);
+        }
+    }
+    if let Some(config) = user_config_path()
+        && let Some(dir) = config.parent()
+    {
+        candidates.push(dir.to_path_buf());
+    }
+
+    if blanket_consent() {
+        lines.push(
+            "blanket consent: NISSE_ALLOW_DIR_CREATION=1 (every directory may be created)"
+                .to_string(),
+        );
+    }
+    for path in candidates {
+        if path.exists() {
+            lines.push(format!("exists: {}", path.display()));
+            continue;
+        }
+        match require_creation_consent(&path) {
+            Consent::Allowed => {
+                lines.push(format!("consented: {}", path.display()));
+            }
+            Consent::Refused { path } => {
+                warn = true;
+                lines.push(format!(
+                    "missing (not consented): {} — {}",
+                    path.display(),
+                    crate::config::consent::REMEDY
+                ));
+            }
+        }
+    }
+
+    // User-config locations and legacy migration state.
+    let pair = user_config_paths();
+    lines.push(format!(
+        "user config (load): {}",
+        pair.load
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "(unresolvable)".to_string())
+    ));
+    lines.push(format!(
+        "user config (save): {}",
+        pair.save
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "(unresolvable)".to_string())
+    ));
+    if let Some(legacy) = legacy_user_config_path().filter(|path| path.exists()) {
+        warn = true;
+        if pair.load.as_ref() == Some(&legacy) {
+            lines.push(format!(
+                "legacy config effective; migration pending: {}",
+                legacy.display()
+            ));
+        } else {
+            lines.push(format!(
+                "legacy config still present (the dotfile wins): {}",
+                legacy.display()
+            ));
+        }
+    }
+
+    DoctorCheck {
+        name: "directories",
+        status: if warn {
+            CheckStatus::Warn
+        } else {
+            CheckStatus::Pass
+        },
+        lines,
+    }
 }
 
 fn git_check(git: &GitProbe) -> DoctorCheck {
@@ -363,7 +480,12 @@ mod tests {
     #[test]
     fn healthy_environment_passes() {
         let resolver = FakeResolver::default();
-        let report = run_doctor(healthy_git(), Ok(healthy_loaded()), &resolver);
+        let report = run_doctor(
+            healthy_git(),
+            Ok(healthy_loaded()),
+            &resolver,
+            &DoctorDirs::default(),
+        );
         assert!(!report.has_failures());
         let text = report.render();
         assert!(text.starts_with("nisse doctor\n"));
@@ -385,7 +507,7 @@ mod tests {
         let mut loaded = healthy_loaded();
         loaded.config.model_profiles.remove("strong");
         let resolver = FakeResolver::default();
-        let report = run_doctor(healthy_git(), Ok(loaded), &resolver);
+        let report = run_doctor(healthy_git(), Ok(loaded), &resolver, &DoctorDirs::default());
         assert!(report.has_failures());
         let text = report.render();
         assert!(text.contains("model profiles: FAIL"));
@@ -404,7 +526,7 @@ mod tests {
             },
         );
         let resolver = FakeResolver::default();
-        let report = run_doctor(healthy_git(), Ok(loaded), &resolver);
+        let report = run_doctor(healthy_git(), Ok(loaded), &resolver, &DoctorDirs::default());
         assert!(report.has_failures());
         let text = report.render();
         assert!(text.contains("endpoint trust: FAIL"));
@@ -426,7 +548,7 @@ mod tests {
             ips: vec![IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))],
             fail: false,
         };
-        let report = run_doctor(healthy_git(), Ok(loaded), &resolver);
+        let report = run_doctor(healthy_git(), Ok(loaded), &resolver, &DoctorDirs::default());
         assert!(!report.has_failures());
         let text = report.render();
         assert!(text.contains("resolved to permitted addresses"));
@@ -447,7 +569,7 @@ mod tests {
             ips: vec![],
             fail: true,
         };
-        let report = run_doctor(healthy_git(), Ok(loaded), &resolver);
+        let report = run_doctor(healthy_git(), Ok(loaded), &resolver, &DoctorDirs::default());
         assert!(report.has_failures());
         assert!(report.render().contains("endpoint trust: FAIL"));
     }
@@ -460,7 +582,7 @@ mod tests {
         let err = super::super::load_config(Some(&path), None).unwrap_err();
 
         let resolver = FakeResolver::default();
-        let report = run_doctor(healthy_git(), Err(err), &resolver);
+        let report = run_doctor(healthy_git(), Err(err), &resolver, &DoctorDirs::default());
         assert!(report.has_failures());
         let text = report.render();
         assert!(text.contains("config: FAIL"));
@@ -478,7 +600,7 @@ mod tests {
             git_common_dir: None,
         };
         let resolver = FakeResolver::default();
-        let report = run_doctor(git, Ok(healthy_loaded()), &resolver);
+        let report = run_doctor(git, Ok(healthy_loaded()), &resolver, &DoctorDirs::default());
         assert!(report.has_failures());
         assert!(report.render().contains("git: FAIL"));
     }
@@ -489,7 +611,7 @@ mod tests {
         loaded.config.classifier.provider = Provider::Needle;
         loaded.config.classifier.endpoint = Some("http://127.0.0.1:8787".to_string());
         let resolver = FakeResolver::default();
-        let report = run_doctor(healthy_git(), Ok(loaded), &resolver);
+        let report = run_doctor(healthy_git(), Ok(loaded), &resolver, &DoctorDirs::default());
         assert!(!report.has_failures());
         let text = report.render();
         assert!(text.contains("classifier: ok"));
