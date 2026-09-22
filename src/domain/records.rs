@@ -818,6 +818,7 @@ pub(crate) mod testutil {
             content_key: Some("git:0123456789abcdef0123456789abcdef01234567".to_string()),
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "self.head = (self.head + 1) % len;".to_string(),
         }
     }

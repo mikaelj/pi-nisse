@@ -142,6 +142,7 @@ fn create_fact(repo: &Repo, text: &str) -> FactRecord {
         content_key: None,
         plan_section: None,
         record_id: None,
+        input_part: None,
         excerpt: "queue.slots[0] = item;".to_string(),
     }];
     let stamped = {

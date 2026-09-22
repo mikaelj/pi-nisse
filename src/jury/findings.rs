@@ -36,6 +36,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::domain::evidence::{EvidenceKind, EvidenceRef};
 use crate::domain::finding::{ReviewerFinding, SynthesisDiagnostic, SynthesisStage};
+use crate::domain::investigation::MIN_INPUT_SPAN_EXCERPT_CHARS;
 use crate::domain::report::ReviewerReport;
 use crate::domain::review::{ImpactClass, Severity};
 use crate::git::{ObjectFormat, SnapshotFile, SnapshotReader};
@@ -370,6 +371,24 @@ pub(crate) fn validate_evidence(
                 ));
             }
             validate_range_shape(evidence)
+        }
+        EvidenceKind::Investigation => {
+            // Input-span evidence: the excerpt must be bounded non-empty
+            // text tagged to the task or the result. Deeper span matching
+            // against the resolved inputs happens in the investigation
+            // pipeline (which owns the inputs).
+            if evidence.excerpt.trim().is_empty() {
+                return Err("investigation evidence requires an excerpt".to_string());
+            }
+            if evidence.input_part.is_none() {
+                return Err("investigation evidence requires `input_part`".to_string());
+            }
+            if evidence.excerpt.chars().count() < MIN_INPUT_SPAN_EXCERPT_CHARS {
+                return Err(format!(
+                    "investigation evidence excerpt is shorter than {MIN_INPUT_SPAN_EXCERPT_CHARS} characters"
+                ));
+            }
+            Ok(())
         }
         EvidenceKind::Plan => {
             if let Some(section) = &evidence.plan_section
@@ -764,6 +783,7 @@ mod tests {
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: excerpt.to_string(),
         }
     }

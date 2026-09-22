@@ -133,6 +133,7 @@ mod tests {
                 content_key: None,
                 plan_section: None,
                 record_id: None,
+                input_part: None,
                 excerpt: "if self.head > self.tail {".to_string(),
             }],
         }

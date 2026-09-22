@@ -18,6 +18,9 @@ pub enum EvidenceKind {
     Plan,
     /// A durable project record.
     ProjectFact,
+    /// Investigation task/result input text (investigation reviews
+    /// only; PLAN_INVESTIGATION.md).
+    Investigation,
 }
 
 /// A reference to concrete evidence backing a finding.
@@ -39,6 +42,10 @@ pub struct EvidenceRef {
     pub plan_section: Option<String>,
     /// Optional durable record ID (project-fact evidence).
     pub record_id: Option<String>,
+    /// Which investigation input this refers to (investigation
+    /// evidence only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_part: Option<super::investigation::TaskOrResult>,
     /// Short excerpt of the referenced content.
     pub excerpt: String,
 }
@@ -57,6 +64,7 @@ mod tests {
             content_key: Some("git:0123456789abcdef0123456789abcdef01234567".to_string()),
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "self.head = (self.head + 1) % len;".to_string(),
         }
     }
@@ -103,6 +111,7 @@ mod tests {
             content_key: None,
             plan_section: Some("risk".to_string()),
             record_id: None,
+            input_part: None,
             excerpt: "Roll out behind a flag.".to_string(),
         };
         let json = serde_json::to_string(&evidence).unwrap();

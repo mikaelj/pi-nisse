@@ -286,6 +286,7 @@ fn fact_about(path: &str, excerpt: &str) -> ProjectRecord {
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: excerpt.to_string(),
         }],
         source_review_id: None,

@@ -367,6 +367,7 @@ pub fn refresh_evidence(
             content_key: Some(provenance_key(&file.bytes, format)),
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt,
         });
     }
@@ -666,6 +667,7 @@ mod tests {
             content_key: key,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: excerpt.to_string(),
         }
     }

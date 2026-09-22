@@ -56,6 +56,7 @@ fn finding(id: &str, claim: &str) -> ReviewerFinding {
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "fn a() {}".to_string(),
         }],
     }

@@ -97,6 +97,23 @@ pub enum ReviewCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Review investigation results (PLAN_INVESTIGATION.md). Each input
+    /// accepts literal text, an explicit `@file` reference, or a bare
+    /// value naming an existing file.
+    Investigation {
+        /// What was supposed to be investigated (task).
+        #[arg(long)]
+        task: String,
+
+        /// The investigation output to review (result).
+        #[arg(long)]
+        result: String,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Plan input source: exactly one of `--file <path>` or `--stdin`.
@@ -235,6 +252,52 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_review_investigation() {
+        let cli = Cli::try_parse_from([
+            "nisse",
+            "review",
+            "investigation",
+            "--task",
+            "@task.md",
+            "--result",
+            "the findings",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Review {
+                review: ReviewCommand::Investigation { task, result, json },
+            } => {
+                assert_eq!(task, "@task.md");
+                assert_eq!(result, "the findings");
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_investigation_requires_both_inputs() {
+        assert!(Cli::try_parse_from(["nisse", "review", "investigation"]).is_err());
+        assert!(Cli::try_parse_from(["nisse", "review", "investigation", "--task", "t"]).is_err());
+        assert!(
+            Cli::try_parse_from(["nisse", "review", "investigation", "--result", "r"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nisse",
+                "review",
+                "investigation",
+                "--task",
+                "t",
+                "--result",
+                "r",
+                "--json"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
@@ -469,7 +532,9 @@ mod tests {
             .collect();
         review_names.sort();
         // `review plan` reviews a plan document; it is not a Plan mode.
-        assert_eq!(review_names, vec!["code", "plan"]);
+        // `review investigation` reviews investigation results
+        // (PLAN_INVESTIGATION.md; §61 amendment).
+        assert_eq!(review_names, vec!["code", "investigation", "plan"]);
 
         for forbidden in ["plan-mode", "build", "task", "mode"] {
             assert!(

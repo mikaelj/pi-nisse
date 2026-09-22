@@ -693,6 +693,7 @@ fn verification_payload(verification_id: &str, claim: &str) -> FactVerificationP
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "pub struct Queue { slots: [u8; 32] }".to_string(),
         }],
     }

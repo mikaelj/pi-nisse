@@ -308,6 +308,7 @@ mod tests {
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "static QUEUE: Mutex<Queue>".to_string(),
         }]
     }

@@ -14,6 +14,7 @@ use super::snapshot::SnapshotDescriptor;
 pub enum ReviewKind {
     Plan,
     Code,
+    Investigation,
 }
 
 /// Finding severity.
@@ -104,6 +105,7 @@ mod tests {
             content_key: Some("git:0123456789abcdef0123456789abcdef01234567".to_string()),
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "fn main() {".to_string(),
         }
     }

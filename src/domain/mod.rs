@@ -8,6 +8,7 @@ pub mod evidence;
 pub mod facts;
 pub mod finding;
 pub mod ids;
+pub mod investigation;
 pub mod jury;
 pub mod model;
 pub mod practice;

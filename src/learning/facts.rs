@@ -956,6 +956,7 @@ mod tests {
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: excerpt.to_string(),
         }
     }
@@ -1209,6 +1210,7 @@ mod tests {
                 content_key: None,
                 plan_section: Some("Approach".to_string()),
                 record_id: None,
+                input_part: None,
                 excerpt: "Move the queue behind a mutex.".to_string(),
             }],
         );

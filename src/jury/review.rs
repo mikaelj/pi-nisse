@@ -1825,6 +1825,7 @@ fn kind_label(kind: ReviewKind) -> &'static str {
     match kind {
         ReviewKind::Plan => "plan",
         ReviewKind::Code => "code",
+        ReviewKind::Investigation => "investigation",
     }
 }
 
@@ -1990,6 +1991,7 @@ mod tests {
                     content_key: None,
                     plan_section: Some("Concurrency".to_string()),
                     record_id: None,
+                    input_part: None,
                     excerpt: "The ISR enqueues directly.".to_string(),
                 }],
                 source_finding_ids: vec!["quality/f-1".to_string()],

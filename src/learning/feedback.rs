@@ -982,6 +982,7 @@ mod tests {
             content_key: None,
             plan_section: None,
             record_id: None,
+            input_part: None,
             excerpt: "content".to_string(),
         }
     }

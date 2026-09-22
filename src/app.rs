@@ -62,6 +62,9 @@ impl App {
                 crate::cli::ReviewCommand::Code { scope, json } => {
                     self.run_review_code(scope, json)
                 }
+                crate::cli::ReviewCommand::Investigation { task, result, json } => {
+                    self.run_review_investigation(task, result, json)
+                }
             },
             Command::Query { query, json } => self.run_query(query, json),
             Command::Feedback {
@@ -420,6 +423,23 @@ impl App {
         };
         print_to_stdout(&crate::learning::facts::render_pending(&rows));
         Ok(())
+    }
+
+    /// Run `nisse review investigation` (PLAN_INVESTIGATION.md).
+    ///
+    /// The full operation lands with the pipeline milestone; until then
+    /// the frozen surface parses and fails with the typed not-implemented
+    /// error.
+    fn run_review_investigation(
+        &self,
+        task: String,
+        result: String,
+        _json: bool,
+    ) -> Result<(), AppError> {
+        let _ = (task, result);
+        Err(AppError::NotImplemented(
+            "nisse review investigation".to_string(),
+        ))
     }
 
     /// Run `nisse feedback` (plan sections 49 and 50).

@@ -379,7 +379,7 @@ fn frozen_cli_surface_has_no_plan_or_build_mode() {
     assert!(out.status.success(), "{stdout}");
     assert_eq!(
         help_command_names(&stdout),
-        vec!["code", "plan"],
+        vec!["code", "investigation", "plan"],
         "{stdout}"
     );
 }
