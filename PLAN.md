@@ -310,10 +310,11 @@ If implementation appears to require violating a frozen contract:
 
 Nisse is a local software-review engine.
 
-Nisse Core has four primary operations:
+Nisse Core has five primary operations:
 
     review_plan
     review_code
+    review_investigation
     query_project
     record_feedback
 
@@ -331,6 +332,22 @@ Those are coding-agent workflow concepts, not Nisse Core concepts.
 `review_code` means:
 
     review code changes produced by another agent or human
+
+`review_investigation` means:
+
+    review investigation results produced by another agent or human
+    (see PLAN_INVESTIGATION.md)
+
+They answer:
+
+    review_plan
+        Is this a sound plan?
+
+    review_code
+        Is this implementation sound?
+
+    review_investigation
+        Do these investigation results actually hold up?
 
 Nisse itself does not implement the reviewed work.
 
@@ -1010,6 +1027,13 @@ Define and retain:
 
     ModelProfile
 
+    InputValue
+    InvestigationResult
+    ClaimAssessment
+    CoverageGap
+    InvestigationVerdict
+    ConfidenceTier
+
 
 ======================================================================
 14. REVIEW KINDS
@@ -1019,6 +1043,7 @@ ReviewKind:
 
     Plan
     Code
+    Investigation
 
 
 Severity:
@@ -1130,6 +1155,8 @@ Built-in reviewer IDs:
     error-handling
     maintainability
     dynamic-domain-expert
+    claim-skeptic
+    coverage-auditor
 
 
 `quality` always participates.
@@ -1196,6 +1223,19 @@ Composition:
 The synthesizer is not a juror.
 
 `quality` is added deterministically.
+
+Investigation reviews use the fixed composition:
+
+    quality
+    +
+    claim-skeptic
+    +
+    coverage-auditor
+    +
+    one routing-selected domain reviewer
+
+(claim review and coverage review are separate review tasks in separate
+isolated sessions; see PLAN_INVESTIGATION.md INDEPENDENCE).
 
 
 ======================================================================
@@ -1317,7 +1357,8 @@ Rust -> host:
 
 Host -> Rust:
 
-    host_ready
+    host_ready (plus investigation start/completion messages per
+    PLAN_INVESTIGATION.md)
     reviewer_started
     reviewer_completed
     reviewer_failed
@@ -2627,6 +2668,9 @@ Required:
     nisse review code --branch <base-ref>
     nisse review code ... --json
 
+    nisse review investigation --task <value> --result <value>
+    nisse review investigation ... --json
+
     nisse query "<query>"
     nisse query "<query>" --json
 
@@ -2660,6 +2704,7 @@ Register Main Pi tools:
 
     nisse_review_plan
     nisse_review_code
+    nisse_review_investigation
     nisse_query_project
     nisse_feedback
 
@@ -2816,6 +2861,7 @@ Tools:
 
     review_plan
     review_code
+    review_investigation
     query_project
     record_feedback
 
@@ -2985,6 +3031,13 @@ Do not implement it before 1.0.
 
 29. Main Pi does not proceed through unresolved blocker/high findings after a
     loop limit without user direction.
+
+30. Investigation review separates claim review from coverage review in
+    isolated sessions and never inherits the investigator's claimed
+    confidence.
+
+31. Coverage gaps indicate investigation incompleteness, never newly
+    proven findings.
 
 
 ======================================================================
