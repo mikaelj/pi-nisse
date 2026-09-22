@@ -21,7 +21,12 @@ fn main() -> ExitCode {
     // stdin is a terminal (user-requested plan change; plan section 10
     // amendments). Subprocess callers stay noninteractive and fail
     // closed or defer instead of blocking.
-    nisse::config::consent::set_interactive(std::io::IsTerminal::is_terminal(&std::io::stdin()));
+    // `NISSE_INTERACTIVE_CONSENT=1` forces the interactive consent
+    // path for scripted/pty-less runs (tests, automation); it grants no
+    // consent by itself — prompts still require real answers.
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        || std::env::var("NISSE_INTERACTIVE_CONSENT").is_ok_and(|value| value == "1");
+    nisse::config::consent::set_interactive(interactive);
     nisse::config::consent::load_policy_from_user_config();
 
     let app = App::new();

@@ -362,9 +362,24 @@ pub fn remember(path: &Path) -> std::io::Result<()> {
 /// section ends); on contention the read-modify-write is retried once
 /// so a racing writer's keys survive.
 pub fn update_user_config(config: &Path, path: &Path) -> std::io::Result<()> {
-    let lock = ConfigLock::acquire(config)?;
+    // The config directory is ensured (and possibly prompted for)
+    // BEFORE the lock is taken: prompting may recursively persist
+    // consent through `remember`, and a nested acquire of the lock we
+    // already hold cannot succeed.
+    crate::config::identity::ensure_config_dir_for_consent(config)?;
+    let lock = AdvisoryLock::acquire(&config.with_extension("toml.lock"))?;
     let result = update_user_config_locked(config, path);
     lock.release();
+    if result.is_ok()
+        && let Some(canonical) = canonical_path(path)
+    {
+        // Refresh the in-memory policy so subsequent checks in this
+        // process see the just-persisted consent without a reload.
+        let mut policy = POLICY.write().expect("consent policy lock poisoned");
+        if !policy.allow_paths.contains(&canonical) {
+            policy.allow_paths.push(canonical);
+        }
+    }
     result
 }
 
@@ -405,46 +420,45 @@ fn update_user_config_locked(config: &Path, path: &Path) -> std::io::Result<()> 
     );
     let rendered_table =
         toml::to_string(&table).map_err(|err| std::io::Error::other(err.to_string()))?;
-    crate::config::identity::ensure_config_dir_for_consent(config)?;
     crate::storage::fsutil::atomic_write_replace_private(config, rendered_table.as_bytes())
 }
 
-/// Advisory lock guarding user-config read-modify-writes. Held through
+/// Advisory lock guarding read-modify-write cycles on a shared file
+/// (the user config and the deferred-observation sidecar). Held through
 /// an OS file lock (best-effort: lock failures degrade to proceeding
 /// without mutual exclusion rather than failing the write; the atomic
 /// publish still prevents torn files, with last-writer-wins as the
 /// documented residual).
-struct ConfigLock {
+pub(crate) struct AdvisoryLock {
     file: Option<File>,
 }
 
-impl ConfigLock {
-    fn acquire(config: &Path) -> std::io::Result<Self> {
-        let lock_path = config.with_extension("toml.lock");
+impl AdvisoryLock {
+    pub(crate) fn acquire(lock_path: &Path) -> std::io::Result<Self> {
         let file = File::options()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(&lock_path)?;
+            .open(lock_path)?;
         // Bounded wait for a concurrent holder.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(ConfigLock { file: Some(file) }),
+                Ok(()) => return Ok(AdvisoryLock { file: Some(file) }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         // Contended for too long: proceed without the
                         // lock (documented best-effort semantics).
-                        return Ok(ConfigLock { file: None });
+                        return Ok(AdvisoryLock { file: None });
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(_) => return Ok(ConfigLock { file: None }),
+                Err(_) => return Ok(AdvisoryLock { file: None }),
             }
         }
     }
 
-    fn release(self) {
+    pub(crate) fn release(self) {
         if let Some(file) = self.file {
             let _ = file.unlock();
         }
@@ -494,8 +508,13 @@ mod tests {
         // here the ancestor exists, so the result simply points there —
         // the relative-input and true-escape cases are what must fail:
         assert!(canonical_path(Path::new("relative/path")).is_none());
-        let _ = escape;
         let _ = base_parent;
+
+        // A tail that pops past the canonicalized root is rejected.
+        // "/nonexistent/../.." walks to "/" as the deepest existing
+        // ancestor; resolving the tail then escapes the root.
+        assert!(canonical_path(Path::new("/nonexistent/../../x")).is_none());
+        let _ = escape;
     }
 
     #[test]

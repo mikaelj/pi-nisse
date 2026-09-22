@@ -92,6 +92,48 @@ pub(crate) fn write_user_config(home: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// Run the built `nisse` binary like [`run_nisse_in_with_env`] but
+/// feeding `input` bytes to the child's stdin (for scripted interactive
+/// flows; combine with `NISSE_INTERACTIVE_CONSENT=1`).
+pub(crate) fn run_nisse_with_stdin(
+    cwd: &Path,
+    args: &[&str],
+    home: &Path,
+    extra_env: &[(&str, &str)],
+    input: &[u8],
+) -> Output {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nisse"));
+    command.args(args).current_dir(cwd);
+    command
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join("xdg"))
+        .env("APPDATA", home.join("appdata"))
+        .env("RUST_LOG", "off")
+        .env("NISSE_PI_HOST_RUNTIME", "fake")
+        .env("NISSE_ALLOW_DIR_CREATION", "1");
+    for (key, value) in extra_env {
+        if *value == "\u{0}remove" {
+            command.env_remove(key);
+        } else {
+            command.env(key, value);
+        }
+    }
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("failed to spawn nisse binary");
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write stdin");
+    child.wait_with_output().expect("collect nisse output")
+}
+
 /// Write a config at the LEGACY platform-native path (the pre-dotfile
 /// location, still read as a one-release fallback). All three platform
 /// shapes are written so the test works on every OS.

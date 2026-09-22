@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{run_nisse_in_with_env, write_user_config};
+use super::{run_nisse_in_with_env, run_nisse_with_stdin, write_user_config};
 use tempfile::TempDir;
 
 /// Opt out of the harness's default blanket consent.
@@ -102,6 +102,71 @@ fn fresh_repo_without_consent_fails_closed_and_creates_nothing() {
     // Nothing was created anywhere.
     assert!(!git.join("nisse").exists(), "cache dir must not exist");
     assert!(!repo.join(".nisse").exists(), "record tree must not exist");
+}
+
+#[test]
+fn interactive_always_prompts_persists_and_is_honored_next_run() {
+    let (_dir, repo, home) = init_repo("consent-interactive");
+    let git = git_dir(&repo);
+    let cache_dir = git.join("nisse");
+
+    // Scripted interactive run without any pre-existing consent: the
+    // prompt appears on stderr, "a" persists the canonical path.
+    let out = run_nisse_with_stdin(
+        &repo,
+        &["query", "version"],
+        home.path(),
+        &[
+            ("NISSE_ALLOW_DIR_CREATION", "\u{0}remove"),
+            ("NISSE_INTERACTIVE_CONSENT", "1"),
+        ],
+        b"a\n",
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stderr.contains("Nisse wants to create") && stderr.contains("[y]es / [a]lways / [n]o"),
+        "stderr: {stderr}"
+    );
+    assert!(cache_dir.exists(), "the consented dir should be created");
+
+    // "a" persisted the path into the user config.
+    let config = std::fs::read_to_string(home.path().join(".nisse").join("config.toml")).unwrap();
+    assert!(config.contains("allow_paths"), "{config}");
+    assert!(config.contains("nisse"), "{config}");
+
+    // A later noninteractive run without the env honors the remembered
+    // consent (no blanket, no prompt).
+    let probe_repo_dir = git_dir(&repo); // unchanged
+    let _ = probe_repo_dir;
+    let out = run_nisse_in_with_env(
+        &repo,
+        &["query", "version"],
+        home.path(),
+        &[("NISSE_ALLOW_DIR_CREATION", "\u{0}remove")],
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    // And "no" refuses without creating anything.
+    let (_dir2, repo2, home2) = init_repo("consent-interactive-no");
+    let out = run_nisse_with_stdin(
+        &repo2,
+        &["query", "version"],
+        home2.path(),
+        &[
+            ("NISSE_ALLOW_DIR_CREATION", "\u{0}remove"),
+            ("NISSE_INTERACTIVE_CONSENT", "1"),
+        ],
+        b"n\n",
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!out.status.success(), "refusal must fail closed");
+    assert!(!git_dir(&repo2).join("nisse").exists());
+    assert!(!repo2.join(".nisse").exists());
+    let _ = stderr;
 }
 
 #[test]

@@ -508,6 +508,9 @@ fn deferred_key(observation: &crate::domain::records::ObservationRecord) -> Stri
 /// Defer one observation durably (see [`deferred_observations_path`]).
 /// Idempotent per [`deferred_key`]: a repeated unconsented submission
 /// never appends a second copy.
+/// The sidecar payload format version.
+const DEFERRED_FORMAT_VERSION: u32 = 1;
+
 fn store_deferred_observation(
     paths: &StoragePaths,
     observation: &crate::domain::records::ObservationRecord,
@@ -515,34 +518,46 @@ fn store_deferred_observation(
 ) -> Result<(), FeedbackError> {
     let sidecar = deferred_observations_path(paths);
     let key = deferred_key(observation);
-    let existing = std::fs::read_to_string(&sidecar).unwrap_or_default();
-    for line in existing.lines().filter(|line| !line.trim().is_empty()) {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
-            && parsed
-                .get("observation")
-                .cloned()
-                .and_then(|value| {
-                    serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
-                })
-                .is_some_and(|obs| deferred_key(&obs) == key)
-        {
-            return Ok(()); // already deferred
+    let lock = crate::config::consent::AdvisoryLock::acquire(&sidecar.with_extension("jsonl.lock"))
+        .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+    let result = (|| {
+        let existing = std::fs::read_to_string(&sidecar).unwrap_or_default();
+        for line in existing.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
+                && parsed
+                    .get("observation")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::domain::records::ObservationRecord>(value)
+                            .ok()
+                    })
+                    .is_some_and(|obs| deferred_key(&obs) == key)
+            {
+                return Ok(()); // already deferred
+            }
         }
-    }
-    let payload = serde_json::json!({
-        "observation": observation,
-        "reason": reason,
-    });
-    let line =
-        serde_json::to_string(&payload).map_err(|error| FeedbackError::Cache(error.to_string()))?;
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&sidecar)
-        .map_err(|error| FeedbackError::Cache(format!("{}: {error}", sidecar.display())))?;
-    writeln!(file, "{line}").map_err(|error| FeedbackError::Cache(error.to_string()))?;
-    Ok(())
+        let payload = serde_json::json!({
+            "v": DEFERRED_FORMAT_VERSION,
+            "observation": observation,
+            "reason": reason,
+        });
+        let line = serde_json::to_string(&payload)
+            .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&sidecar)
+            .map_err(|error| FeedbackError::Cache(format!("{}: {error}", sidecar.display())))?;
+        writeln!(file, "{line}").map_err(|error| FeedbackError::Cache(error.to_string()))?;
+        // The deferral is the only copy of the outcome while consent is
+        // refused: fsync before claiming it is retained.
+        file.sync_data()
+            .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+        Ok(())
+    })();
+    lock.release();
+    result
 }
 
 /// Flush consent-deferred observations into the durable record store.
@@ -554,6 +569,11 @@ fn store_deferred_observation(
 /// the durable create leave the row in place for a later run.
 pub fn flush_deferred_observations(store: &RecordStore, paths: &StoragePaths) -> usize {
     let sidecar = deferred_observations_path(paths);
+    let Ok(_guard) =
+        crate::config::consent::AdvisoryLock::acquire(&sidecar.with_extension("jsonl.lock"))
+    else {
+        return 0;
+    };
     let Ok(text) = std::fs::read_to_string(&sidecar) else {
         return 0;
     };
@@ -571,21 +591,24 @@ pub fn flush_deferred_observations(store: &RecordStore, paths: &StoragePaths) ->
         .unwrap_or_default();
     let mut flushed = 0;
     let mut remaining = String::new();
-    for (index, line) in text.lines().enumerate() {
+    for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
         let observation = serde_json::from_str::<serde_json::Value>(line)
             .ok()
+            .filter(|parsed| {
+                parsed.get("v").and_then(serde_json::Value::as_u64)
+                    == Some(DEFERRED_FORMAT_VERSION as u64)
+            })
             .and_then(|parsed| parsed.get("observation").cloned())
             .and_then(|value| {
                 serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
             });
         let Some(observation) = observation else {
-            tracing::warn!(
-                line = index,
-                "dropping unparseable deferred-observation line"
-            );
+            // Unparseable or foreign-version lines are quarantined
+            // (kept for inspection), never silently destroyed.
+            quarantine_deferred_line(&sidecar, line);
             continue;
         };
         if recorded.contains(&deferred_key(&observation)) {
@@ -601,8 +624,29 @@ pub fn flush_deferred_observations(store: &RecordStore, paths: &StoragePaths) ->
             remaining.push('\n');
         }
     }
-    let _ = std::fs::write(&sidecar, remaining);
+    // Publish atomically, and only when something actually changed: the
+    // sidecar is the only copy of the remaining outcomes, so it must
+    // never appear partially written (and an unchanged rewrite under a
+    // still-refused consent would churn the file on every submission).
+    if remaining != text {
+        let _ = crate::storage::fsutil::atomic_write_replace(&sidecar, remaining.as_bytes());
+    }
     flushed
+}
+
+/// Append one unusable sidecar line to the quarantine file next to the
+/// sidecar instead of destroying it.
+fn quarantine_deferred_line(sidecar: &std::path::Path, line: &str) {
+    tracing::warn!("quarantining unparseable deferred-observation line");
+    let quarantine = sidecar.with_extension("corrupt.jsonl");
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(quarantine)
+    {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 /// Retain one feedback outcome in the local `pending_learning` cache.
@@ -675,6 +719,98 @@ pub fn render_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sidecar helpers need no repository: StoragePaths over a tempdir.
+    fn sidecar_paths(dir: &std::path::Path) -> StoragePaths {
+        let nisse = dir.join("nisse");
+        std::fs::create_dir_all(&nisse).unwrap();
+        StoragePaths {
+            shared: nisse.join("cache.sqlite"),
+            worktree: nisse.join("worktree.sqlite"),
+        }
+    }
+
+    fn sample_observation(_id_seed: &str) -> crate::domain::records::ObservationRecord {
+        crate::domain::records::ObservationRecord {
+            schema_version: SCHEMA_VERSION,
+            id: new_ulid(),
+            author: "alice".to_string(),
+            created_at: now_utc_rfc3339(),
+            observation_type: crate::domain::records::ObservationType::ReviewOutcome,
+            review_id: new_ulid(),
+            finding_id: new_ulid(),
+            reviewer_id: "quality".to_string(),
+            outcome: FeedbackOutcome::Fixed,
+            impact_class: crate::domain::review::ImpactClass::Correctness,
+            category: "test".to_string(),
+            languages: vec![],
+            tags: vec![],
+            paths: vec![],
+            snapshot: crate::domain::snapshot::SnapshotDescriptor {
+                mode: crate::domain::snapshot::SnapshotMode::Working,
+                base_commit: None,
+                base_tree: None,
+                head_commit: None,
+                head_tree: None,
+            },
+        }
+    }
+
+    #[test]
+    fn deferred_sidecar_is_idempotent_quarantines_and_retains() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = sidecar_paths(dir.path());
+
+        // Repeated deferrals of the same key append exactly one line.
+        let observation = sample_observation("1");
+        store_deferred_observation(&paths, &observation, "reason a").unwrap();
+        store_deferred_observation(&paths, &observation, "reason b").unwrap();
+        let sidecar = deferred_observations_path(&paths);
+        let text = std::fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+
+        // A corrupt line plus a valid one: flush quarantines the corrupt
+        // line, records the valid one, and keeps nothing stale.
+        let valid = sample_observation("2");
+        store_deferred_observation(&paths, &valid, "reason c").unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&sidecar)
+                .unwrap();
+            writeln!(file, "{{not json").unwrap();
+        }
+        let store = RecordStore::new(dir.path());
+        let flushed = flush_deferred_observations(&store, &paths);
+        assert!(flushed >= 1);
+        let remaining = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(!remaining.contains("find-1"), "{remaining}");
+        assert!(!remaining.contains("find-2"), "{remaining}");
+        let quarantine = dir
+            .path()
+            .join("nisse")
+            .join("deferred-observations.corrupt.jsonl");
+        assert!(
+            std::fs::read_to_string(&quarantine)
+                .unwrap()
+                .contains("{not json"),
+            "corrupt line must be quarantined, not destroyed"
+        );
+
+        // The records exist durably (both deferred keys).
+        let records = store.load().unwrap();
+        let keys: Vec<String> = records
+            .iter()
+            .filter_map(|stored| match &stored.record {
+                ProjectRecord::Observation(observation) => Some(deferred_key(observation)),
+                _ => None,
+            })
+            .collect();
+        assert!(keys.contains(&deferred_key(&observation)), "{keys:?}");
+        assert!(keys.contains(&deferred_key(&valid)), "{keys:?}");
+    }
+
     use crate::domain::evidence::{EvidenceKind, EvidenceRef};
     use crate::domain::ids::is_valid_ulid;
     use crate::domain::review::ImpactClass;

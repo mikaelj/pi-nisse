@@ -628,4 +628,31 @@ mod tests {
         assert_eq!(params.finding_id, "f1");
         assert_eq!(params.outcome, FeedbackOutcomeParam::Fixed);
     }
+
+    #[test]
+    fn deferred_consent_report_serializes_status_and_count() {
+        let report = FeedbackReport::new(
+            "rev-1".to_string(),
+            "find-1".to_string(),
+            FeedbackOutcome::Fixed,
+            &crate::learning::feedback::FeedbackRecording::DeferredConsent { count: 2 },
+        );
+        assert_eq!(report.status, "deferred-directory-consent");
+        assert_eq!(report.deferred, 2);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["status"], "deferred-directory-consent");
+        assert_eq!(json["deferred"], 2);
+    }
+
+    #[test]
+    fn recorded_report_omits_the_zero_deferred_field() {
+        let report = FeedbackReport::new(
+            "rev-1".to_string(),
+            "find-1".to_string(),
+            FeedbackOutcome::Fixed,
+            &crate::learning::feedback::FeedbackRecording::AlreadyRecorded(FeedbackOutcome::Fixed),
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("deferred").is_none(), "{json}");
+    }
 }
