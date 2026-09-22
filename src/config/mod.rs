@@ -564,7 +564,23 @@ impl PartialConfig {
         if let Some(directories) = self.directories
             && let Some(allow_paths) = directories.allow_paths
         {
-            config.directories.allow_paths = allow_paths.into_iter().map(PathBuf::from).collect();
+            // Relative entries can never match an absolute internal
+            // target and are dropped at load with a warning (they do
+            // not abort configuration loading).
+            config.directories.allow_paths = allow_paths
+                .into_iter()
+                .map(PathBuf::from)
+                .filter(|path| {
+                    let usable = path.is_absolute();
+                    if !usable {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "ignoring relative `[directories] allow_paths` entry"
+                        );
+                    }
+                    usable
+                })
+                .collect();
         }
         if let Some(contributor) = self.contributor
             && let Some(id) = contributor.id
@@ -613,6 +629,35 @@ mod tests {
         assert_eq!(
             missing_required_profiles(&config),
             vec!["standard", "strong"]
+        );
+    }
+
+    #[test]
+    fn repository_layer_cannot_grant_directory_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_config = dir.path().join("repo-config.toml");
+        std::fs::write(&repo_config, "[directories]\nallow_paths = [\"/\"]\n").unwrap();
+        let err = load_config(None, Some(&repo_config)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("the repository layer cannot grant directory-creation consent"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn relative_allow_paths_entries_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_config = dir.path().join("config.toml");
+        std::fs::write(
+            &user_config,
+            "[directories]\nallow_paths = [\"relative/path\", \"/abs/ok\"]\n",
+        )
+        .unwrap();
+        let loaded = load_config(Some(&user_config), None).unwrap();
+        assert_eq!(
+            loaded.config.directories.allow_paths,
+            vec![std::path::PathBuf::from("/abs/ok")]
         );
     }
 

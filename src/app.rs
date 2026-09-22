@@ -410,8 +410,8 @@ impl App {
             // is simply "nothing pending" — never a consent demand for
             // a directory the command does not need in order to report
             // an empty list. load_pending flattens errors to strings, so
-            // the typed marker text is matched.
-            Err(err) if err.contains("directory creation requires consent") => Vec::new(),
+            // the shared marker predicate is used.
+            Err(err) if crate::config::consent::is_consent_error(&err) => Vec::new(),
             Err(err) => {
                 return Err(AppError::Other(anyhow::anyhow!(
                     "records pending failed: {err}"

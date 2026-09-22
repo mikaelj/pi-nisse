@@ -202,7 +202,7 @@ fn feedback_defers_when_record_dir_is_refused_but_caches_exist() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("already recorded") || stdout.contains("recorded observations"));
+    assert!(stdout.contains("already recorded"), "stdout: {stdout}");
     assert!(repo.join(".nisse").join("people").join("alice").exists());
 
     // And nothing is pending anymore.

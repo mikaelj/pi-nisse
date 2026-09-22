@@ -816,8 +816,35 @@ pub fn load_pending(paths: &StoragePaths) -> Result<Vec<PendingRow>, String> {
             })
         })
         .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let mut rows = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    // Consent-deferred observations live in the append-only sidecar
+    // (outside the wipe-on-corruption cache); surface them here too.
+    let sidecar = paths
+        .shared
+        .parent()
+        .map(|dir| dir.join("deferred-observations.jsonl"))
+        .unwrap_or_else(|| paths.shared.clone());
+    if let Ok(text) = std::fs::read_to_string(&sidecar) {
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(line) {
+                rows.push(PendingRow {
+                    id: -(index as i64) - 1,
+                    kind: crate::learning::feedback::DEFERRED_KIND.to_string(),
+                    created_at: payload["observation"]["created_at"]
+                        .as_str()
+                        .unwrap_or("?")
+                        .to_string(),
+                    payload,
+                });
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// Render the human-readable `nisse records pending` report.

@@ -58,7 +58,11 @@ fn directory_creation_sites_are_only_the_gated_helpers() {
             };
             let creates = production
                 .lines()
-                .filter(|line| line.contains("create_dir_all(") || line.contains("create_dir("))
+                .filter(|line| {
+                    line.contains("create_dir_all(")
+                        || line.contains("create_dir(")
+                        || line.contains("DirBuilder")
+                })
                 .count();
             if creates == 0 {
                 continue;

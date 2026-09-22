@@ -756,6 +756,24 @@ mod tests {
     }
 
     #[test]
+    fn ensure_parent_refuses_a_planted_symlink_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_parent = dir.path().join("git").join("nisse");
+        std::fs::create_dir_all(cache_parent.parent().unwrap()).unwrap();
+        // A symlink (dangling or not) where the cache directory would be
+        // created must be refused, not traversed.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), &cache_parent).unwrap();
+        #[cfg(not(unix))]
+        {
+            // No symlink test on platforms without them.
+            return;
+        }
+        let err = ensure_parent(&cache_parent.join("cache.sqlite")).unwrap_err();
+        assert!(err.to_string().contains("not a real directory"), "{err}");
+    }
+
+    #[test]
     fn open_or_recover_on_directory_path_fails_without_deleting() {
         let (_dir, base) = temp_path("dirpath", "base");
         let dir_path = base.join("as-directory.sqlite");

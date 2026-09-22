@@ -420,8 +420,17 @@ pub fn record_feedback(
             Err(other) => return Err(other.into()),
         }
     }
-    if deferred > 0 && created.is_empty() {
-        return Ok(FeedbackRecording::DeferredConsent { count: deferred });
+    if deferred > 0 {
+        if created.is_empty() {
+            return Ok(FeedbackRecording::DeferredConsent { count: deferred });
+        }
+        // Mixed outcome: some observations were recorded, others could
+        // not be. Never report a clean recording while part of the
+        // outcome waits on consent.
+        eprintln!(
+            "nisse: {deferred} observation(s) deferred pending directory consent; \
+             see `nisse records pending`"
+        );
     }
     record_feedback_row(paths, review_id, finding_id, outcome);
 
@@ -469,78 +478,130 @@ fn record_feedback_row(
     }
 }
 
-/// `pending_learning` row kind of a consent-deferred observation.
+/// `pending_learning`-style row kind of a consent-deferred observation
+/// (rendered by `records pending`).
 pub const DEFERRED_KIND: &str = "deferred_observation";
 
-/// Defer one observation durably: the payload is the observation itself
-/// plus the consent reason, so the next consented run can replay it.
+/// The consent-deferral sidecar: an append-only JSONL file NEXT TO the
+/// shared cache database, deliberately outside it — the cache is
+/// wipe-on-corruption ("regenerable"), but while consent is refused the
+/// deferral is the only copy of the outcome and must survive cache
+/// recovery.
+fn deferred_observations_path(paths: &StoragePaths) -> std::path::PathBuf {
+    paths
+        .shared
+        .parent()
+        .map(|dir| dir.join("deferred-observations.jsonl"))
+        .unwrap_or_else(|| paths.shared.clone())
+}
+
+/// The idempotency key of one deferred observation: the same
+/// (review, finding, reviewer, outcome) may be deferred repeatedly and
+/// must yield exactly one durable observation.
+fn deferred_key(observation: &crate::domain::records::ObservationRecord) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        observation.review_id, observation.finding_id, observation.reviewer_id, observation.outcome
+    )
+}
+
+/// Defer one observation durably (see [`deferred_observations_path`]).
+/// Idempotent per [`deferred_key`]: a repeated unconsented submission
+/// never appends a second copy.
 fn store_deferred_observation(
     paths: &StoragePaths,
     observation: &crate::domain::records::ObservationRecord,
     reason: &str,
 ) -> Result<(), FeedbackError> {
-    let db = open_or_recover(&paths.shared, DbKind::Shared)
-        .map_err(|error| FeedbackError::Cache(format!("{}: {error}", error)))?;
+    let sidecar = deferred_observations_path(paths);
+    let key = deferred_key(observation);
+    let existing = std::fs::read_to_string(&sidecar).unwrap_or_default();
+    for line in existing.lines().filter(|line| !line.trim().is_empty()) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line)
+            && parsed
+                .get("observation")
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
+                })
+                .is_some_and(|obs| deferred_key(&obs) == key)
+        {
+            return Ok(()); // already deferred
+        }
+    }
     let payload = serde_json::json!({
         "observation": observation,
         "reason": reason,
     });
-    let payload =
+    let line =
         serde_json::to_string(&payload).map_err(|error| FeedbackError::Cache(error.to_string()))?;
-    db.conn
-        .execute(
-            "INSERT INTO pending_learning (kind, payload, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![DEFERRED_KIND, payload, now_utc_rfc3339()],
-        )
-        .map(|_| ())
-        .map_err(|error| FeedbackError::Cache(error.to_string()))
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&sidecar)
+        .map_err(|error| FeedbackError::Cache(format!("{}: {error}", sidecar.display())))?;
+    writeln!(file, "{line}").map_err(|error| FeedbackError::Cache(error.to_string()))?;
+    Ok(())
 }
 
 /// Flush consent-deferred observations into the durable record store.
 ///
 /// Called before recording new feedback: rows deferred by an earlier
-/// unconsented run are replayed (and removed) once creation is allowed.
-/// Failures are warnings only — the new submission still proceeds.
+/// unconsented run are replayed (and removed from the sidecar) once
+/// creation is allowed. Rows whose key is already durably recorded are
+/// dropped; unparseable lines are dropped with a warning. Failures of
+/// the durable create leave the row in place for a later run.
 pub fn flush_deferred_observations(store: &RecordStore, paths: &StoragePaths) -> usize {
-    let Ok(db) = open_or_recover(&paths.shared, DbKind::Shared) else {
+    let sidecar = deferred_observations_path(paths);
+    let Ok(text) = std::fs::read_to_string(&sidecar) else {
         return 0;
     };
-    let rows: Vec<(i64, String)> = match db
-        .conn
-        .prepare("SELECT id, payload FROM pending_learning WHERE kind = ?1 ORDER BY id")
-        .and_then(|mut statement| {
-            statement
-                .query_map(rusqlite::params![DEFERRED_KIND], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()
-        }) {
-        Ok(rows) => rows,
-        Err(_) => return 0,
-    };
+    let recorded: std::collections::BTreeSet<String> = store
+        .load()
+        .map(|records| {
+            records
+                .iter()
+                .filter_map(|stored| match &stored.record {
+                    ProjectRecord::Observation(observation) => Some(deferred_key(observation)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut flushed = 0;
-    for (id, payload) in rows {
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload) else {
+    let mut remaining = String::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let observation = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|parsed| parsed.get("observation").cloned())
+            .and_then(|value| {
+                serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
+            });
+        let Some(observation) = observation else {
+            tracing::warn!(
+                line = index,
+                "dropping unparseable deferred-observation line"
+            );
             continue;
         };
-        let Some(observation) = parsed.get("observation").cloned().and_then(|value| {
-            serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
-        }) else {
-            continue;
-        };
-        // Still refused (or now allowed): only replay when creation
-        // succeeds; otherwise the row stays for a later run.
+        if recorded.contains(&deferred_key(&observation)) {
+            continue; // already durable; drop the line
+        }
         if store
             .create(&ProjectRecord::Observation(observation))
             .is_ok()
         {
-            let _ = db.conn.execute(
-                "DELETE FROM pending_learning WHERE id = ?1",
-                rusqlite::params![id],
-            );
             flushed += 1;
+        } else {
+            remaining.push_str(line);
+            remaining.push('\n');
         }
     }
+    let _ = std::fs::write(&sidecar, remaining);
     flushed
 }
 

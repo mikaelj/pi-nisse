@@ -29,9 +29,11 @@
 //! device-path prefix is stripped, and comparisons lowercase on Windows.
 //! Relative paths are invalid (internal targets are always absolute).
 
+use std::fs::File;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::time::Duration;
 
 /// The frozen prompt text (one line of a two-line prompt).
 pub const CONSENT_PROMPT: &str = "Allow? [y]es / [a]lways / [n]o";
@@ -299,17 +301,25 @@ pub fn require_creation_consent(path: &Path) -> Consent {
     }
 }
 
+/// One parsed prompt outcome: an answer, or an unparsable line (EOF is
+/// an immediate "no" and never re-prompts).
+enum Parsed {
+    Answer(Answer),
+    Invalid,
+}
+
 /// Read one answer from `input` (testable seam; production reads stdin).
-fn read_answer(input: &mut dyn BufRead) -> Option<Answer> {
+fn read_answer(input: &mut dyn BufRead) -> Option<Parsed> {
     let mut line = String::new();
-    if input.read_line(&mut line).ok()? == 0 {
-        return None; // EOF is "no"
+    match input.read_line(&mut line) {
+        Ok(0) | Err(_) => return Some(Parsed::Answer(Answer::No)), // EOF is "no"
+        Ok(_) => {}
     }
     match line.trim().to_lowercase().as_str() {
-        "y" | "yes" => Some(Answer::Yes),
-        "a" | "always" => Some(Answer::Always),
-        "n" | "no" => Some(Answer::No),
-        _ => None,
+        "y" | "yes" => Some(Parsed::Answer(Answer::Yes)),
+        "a" | "always" => Some(Parsed::Answer(Answer::Always)),
+        "n" | "no" => Some(Parsed::Answer(Answer::No)),
+        _ => Some(Parsed::Invalid),
     }
 }
 
@@ -319,18 +329,21 @@ fn prompt_with(path: &Path, input: &mut dyn BufRead, output: &mut dyn Write) -> 
         let _ = writeln!(output, "{CONSENT_PROMPT}");
         let _ = output.flush();
         match read_answer(input) {
-            Some(answer) => return answer,
-            None => continue,
+            Some(Parsed::Answer(answer)) => return answer,
+            Some(Parsed::Invalid) | None => continue,
         }
     }
     Answer::No
 }
 
 fn prompt(path: &Path) -> Answer {
+    // Prompts are diagnostics: they belong on stderr so stdout stays a
+    // clean machine-readable channel for `--json` consumers even when
+    // stdin is a terminal and stdout is piped.
     let stdin = std::io::stdin();
     let mut lock = stdin.lock();
-    let mut stdout = std::io::stdout();
-    prompt_with(path, &mut lock, &mut stdout)
+    let mut stderr = std::io::stderr();
+    prompt_with(path, &mut lock, &mut stderr)
 }
 
 /// Persist `path` in the user config's `[directories] allow_paths`
@@ -350,12 +363,7 @@ pub fn remember(path: &Path) -> std::io::Result<()> {
 /// so a racing writer's keys survive.
 pub fn update_user_config(config: &Path, path: &Path) -> std::io::Result<()> {
     let lock = ConfigLock::acquire(config)?;
-    let result = update_user_config_locked(config, path).or_else(|first| {
-        // One retry: a racing writer may have replaced the file between
-        // our read and our rename; re-read and re-apply rather than
-        // publishing a stale snapshot.
-        update_user_config_locked(config, path).map_err(|_| first)
-    });
+    let result = update_user_config_locked(config, path);
     lock.release();
     result
 }
@@ -401,44 +409,61 @@ fn update_user_config_locked(config: &Path, path: &Path) -> std::io::Result<()> 
     crate::storage::fsutil::atomic_write_replace_private(config, rendered_table.as_bytes())
 }
 
-/// Exclusive advisory lock guarding user-config read-modify-writes.
-/// Best-effort: when the lock file cannot be created the write still
-/// proceeds (last-writer-wins with the retry above as the mitigation).
+/// Advisory lock guarding user-config read-modify-writes. Held through
+/// an OS file lock (best-effort: lock failures degrade to proceeding
+/// without mutual exclusion rather than failing the write; the atomic
+/// publish still prevents torn files, with last-writer-wins as the
+/// documented residual).
 struct ConfigLock {
-    path: Option<PathBuf>,
+    file: Option<File>,
 }
 
 impl ConfigLock {
     fn acquire(config: &Path) -> std::io::Result<Self> {
         let lock_path = config.with_extension("toml.lock");
-        match std::fs::OpenOptions::new()
+        let file = File::options()
+            .create(true)
+            .truncate(false)
             .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => Ok(ConfigLock {
-                path: Some(lock_path),
-            }),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(ConfigLock {
-                path: None, // stale or live lock: proceed best-effort
-            }),
-            Err(err) => Err(err),
+            .open(&lock_path)?;
+        // Bounded wait for a concurrent holder.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(ConfigLock { file: Some(file) }),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        // Contended for too long: proceed without the
+                        // lock (documented best-effort semantics).
+                        return Ok(ConfigLock { file: None });
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => return Ok(ConfigLock { file: None }),
+            }
         }
     }
 
     fn release(self) {
-        if let Some(path) = self.path {
-            let _ = std::fs::remove_file(path);
+        if let Some(file) = self.file {
+            let _ = file.unlock();
         }
     }
 }
 
+/// The consent-error marker prefix (see [`consent_error_text`]).
+pub const CONSENT_ERROR_MARKER: &str = "directory creation requires consent";
+
+/// Whether a rendered error text is a directory-consent refusal. The
+/// single source of truth for cross-module string matching after typed
+/// errors are flattened to text.
+pub fn is_consent_error(text: &str) -> bool {
+    text.starts_with(CONSENT_ERROR_MARKER)
+}
+
 /// Render the typed consent error message used across subsystems.
 pub fn consent_error_text(path: &Path) -> String {
-    format!(
-        "directory creation requires consent: {} — {REMEDY}",
-        path.display()
-    )
+    format!("{CONSENT_ERROR_MARKER}: {} — {REMEDY}", path.display())
 }
 
 #[cfg(test)]
@@ -543,6 +568,32 @@ mod tests {
             prompt_with(Path::new("/x"), &mut "".as_bytes(), &mut Vec::new()),
             Answer::No
         );
+    }
+
+    #[test]
+    fn update_user_config_preserves_settings_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[contributor]\nid = \"alice\"\n\n[performance]\nmax_concurrent_reviewers = 2\n",
+        )
+        .unwrap();
+
+        update_user_config(&config, Path::new("/repo/.git/nisse")).unwrap();
+        let first = std::fs::read_to_string(&config).unwrap();
+        assert!(first.contains("id = \"alice\""), "{first}");
+        assert!(first.contains("max_concurrent_reviewers = 2"), "{first}");
+        assert!(first.contains("/repo/.git/nisse"), "{first}");
+
+        // A second grant of the same path adds no duplicate entry.
+        update_user_config(&config, Path::new("/repo/.git/nisse")).unwrap();
+        let second = std::fs::read_to_string(&config).unwrap();
+        assert_eq!(second.matches("/repo/.git/nisse").count(), 1, "{second}");
+        // A different path is appended.
+        update_user_config(&config, Path::new("/repo/.nisse")).unwrap();
+        let third = std::fs::read_to_string(&config).unwrap();
+        assert!(third.contains("/repo/.nisse"), "{third}");
     }
 
     #[test]

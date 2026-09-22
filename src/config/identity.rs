@@ -104,7 +104,7 @@ pub fn resolve_or_prompt(
     match save_identity(path, &answer) {
         Ok(()) => {}
         Err(IdentityError::Save { message, .. })
-            if message.starts_with("directory creation requires consent") =>
+            if crate::config::consent::is_consent_error(&message) =>
         {
             // Noninteractive identity save without config-directory
             // consent: skip the save and proceed unsaved for this run
