@@ -772,17 +772,23 @@ impl App {
         // Repository-derived directory locations for the `directories`
         // check (consent prompts fire only in interactive runs).
         let dirs = if git.in_repository {
-            crate::git::RepoContext::discover(&crate::git::GitRunner::new(), &cwd)
-                .ok()
-                .map(|ctx| config::doctor::DoctorDirs {
+            match crate::git::RepoContext::discover(&crate::git::GitRunner::new(), &cwd) {
+                Ok(ctx) => config::doctor::DoctorDirs {
                     worktree_root: Some(ctx.worktree_root.clone()),
                     git_dir: Some(ctx.git_dir.clone()),
                     git_common_dir: Some(ctx.git_common_dir.clone()),
-                })
+                    discovery_error: None,
+                },
+                Err(err) => config::doctor::DoctorDirs {
+                    worktree_root: None,
+                    git_dir: None,
+                    git_common_dir: None,
+                    discovery_error: Some(err.to_string()),
+                },
+            }
         } else {
-            None
-        }
-        .unwrap_or_default();
+            config::doctor::DoctorDirs::default()
+        };
         let report = config::doctor::run_doctor(git, loaded, &resolver, &dirs);
         print_to_stdout(&report.render());
 

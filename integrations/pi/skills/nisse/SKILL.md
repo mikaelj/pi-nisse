@@ -179,10 +179,12 @@ Nisse asks the user before creating any persistent directory (the
 noninteractively, so on a fresh repository:
 
 - `nisse_review_plan` / `nisse_review_code` / `nisse_feedback` may fail
-  with a typed `directory creation requires consent` error;
-- feedback outcomes defer to the local sidecar instead (the submission
-  succeeds; `nisse records pending` lists the deferred observations and
-  they flush once consent exists);
+  with a typed `directory creation requires consent` error (on a fresh
+  repository feedback fails closed like everything else);
+- once reviews have run (the local caches exist), refused feedback
+  defers instead: the submission succeeds, `nisse records pending`
+  lists the deferred observations, and they flush when consent is
+  granted;
 - read-only commands (`nisse records pending`, `nisse records list`)
   never demand consent.
 

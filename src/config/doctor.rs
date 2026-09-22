@@ -33,6 +33,13 @@ pub struct DoctorCheck {
     pub lines: Vec<String>,
 }
 
+impl DoctorCheck {
+    #[cfg(test)]
+    fn render_lines(&self) -> String {
+        self.lines.join("\n")
+    }
+}
+
 /// Full doctor report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
@@ -92,6 +99,9 @@ pub struct DoctorDirs {
     pub git_dir: Option<std::path::PathBuf>,
     /// `$GIT_COMMON_DIR` (shared cache directory lives here).
     pub git_common_dir: Option<std::path::PathBuf>,
+    /// Why repository-derived directories could not be resolved (the
+    /// check warns instead of silently reporting nothing).
+    pub discovery_error: Option<String>,
 }
 
 pub fn run_doctor(
@@ -149,6 +159,13 @@ fn directories_check(dirs: &DoctorDirs) -> DoctorCheck {
 
     let mut lines = Vec::new();
     let mut warn = false;
+
+    if let Some(error) = &dirs.discovery_error {
+        warn = true;
+        lines.push(format!(
+            "repo directories unresolved: {error} (record/cache paths not checked)"
+        ));
+    }
 
     // Candidate creation paths, deduplicated, stable order.
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -616,6 +633,39 @@ mod tests {
         let text = report.render();
         assert!(text.contains("classifier: ok"));
         assert!(text.contains("provider needle; endpoint http://127.0.0.1:8787 trusted"));
+    }
+
+    #[test]
+    fn directories_check_reports_exists_missing_and_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        // Record tree pre-created; caches missing; git_dir == common dir
+        // (dedupe: exactly one cache line).
+        std::fs::create_dir_all(dir.path().join(".nisse")).unwrap();
+        let git_dir = dir.path().join(".git");
+        let check = directories_check(&DoctorDirs {
+            worktree_root: Some(dir.path().to_path_buf()),
+            git_dir: Some(git_dir.clone()),
+            git_common_dir: Some(git_dir.clone()),
+            discovery_error: None,
+        });
+        let text = check.render_lines();
+        assert!(text.contains(&format!("exists: {}", dir.path().join(".nisse").display())));
+        // The cache path appears exactly once (deduped); under ambient
+        // blanket consent it reads "consented:", otherwise "missing (not
+        // consented):".
+        let cache_line = git_dir.join("nisse").display().to_string();
+        assert_eq!(text.matches(&cache_line).count(), 1, "{text}");
+
+        // A discovery failure warns instead of silently passing.
+        let check = directories_check(&DoctorDirs {
+            worktree_root: None,
+            git_dir: None,
+            git_common_dir: None,
+            discovery_error: Some("probe failed".to_string()),
+        });
+        let text = check.render_lines();
+        assert!(text.contains("repo directories unresolved"), "{text}");
+        assert_eq!(check.status, CheckStatus::Warn);
     }
 
     #[test]

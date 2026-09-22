@@ -172,13 +172,18 @@ your explicit consent:
   `Allow? [y]es / [a]lways / [n]o` (prompts go to stderr; `always`
   remembers the canonical path in `[directories] allow_paths`);
 - noninteractive runs (subprocess callers, CI) fail closed with a
-  typed error naming the path — except feedback outcomes, which defer
-  to a local sidecar (`deferred-observations.jsonl` next to the shared
-  cache) and flush once consent is granted (`nisse records pending`
-  lists them);
+  typed error naming the path. One exception: when the local caches
+  already exist and only the record tree is refused, feedback outcomes
+  defer to an append-only sidecar
+  (`$GIT_COMMON_DIR/nisse/deferred-observations.jsonl`) and flush once
+  consent is granted (`nisse records pending` lists them). On a fresh
+  repository — no caches yet — every directory-needing command,
+  feedback included, fails closed;
 - `NISSE_ALLOW_DIR_CREATION=1` grants blanket consent (tests, CI, or
   restoring the pre-consent behavior) — the repo's `.cargo/config.toml`
   sets it for `cargo test`/`cargo run` in this checkout only;
+  `NISSE_INTERACTIVE_CONSENT=1` forces the interactive prompt path for
+  scripted/pty-less runs (it grants nothing by itself);
 - run `nisse doctor` in a terminal to review and grant consent for
   every directory Nisse would use in the current repository.
 
