@@ -841,6 +841,10 @@ pub fn load_pending(paths: &StoragePaths) -> Result<Vec<PendingRow>, String> {
                         .to_string(),
                     payload,
                 });
+            } else {
+                // Never silently hide a torn/corrupt deferred line: the
+                // flush path quarantines it; surface it here too.
+                tracing::warn!(line = index, "unparseable deferred-observation line");
             }
         }
     }

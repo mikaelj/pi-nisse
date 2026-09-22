@@ -551,9 +551,15 @@ fn store_deferred_observation(
             .map_err(|error| FeedbackError::Cache(format!("{}: {error}", sidecar.display())))?;
         writeln!(file, "{line}").map_err(|error| FeedbackError::Cache(error.to_string()))?;
         // The deferral is the only copy of the outcome while consent is
-        // refused: fsync before claiming it is retained.
+        // refused: fsync before claiming it is retained (file data plus
+        // the parent directory entry, which sync_data alone does not
+        // cover for a newly created file).
         file.sync_data()
             .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+        drop(file);
+        if let Some(parent) = sidecar.parent() {
+            crate::storage::fsutil::best_effort_parent_sync(parent);
+        }
         Ok(())
     })();
     lock.release();
@@ -591,34 +597,46 @@ pub fn flush_deferred_observations(store: &RecordStore, paths: &StoragePaths) ->
         .unwrap_or_default();
     let mut flushed = 0;
     let mut remaining = String::new();
+    let mut recorded = recorded; // extended after each successful create
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        let observation = serde_json::from_str::<serde_json::Value>(line)
-            .ok()
-            .filter(|parsed| {
-                parsed.get("v").and_then(serde_json::Value::as_u64)
-                    == Some(DEFERRED_FORMAT_VERSION as u64)
-            })
+        let parsed = serde_json::from_str::<serde_json::Value>(line).ok();
+        // A parseable line of a FOREIGN version stays in the sidecar
+        // untouched: a later compatible binary may still flush it.
+        let foreign_version = parsed.as_ref().is_some_and(|parsed| {
+            parsed.get("v").and_then(serde_json::Value::as_u64)
+                != Some(DEFERRED_FORMAT_VERSION as u64)
+        });
+        if foreign_version {
+            remaining.push_str(line);
+            remaining.push('\n');
+            continue;
+        }
+        let observation = parsed
             .and_then(|parsed| parsed.get("observation").cloned())
             .and_then(|value| {
                 serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
             });
         let Some(observation) = observation else {
-            // Unparseable or foreign-version lines are quarantined
-            // (kept for inspection), never silently destroyed.
+            // Structurally unparseable lines are quarantined (kept for
+            // inspection), never silently destroyed.
             quarantine_deferred_line(&sidecar, line);
             continue;
         };
         if recorded.contains(&deferred_key(&observation)) {
             continue; // already durable; drop the line
         }
+        let key = deferred_key(&observation);
         if store
             .create(&ProjectRecord::Observation(observation))
             .is_ok()
         {
             flushed += 1;
+            // A second sidecar line with the same key must not produce a
+            // second durable observation.
+            recorded.insert(key);
         } else {
             remaining.push_str(line);
             remaining.push('\n');
@@ -758,6 +776,9 @@ mod tests {
 
     #[test]
     fn deferred_sidecar_is_idempotent_quarantines_and_retains() {
+        // Explicit consent (independent of ambient cargo [env]).
+        let previous = std::env::var("NISSE_ALLOW_DIR_CREATION").ok();
+        unsafe { std::env::set_var("NISSE_ALLOW_DIR_CREATION", "1") };
         let dir = tempfile::tempdir().unwrap();
         let paths = sidecar_paths(dir.path());
 
@@ -784,6 +805,20 @@ mod tests {
         let store = RecordStore::new(dir.path());
         let flushed = flush_deferred_observations(&store, &paths);
         assert!(flushed >= 1);
+        let early_keys: Vec<String> = store
+            .load()
+            .unwrap()
+            .iter()
+            .filter_map(|stored| match &stored.record {
+                ProjectRecord::Observation(observation) => Some(deferred_key(observation)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            early_keys.contains(&deferred_key(&observation)),
+            "{early_keys:?}"
+        );
+        assert!(early_keys.contains(&deferred_key(&valid)), "{early_keys:?}");
         let remaining = std::fs::read_to_string(&sidecar).unwrap();
         assert!(!remaining.contains("find-1"), "{remaining}");
         assert!(!remaining.contains("find-2"), "{remaining}");
@@ -798,17 +833,67 @@ mod tests {
             "corrupt line must be quarantined, not destroyed"
         );
 
-        // The records exist durably (both deferred keys).
-        let records = store.load().unwrap();
-        let keys: Vec<String> = records
+        // Retention on failed create: with the record root blocked by a
+        // regular file where `.nisse/people/<author>` belongs, the
+        // deferral survives the flush and flushes on a later run.
+        let blocked = sample_observation("3");
+        store_deferred_observation(&paths, &blocked, "blocked").unwrap();
+        let people = dir.path().join(".nisse").join("people");
+        std::fs::remove_dir_all(&people).unwrap();
+        std::fs::create_dir_all(people.parent().unwrap()).unwrap();
+        std::fs::write(&people, "not a directory").unwrap();
+        let flushed_blocked = flush_deferred_observations(&store, &paths);
+        assert_eq!(flushed_blocked, 0, "create must fail while blocked");
+        let retained = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(retained.contains(&blocked.finding_id), "{retained}");
+        std::fs::remove_file(&people).unwrap();
+        let flushed_retry = flush_deferred_observations(&store, &paths);
+        assert!(flushed_retry >= 1);
+        assert!(
+            !std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains(&blocked.finding_id),
+            "the blocked deferral must flush once unblocked"
+        );
+
+        // A parseable line of a foreign version stays in the sidecar
+        // (a later compatible binary may flush it); it is not
+        // quarantined.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&sidecar)
+                .unwrap();
+            writeln!(
+                file,
+                r#"{{"v": 99, "observation": {{}}, "reason": "future"}}"#
+            )
+            .unwrap();
+        }
+        flush_deferred_observations(&store, &paths);
+        assert!(
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains(r#""v": 99"#),
+            "foreign-version lines must remain in place"
+        );
+
+        // The blocked deferral is durable too.
+        let late_keys: Vec<String> = store
+            .load()
+            .unwrap()
             .iter()
             .filter_map(|stored| match &stored.record {
                 ProjectRecord::Observation(observation) => Some(deferred_key(observation)),
                 _ => None,
             })
             .collect();
-        assert!(keys.contains(&deferred_key(&observation)), "{keys:?}");
-        assert!(keys.contains(&deferred_key(&valid)), "{keys:?}");
+        assert!(late_keys.contains(&deferred_key(&blocked)), "{late_keys:?}");
+        match previous {
+            Some(value) => unsafe { std::env::set_var("NISSE_ALLOW_DIR_CREATION", value) },
+            None => unsafe { std::env::remove_var("NISSE_ALLOW_DIR_CREATION") },
+        }
     }
 
     use crate::domain::evidence::{EvidenceKind, EvidenceRef};

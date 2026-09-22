@@ -358,9 +358,10 @@ pub fn remember(path: &Path) -> std::io::Result<()> {
 /// Insert `path` into `[directories] allow_paths`, preserving every
 /// other setting, seeding from a legacy config on first write, and
 /// publishing atomically with private permissions. Serialized by an
-/// exclusive lock file next to the config (removed when the critical
-/// section ends); on contention the read-modify-write is retried once
-/// so a racing writer's keys survive.
+/// advisory lock next to the config (best-effort: a contended or failed
+/// lock degrades to a single attempt, so a racing writer can still win
+/// last-writer-wins — the atomic publish keeps the file untorn and a
+/// lost entry merely re-prompts).
 pub fn update_user_config(config: &Path, path: &Path) -> std::io::Result<()> {
     // The config directory is ensured (and possibly prompted for)
     // BEFORE the lock is taken: prompting may recursively persist

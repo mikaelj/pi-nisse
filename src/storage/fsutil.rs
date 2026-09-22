@@ -109,7 +109,7 @@ pub fn atomic_write_replace_private(path: &Path, bytes: &[u8]) -> io::Result<()>
 /// sync failure may turn the publication into a reported failure
 /// (notably, `File::open` on a directory fails on Windows, where the
 /// sync is simply skipped).
-fn best_effort_parent_sync(parent: &Path) {
+pub fn best_effort_parent_sync(parent: &Path) {
     if let Ok(dir) = File::open(parent) {
         let _ = dir.sync_all();
     }

@@ -131,10 +131,27 @@ fn interactive_always_prompts_persists_and_is_honored_next_run() {
     );
     assert!(cache_dir.exists(), "the consented dir should be created");
 
-    // "a" persisted the path into the user config.
+    // "a" persisted the exact canonical path into the user config while
+    // preserving the pre-existing contributor identity.
     let config = std::fs::read_to_string(home.path().join(".nisse").join("config.toml")).unwrap();
-    assert!(config.contains("allow_paths"), "{config}");
-    assert!(config.contains("nisse"), "{config}");
+    let table: toml::Table = toml::from_str(&config).unwrap();
+    assert_eq!(
+        table["contributor"]["id"].as_str(),
+        Some("alice"),
+        "{config}"
+    );
+    let allowed: Vec<&str> = table["directories"]["allow_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    let canonical_cache = std::fs::canonicalize(&cache_dir).unwrap();
+    assert!(
+        allowed.contains(&canonical_cache.to_string_lossy().as_ref()),
+        "allowed={allowed:?}, canonical={}",
+        canonical_cache.display()
+    );
 
     // A later noninteractive run without the env honors the remembered
     // consent (no blanket, no prompt).
@@ -274,4 +291,37 @@ fn feedback_defers_when_record_dir_is_refused_but_caches_exist() {
     let out = run_nisse_in_with_env(&repo, &["records", "pending"], home.path(), &[]);
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(!stdout.contains("deferred observation"), "stdout: {stdout}");
+}
+
+#[test]
+fn refused_config_dir_save_degrades_to_unsaved_identity() {
+    let (_dir, repo, home) = init_repo("consent-identity");
+    // No user config at all: the identity prompt fires, the answer's
+    // save needs $HOME/.nisse creation, and consent is refused — the
+    // save is skipped (unsaved for this run) instead of failing the
+    // command with a consent error.
+    std::fs::remove_dir_all(home.path().join(".nisse")).unwrap();
+
+    let out = run_nisse_with_stdin(
+        &repo,
+        &["records", "compact"],
+        home.path(),
+        &[
+            ("NISSE_ALLOW_DIR_CREATION", "\u{0}remove"),
+            ("NISSE_INTERACTIVE_CONSENT", "1"),
+        ],
+        b"alice\n",
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stderr.contains("directory creation requires consent"),
+        "stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("contributor identity") || stdout.contains("contributor identity"),
+        "the typed no-identity outcome must surface, stderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+    // The config directory was never created.
+    assert!(!home.path().join(".nisse").exists());
 }
