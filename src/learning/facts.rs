@@ -843,6 +843,19 @@ pub fn render_pending(rows: &[PendingRow]) -> String {
                 row.payload["candidate"]["subject"].as_str().unwrap_or("?"),
                 row.payload["reason"].as_str().unwrap_or("?"),
             ),
+            crate::learning::feedback::DEFERRED_KIND => format!(
+                "deferred observation ({}): review {} finding {} — {}",
+                row.payload["observation"]["outcome"]
+                    .as_str()
+                    .unwrap_or("?"),
+                row.payload["observation"]["review_id"]
+                    .as_str()
+                    .unwrap_or("?"),
+                row.payload["observation"]["finding_id"]
+                    .as_str()
+                    .unwrap_or("?"),
+                row.payload["reason"].as_str().unwrap_or("?"),
+            ),
             crate::learning::lessons::PENDING_KIND => {
                 let groups: Vec<String> = row.payload["groups"]
                     .as_array()

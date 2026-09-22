@@ -44,6 +44,12 @@ pub enum StorageError {
     #[error("cache database `{path}` is corrupt: {message}")]
     Corrupt { path: PathBuf, message: String },
 
+    /// Creating the database directory was refused by the
+    /// directory-creation consent policy (user-requested plan change);
+    /// noninteractive callers fail closed with this typed error.
+    #[error("{}", crate::config::consent::consent_error_text(path))]
+    DirectoryConsentRequired { path: PathBuf },
+
     /// The database could not be opened or created.
     #[error("failed to open cache database `{path}`: {message}")]
     Open { path: PathBuf, message: String },
@@ -234,13 +240,84 @@ pub fn database_files(path: &Path) -> [PathBuf; 4] {
 
 /// Create the parent directory of a database path if needed.
 fn ensure_parent(path: &Path) -> Result<(), StorageError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    if parent.exists() {
+        return Ok(());
+    }
+    // CONSENT GATE (gate 2): cache directories are persistent state;
+    // creation requires explicit consent. Interactive use prompts;
+    // noninteractive use fails closed with the typed error.
+    let consented = match crate::config::consent::require_creation_consent(parent) {
+        crate::config::consent::Consent::Allowed => parent.to_path_buf(),
+        crate::config::consent::Consent::Refused { path } => {
+            return Err(StorageError::DirectoryConsentRequired { path });
+        }
+    };
+    // Create only the MISSING components below the deepest existing
+    // ancestor (existing ancestors — including platform symlink roots
+    // such as macOS /var — are traversed, never modified). Each created
+    // or encountered component below that point must be a real
+    // directory: a planted symlink must not redirect cache creation.
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = parent.to_path_buf();
+    while !probe.exists() {
+        let Some(name) = probe.file_name().map(|name| name.to_os_string()) else {
+            return Err(StorageError::Io {
+                path: probe.clone(),
+                source: std::io::Error::other("cache path has no creatable components"),
+            });
+        };
+        missing.push(name);
+        let Some(parent) = probe.parent().map(Path::to_path_buf) else {
+            return Err(StorageError::Io {
+                path: probe.clone(),
+                source: std::io::Error::other("cache path has no parent"),
+            });
+        };
+        probe = parent;
+    }
+    let mut current = probe;
+    for name in missing.iter().rev() {
+        current.push(name);
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let real_dir = std::fs::symlink_metadata(&current)
+                    .map(|metadata| metadata.file_type().is_dir())
+                    .unwrap_or(false);
+                if !real_dir {
+                    return Err(StorageError::Io {
+                        path: current.clone(),
+                        source: std::io::Error::other(
+                            "cache path component is not a real directory",
+                        ),
+                    });
+                }
+            }
+            Err(source) => {
+                return Err(StorageError::Io {
+                    path: current.clone(),
+                    source,
+                });
+            }
+        }
+    }
+    // TOCTOU guard: what was created must be where consent pointed.
+    if let (Ok(created), Some(consented)) = (
+        std::fs::canonicalize(parent),
+        crate::config::consent::canonical_path(&consented),
+    ) && std::fs::canonicalize(&consented)
+        .map(|canonical| canonical != created)
+        .unwrap_or(true)
     {
-        std::fs::create_dir_all(parent).map_err(|source| StorageError::Io {
+        return Err(StorageError::Io {
             path: parent.to_owned(),
-            source,
-        })?;
+            source: std::io::Error::other(
+                "created cache directory does not match the consented canonical path",
+            ),
+        });
     }
     Ok(())
 }

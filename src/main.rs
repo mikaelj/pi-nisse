@@ -17,6 +17,13 @@ fn main() -> ExitCode {
 
     nisse::app::init_tracing();
 
+    // Directory-creation consent may prompt interactively exactly when
+    // stdin is a terminal (user-requested plan change; plan section 10
+    // amendments). Subprocess callers stay noninteractive and fail
+    // closed or defer instead of blocking.
+    nisse::config::consent::set_interactive(std::io::IsTerminal::is_terminal(&std::io::stdin()));
+    nisse::config::consent::load_policy_from_user_config();
+
     let app = App::new();
     match app.run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,

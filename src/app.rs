@@ -403,8 +403,21 @@ impl App {
     /// cache, never durable project knowledge.
     fn run_records_pending(&self) -> Result<(), AppError> {
         let (_ctx, paths) = self.discover_storage()?;
-        let rows = crate::learning::facts::load_pending(&paths)
-            .map_err(|err| AppError::Other(anyhow::anyhow!("records pending failed: {err}")))?;
+        let rows = match crate::learning::facts::load_pending(&paths) {
+            Ok(rows) => rows,
+            // Read-only listing: when the pending store's directory does
+            // not exist yet (and creation is not consented), the answer
+            // is simply "nothing pending" — never a consent demand for
+            // a directory the command does not need in order to report
+            // an empty list. load_pending flattens errors to strings, so
+            // the typed marker text is matched.
+            Err(err) if err.contains("directory creation requires consent") => Vec::new(),
+            Err(err) => {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "records pending failed: {err}"
+                )));
+            }
+        };
         print_to_stdout(&crate::learning::facts::render_pending(&rows));
         Ok(())
     }

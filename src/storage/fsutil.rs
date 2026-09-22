@@ -34,8 +34,10 @@ pub enum ExclusiveWrite {
 /// race-free on Unix and Windows. This is the write path for durable
 /// records.
 pub fn atomic_write_exclusive(path: &Path, bytes: &[u8]) -> io::Result<ExclusiveWrite> {
+    // Directory creation is centralized in the consent-gated helpers
+    // (records walker, cache ensure_parent, config-dir creator); the
+    // parent must already exist.
     let parent = parent_dir(path)?;
-    fs::create_dir_all(parent)?;
     let temp = temp_path(parent);
     write_and_sync(&temp, bytes)?;
     let outcome = match fs::hard_link(&temp, path) {
@@ -59,8 +61,9 @@ pub fn atomic_write_exclusive(path: &Path, bytes: &[u8]) -> io::Result<Exclusive
 /// has no directory sync here. This is the write path for trusted local
 /// configuration files.
 pub fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Directory creation is centralized in the consent-gated helpers;
+    // the parent must already exist.
     let parent = parent_dir(path)?;
-    fs::create_dir_all(parent)?;
     let temp = temp_path(parent);
     write_and_sync(&temp, bytes)?;
     match fs::rename(&temp, path) {
@@ -82,8 +85,9 @@ pub fn atomic_write_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// temporary file is created with restrictive permissions, so no
 /// crash window ever leaves the published file group/world-readable.
 pub fn atomic_write_replace_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Directory creation is centralized in the consent-gated helpers;
+    // the parent must already exist.
     let parent = parent_dir(path)?;
-    fs::create_dir_all(parent)?;
     let temp = temp_path(parent);
     write_and_sync_private(&temp, bytes)?;
     match fs::rename(&temp, path) {
@@ -158,7 +162,9 @@ mod tests {
     #[test]
     fn exclusive_write_creates_the_file_once() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("record.json");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let path = nested.join("record.json");
 
         assert_eq!(
             atomic_write_exclusive(&path, b"contents").unwrap(),
@@ -234,14 +240,22 @@ mod tests {
     }
 
     #[test]
-    fn writes_create_missing_parent_directories() {
+    fn writes_require_an_existing_parent_directory() {
+        // Directory creation is centralized in the consent-gated
+        // helpers (records walker, cache ensure_parent, config-dir
+        // creator); the atomic writers themselves demand an existing
+        // parent so no ungated creation path can hide behind them.
         let dir = tempfile::tempdir().unwrap();
-        let deep = dir.path().join("a").join("b").join("c").join("record.json");
-        atomic_write_exclusive(&deep, b"x").unwrap();
-        assert_eq!(fs::read(&deep).unwrap(), b"x");
+        let deep = dir.path().join("a").join("b").join("record.json");
+        assert!(atomic_write_exclusive(&deep, b"x").is_err());
 
         let deep2 = dir.path().join("x").join("y").join("config.toml");
-        atomic_write_replace(&deep2, b"x").unwrap();
-        assert_eq!(fs::read(&deep2).unwrap(), b"x");
+        assert!(atomic_write_replace(&deep2, b"x").is_err());
+        assert!(atomic_write_replace_private(&deep2, b"x").is_err());
+
+        let nested = dir.path().join("made").join("config.toml");
+        std::fs::create_dir(nested.parent().unwrap()).unwrap();
+        atomic_write_replace_private(&nested, b"x").unwrap();
+        assert_eq!(fs::read(&nested).unwrap(), b"x");
     }
 }

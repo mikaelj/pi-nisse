@@ -157,6 +157,14 @@ pub enum FeedbackRecording {
     /// The same outcome was already durably recorded; the submission
     /// is an idempotent no-op.
     AlreadyRecorded(FeedbackOutcome),
+    /// The durable observation writes were deferred to the local
+    /// `pending_learning` cache because record-directory creation was
+    /// refused by the consent policy (the caches existed; a fresh
+    /// repository fails closed before reaching this state).
+    DeferredConsent {
+        /// How many observations are waiting for consent.
+        count: usize,
+    },
 }
 
 /// One retained feedback outcome awaiting a contributor identity
@@ -352,6 +360,10 @@ pub fn record_feedback(
     // this (review, finding) pair decides the submission, regardless
     // of which contributor, branch, or worktree recorded it.
     let store = RecordStore::new(&ctx.worktree_root);
+    // Replay any observations an earlier unconsented run deferred (the
+    // caches exist at this point; failures are warnings only). Replaying
+    // before the scan below makes resubmission idempotent.
+    let _flushed = flush_deferred_observations(&store, paths);
     let records = store.load()?;
     for stored in &records {
         let ProjectRecord::Observation(observation) = &stored.record else {
@@ -390,9 +402,26 @@ pub fn record_feedback(
     // Immutable create of one observation per contributing reviewer.
     let observations = build_observations(&result, finding, outcome, author)?;
     let mut created = Vec::new();
+    let mut deferred = 0usize;
     for observation in observations {
-        let stored = store.create(&ProjectRecord::Observation(observation.clone()))?;
-        created.push((observation.reviewer_id.clone(), stored.id().to_string()));
+        match store.create(&ProjectRecord::Observation(observation.clone())) {
+            Ok(stored) => {
+                created.push((observation.reviewer_id.clone(), stored.id().to_string()));
+            }
+            // CONSENT GATE deferral: the local caches already exist (the
+            // stored review was read above), so a refused record-tree
+            // directory defers durably instead of failing the command;
+            // the next run with consent flushes it.
+            Err(RecordStoreError::DirectoryConsentRequired { path }) => {
+                let reason = crate::config::consent::consent_error_text(&path);
+                store_deferred_observation(paths, &observation, &reason)?;
+                deferred += 1;
+            }
+            Err(other) => return Err(other.into()),
+        }
+    }
+    if deferred > 0 && created.is_empty() {
+        return Ok(FeedbackRecording::DeferredConsent { count: deferred });
     }
     record_feedback_row(paths, review_id, finding_id, outcome);
 
@@ -438,6 +467,81 @@ fn record_feedback_row(
             "failed to record the local review_feedback row: {error}"
         );
     }
+}
+
+/// `pending_learning` row kind of a consent-deferred observation.
+pub const DEFERRED_KIND: &str = "deferred_observation";
+
+/// Defer one observation durably: the payload is the observation itself
+/// plus the consent reason, so the next consented run can replay it.
+fn store_deferred_observation(
+    paths: &StoragePaths,
+    observation: &crate::domain::records::ObservationRecord,
+    reason: &str,
+) -> Result<(), FeedbackError> {
+    let db = open_or_recover(&paths.shared, DbKind::Shared)
+        .map_err(|error| FeedbackError::Cache(format!("{}: {error}", error)))?;
+    let payload = serde_json::json!({
+        "observation": observation,
+        "reason": reason,
+    });
+    let payload =
+        serde_json::to_string(&payload).map_err(|error| FeedbackError::Cache(error.to_string()))?;
+    db.conn
+        .execute(
+            "INSERT INTO pending_learning (kind, payload, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![DEFERRED_KIND, payload, now_utc_rfc3339()],
+        )
+        .map(|_| ())
+        .map_err(|error| FeedbackError::Cache(error.to_string()))
+}
+
+/// Flush consent-deferred observations into the durable record store.
+///
+/// Called before recording new feedback: rows deferred by an earlier
+/// unconsented run are replayed (and removed) once creation is allowed.
+/// Failures are warnings only — the new submission still proceeds.
+pub fn flush_deferred_observations(store: &RecordStore, paths: &StoragePaths) -> usize {
+    let Ok(db) = open_or_recover(&paths.shared, DbKind::Shared) else {
+        return 0;
+    };
+    let rows: Vec<(i64, String)> = match db
+        .conn
+        .prepare("SELECT id, payload FROM pending_learning WHERE kind = ?1 ORDER BY id")
+        .and_then(|mut statement| {
+            statement
+                .query_map(rusqlite::params![DEFERRED_KIND], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        }) {
+        Ok(rows) => rows,
+        Err(_) => return 0,
+    };
+    let mut flushed = 0;
+    for (id, payload) in rows {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        let Some(observation) = parsed.get("observation").cloned().and_then(|value| {
+            serde_json::from_value::<crate::domain::records::ObservationRecord>(value).ok()
+        }) else {
+            continue;
+        };
+        // Still refused (or now allowed): only replay when creation
+        // succeeds; otherwise the row stays for a later run.
+        if store
+            .create(&ProjectRecord::Observation(observation))
+            .is_ok()
+        {
+            let _ = db.conn.execute(
+                "DELETE FROM pending_learning WHERE id = ?1",
+                rusqlite::params![id],
+            );
+            flushed += 1;
+        }
+    }
+    flushed
 }
 
 /// Retain one feedback outcome in the local `pending_learning` cache.
@@ -490,6 +594,15 @@ pub fn render_feedback(
                 }
                 out.push('\n');
             }
+        }
+        FeedbackRecording::DeferredConsent { count } => {
+            out.push_str(&format!(
+                "observations pending directory consent: {count}\n"
+            ));
+            out.push_str(
+                "(the outcomes were retained locally and will be recorded once \
+             directory creation is allowed; see `nisse records pending`)\n",
+            );
         }
         FeedbackRecording::AlreadyRecorded(recorded) => {
             out.push_str(&format!("already recorded: {recorded}\n"));

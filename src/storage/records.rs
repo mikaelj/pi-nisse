@@ -111,6 +111,12 @@ pub enum RecordStoreError {
     /// created by Nisse.
     #[error("unsafe record path `{path}`: {reason}")]
     UnsafePath { path: PathBuf, reason: String },
+    /// Creating the record directory was refused by the
+    /// directory-creation consent policy (user-requested plan change).
+    /// Record-creating operations defer to `pending_learning` when the
+    /// local cache already exists; otherwise they fail closed.
+    #[error("{}", crate::config::consent::consent_error_text(path))]
+    DirectoryConsentRequired { path: PathBuf },
     /// A record file or directory entry is invalid. Loading is strict:
     /// invalid content is a hard failure, never a silent skip.
     #[error("invalid record at `{path}`: {reason}")]
@@ -183,6 +189,17 @@ impl RecordStore {
     /// directories are traversed; missing components are created with
     /// `create_dir`, which itself refuses to clobber an existing path.
     fn ensure_real_dir(&self, dir: &Path) -> Result<(), RecordStoreError> {
+        // CONSENT GATE (gate 1): creating any persistent directory
+        // requires explicit user consent; existing directories are
+        // never gated. Interactive use prompts here; noninteractive use
+        // fails with the typed error (callers defer to pending state
+        // when the local cache exists).
+        if !dir.exists()
+            && let crate::config::consent::Consent::Refused { path } =
+                crate::config::consent::require_creation_consent(dir)
+        {
+            return Err(RecordStoreError::DirectoryConsentRequired { path });
+        }
         let relative =
             dir.strip_prefix(&self.worktree_root)
                 .map_err(|_| RecordStoreError::UnsafePath {

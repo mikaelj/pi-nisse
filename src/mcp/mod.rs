@@ -374,6 +374,14 @@ pub struct FeedbackReport {
     pub observations: Vec<FeedbackObservation>,
     /// Routing lessons the deterministic maintenance pass created.
     pub lessons: Vec<FeedbackLesson>,
+    /// Observations deferred by the directory-consent gate (0 unless
+    /// status is `deferred-directory-consent`).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub deferred: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// One durable observation created by a feedback submission.
@@ -427,7 +435,19 @@ impl FeedbackReport {
                         supersedes: lesson.superseded.len(),
                     })
                     .collect(),
+                deferred: 0,
             },
+            crate::learning::feedback::FeedbackRecording::DeferredConsent { count } => {
+                FeedbackReport {
+                    review_id,
+                    finding_id,
+                    outcome: outcome.as_str().to_string(),
+                    status: "deferred-directory-consent",
+                    observations: Vec::new(),
+                    lessons: Vec::new(),
+                    deferred: *count,
+                }
+            }
             crate::learning::feedback::FeedbackRecording::AlreadyRecorded(_) => FeedbackReport {
                 review_id,
                 finding_id,
@@ -435,6 +455,7 @@ impl FeedbackReport {
                 status: "already-recorded",
                 observations: Vec::new(),
                 lessons: Vec::new(),
+                deferred: 0,
             },
         }
     }

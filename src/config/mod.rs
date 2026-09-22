@@ -55,6 +55,7 @@
 /// configuration.
 pub use crate::domain::records::is_valid_contributor_id;
 
+pub mod consent;
 pub mod doctor;
 pub mod endpoint;
 pub mod git_probe;
@@ -103,6 +104,18 @@ pub struct NisseConfig {
     pub performance: PerformanceConfig,
     /// Contributor identity (lives in user config).
     pub contributor: Option<ContributorIdentity>,
+    /// Remembered directory-creation consent (user-requested plan
+    /// change; see [`consent`]).
+    pub directories: DirectoriesConfig,
+}
+
+/// Remembered directory-creation consent paths (user config layer only;
+/// the repository layer cannot grant consent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoriesConfig {
+    /// Canonical absolute paths whose creation (or whose descendants')
+    /// is pre-consented. Relative entries are dropped at load.
+    pub allow_paths: Vec<PathBuf>,
 }
 
 impl Default for NisseConfig {
@@ -123,6 +136,9 @@ impl Default for NisseConfig {
             learning: LearningConfig { enabled: true },
             performance: PerformanceConfig::default(),
             contributor: None,
+            directories: DirectoriesConfig {
+                allow_paths: Vec::new(),
+            },
         }
     }
 }
@@ -271,6 +287,11 @@ pub fn load_config(user: Option<&Path>, repo: Option<&Path>) -> Result<LoadedCon
     let blame = loaded_repo.as_deref().or(loaded_user.as_deref());
     validate_merged(&config, blame)?;
 
+    // Directory-creation consent is remembered in the user layer only;
+    // a repository config cannot grant it (trust rules, plan section
+    // 10).
+    consent::set_allowed_paths(config.directories.allow_paths.clone());
+
     Ok(LoadedConfig {
         config,
         user_config: loaded_user,
@@ -311,6 +332,13 @@ fn invalid(path: &Path, message: String) -> ConfigError {
 
 /// Validate one parsed file in isolation.
 fn validate_layer(layer: &PartialConfig, path: &Path, origin: Origin) -> Result<(), ConfigError> {
+    if origin == Origin::Repository && layer.directories.is_some() {
+        return Err(invalid(
+            path,
+            "the repository layer cannot grant directory-creation consent (`[directories]`)"
+                .to_string(),
+        ));
+    }
     if origin == Origin::Repository && layer.contributor.as_ref().is_some_and(|c| c.id.is_some()) {
         return Err(invalid(
             path,
@@ -457,6 +485,15 @@ struct PartialConfig {
     learning: Option<PartialLearning>,
     performance: Option<PartialPerformance>,
     contributor: Option<PartialContributor>,
+    directories: Option<PartialDirectories>,
+}
+
+/// User-config `[directories]` layer (repository configs may not grant
+/// directory consent).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PartialDirectories {
+    allow_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -523,6 +560,11 @@ impl PartialConfig {
             && let Some(max) = performance.max_concurrent_reviewers
         {
             config.performance.max_concurrent_reviewers = max;
+        }
+        if let Some(directories) = self.directories
+            && let Some(allow_paths) = directories.allow_paths
+        {
+            config.directories.allow_paths = allow_paths.into_iter().map(PathBuf::from).collect();
         }
         if let Some(contributor) = self.contributor
             && let Some(id) = contributor.id

@@ -101,7 +101,22 @@ pub fn resolve_or_prompt(
         );
         return Ok(IdentityOutcome::Unavailable);
     };
-    save_identity(path, &answer)?;
+    match save_identity(path, &answer) {
+        Ok(()) => {}
+        Err(IdentityError::Save { message, .. })
+            if message.starts_with("directory creation requires consent") =>
+        {
+            // Noninteractive identity save without config-directory
+            // consent: skip the save and proceed unsaved for this run
+            // (the same fail-safe as an unsavable identity).
+            tracing::warn!(
+                contributor = %answer,
+                "{message}; contributor identity not saved for this run"
+            );
+            return Ok(IdentityOutcome::Unavailable);
+        }
+        Err(err) => return Err(err),
+    }
     Ok(IdentityOutcome::Identity(ContributorIdentity {
         id: answer,
     }))
@@ -261,18 +276,31 @@ fn base_config_table_with_seed(
     Ok(toml::Table::new())
 }
 
-/// Create the user config directory if it is missing.
+/// Create the user config directory if it is missing — CONSENT-GATED
+/// (gate 3 of the directory-creation policy).
 ///
-/// On Unix the directory is created with mode `0700` (new components
-/// only; existing components keep their mode). This is the single
-/// creation point for the config directory until consent gating lands.
+/// Creation requires explicit consent (interactive prompt, remembered
+/// allow-paths, or `NISSE_ALLOW_DIR_CREATION=1`); a noninteractive run
+/// without consent fails with the marker message below and the caller
+/// skips the save instead of blocking. On Unix the directory is created
+/// with mode `0700` (new components only; existing components keep
+/// their mode).
 fn ensure_config_dir(config_file: &Path) -> Result<(), IdentityError> {
     let Some(parent) = config_file.parent() else {
         return Ok(());
     };
-    let result = if parent.exists() {
-        Ok(())
-    } else {
+    if parent.exists() {
+        return Ok(());
+    }
+    if let crate::config::consent::Consent::Refused { path } =
+        crate::config::consent::require_creation_consent(parent)
+    {
+        return Err(IdentityError::Save {
+            path: config_file.to_path_buf(),
+            message: crate::config::consent::consent_error_text(&path),
+        });
+    }
+    let result = {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -289,6 +317,19 @@ fn ensure_config_dir(config_file: &Path) -> Result<(), IdentityError> {
         path: config_file.to_path_buf(),
         message: format!("cannot create the config directory: {source}"),
     })
+}
+
+/// [`ensure_config_dir`] and [`base_config_table_with_seed`] exposed for
+/// the consent module's shared config-update helper.
+pub(crate) fn ensure_config_dir_for_consent(config_file: &Path) -> std::io::Result<()> {
+    ensure_config_dir(config_file).map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+/// The seeding base table for consent writes into `config` (legacy seed
+/// honored on first write).
+pub(crate) fn base_config_table_for_consent(config: &Path) -> std::io::Result<toml::Table> {
+    base_config_table_with_seed(config, legacy_seed_path().as_deref())
+        .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 /// Restrict the user config file to mode `0600` on Unix (it carries the

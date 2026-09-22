@@ -1,0 +1,9 @@
+# Developer-local defaults for cargo-run processes in this checkout.
+#
+# Unit and integration tests exercise behavior, not the directory-creation
+# consent gate, so they run with blanket consent (installed `nisse`
+# binaries are unaffected: this file only sets environment variables for
+# processes that cargo itself launches, such as `cargo test` and
+# `cargo run` from this repository).
+[env]
+NISSE_ALLOW_DIR_CREATION = "1"

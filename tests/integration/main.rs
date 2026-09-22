@@ -6,6 +6,8 @@ mod cache_binary;
 mod cli_binary;
 mod code_review;
 mod compact_binary;
+mod consent_binary;
+mod dir_creation_guard;
 mod doctor_binary;
 mod eval_binary;
 mod fact_staleness;
@@ -64,9 +66,17 @@ pub(crate) fn run_nisse_in_with_env(
         .env("XDG_CONFIG_HOME", home.join("xdg"))
         .env("APPDATA", home.join("appdata"))
         .env("RUST_LOG", "off")
-        .env("NISSE_PI_HOST_RUNTIME", "fake");
+        .env("NISSE_PI_HOST_RUNTIME", "fake")
+        // Default blanket consent for directory creation: the existing
+        // suite exercises behavior, not the consent gate. Consent tests
+        // opt out with the `\u{0}remove` sentinel value.
+        .env("NISSE_ALLOW_DIR_CREATION", "1");
     for (key, value) in extra_env {
-        command.env(key, value);
+        if *value == "\u{0}remove" {
+            command.env_remove(key);
+        } else {
+            command.env(key, value);
+        }
     }
     command.output().expect("failed to spawn nisse binary")
 }
