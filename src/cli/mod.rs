@@ -190,7 +190,7 @@ impl FeedbackOutcome {
 
 #[derive(Debug, Subcommand)]
 pub enum RecordsCommand {
-    /// List durable project records.
+    /// List durable project records, optionally filtered by --kind.
     List {
         /// Only list records of these kinds. Repeatable; lists every kind
         /// when omitted.
