@@ -161,6 +161,20 @@ exist); `fast` and `strongest` are optional. Each profile names a model,
 an endpoint, and an optional thinking level. `nisse doctor` reports the
 configured profiles.
 
+### Investigation reviews
+
+`nisse review investigation --task <...> --result <...>` reviews
+whether an investigation's claims and conclusions hold up. Each input
+accepts literal text, an explicit `@file` reference, or a bare value
+naming an existing file. The jury separates claim review (verdicts:
+supported / partially supported / contradicted / insufficiently
+supported / not applicable / outside scope, each with a confidence tier
+from demonstrated to unsupported, plus overstated-conclusion notes)
+from coverage review (important areas the investigation missed; gaps
+mean incompleteness, never proven findings). Verdict merges are
+deterministic and most-skeptical: reviewer disagreement is surfaced,
+never averaged away. See [PLAN_INVESTIGATION.md](PLAN_INVESTIGATION.md).
+
 ### Directory-creation consent
 
 Nisse never creates a persistent directory (the Git-tracked
@@ -214,6 +228,8 @@ nisse review plan --file <path> | --stdin [--json]
 nisse review code --working | --staged | --commit <oid>
                         | --range <base>..<head> | --branch <base-ref>
                         [--json]
+nisse review investigation --task <text|@file|path>
+                           --result <text|@file|path> [--json]
 
 nisse query "<query>" [--json]
 

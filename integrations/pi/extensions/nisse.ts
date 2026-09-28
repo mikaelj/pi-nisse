@@ -19,6 +19,9 @@ import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-wo
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
 
@@ -26,6 +29,7 @@ import { Type } from "typebox";
 export const NISSE_TOOL_NAMES = [
 	"nisse_review_plan",
 	"nisse_review_code",
+	"nisse_review_investigation",
 	"nisse_query_project",
 	"nisse_feedback",
 ] as const;
@@ -236,6 +240,94 @@ export interface ReviewCodeScopeInput {
 }
 
 /** CLI arguments for `nisse review code` in the requested scope. */
+export interface InvestigationInput {
+	readonly task: string;
+	readonly result: string;
+}
+
+/** Short random token for temp-file uniqueness. */
+function randomToken(): string {
+	return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Resolve one investigation input to CLI args. A leading `@` passes
+ * through unchanged (the CLI resolves it); a value naming an existing
+ * file passes through; literal text is written to a unique temp file
+ * inside `dir` and referenced as `@file`.
+ */
+function investigationInputArgs(
+	value: string,
+	name: string,
+	dir: string,
+): { args: string[]; tempFile?: string } {
+	const looksLikeFile = (candidate: string): boolean => {
+		try {
+			return statSync(candidate).isFile();
+		} catch {
+			return false;
+		}
+	};
+	if (value.startsWith("@")) {
+		return { args: [`--${name}`, value] };
+	}
+	if (looksLikeFile(value)) {
+		return { args: [`--${name}`, value] };
+	}
+	const tempFile = join(dir, `nisse-${name}-${randomToken()}.txt`);
+	writeFileSync(tempFile, value, "utf8");
+	return { args: [`--${name}`, `@${tempFile}`], tempFile };
+}
+
+/**
+ * Build `review investigation` args with the temp-file lifecycle frozen
+ * by PLAN_INVESTIGATION.md: a unique per-invocation temp directory,
+ * files fully written before the CLI spawns, cleanup only after the
+ * subprocess fully settles.
+ */
+export function reviewInvestigationArgs(
+	input: InvestigationInput,
+	cwd: string,
+	buildAndRun: (args: string[]) => Promise<unknown>,
+): Promise<unknown> {
+	const dir = mkdtempSync(join(tmpdir(), "nisse-investigation-"));
+	const tempFiles: string[] = [];
+	try {
+		const task = investigationInputArgs(input.task, "task", dir);
+		const result = investigationInputArgs(input.result, "result", dir);
+		if (task.tempFile !== undefined) {
+			tempFiles.push(task.tempFile);
+		}
+		if (result.tempFile !== undefined) {
+			tempFiles.push(result.tempFile);
+		}
+		// Inputs are fully written and closed above; the CLI receives
+		// absolute paths, so its cwd cannot diverge from ours.
+		const args = [
+			"review",
+			"investigation",
+			...task.args,
+			...result.args,
+			"--json",
+		];
+		const resolved = args.map((arg) =>
+			arg.startsWith("@") ? `@${join(dir, arg.slice(1))}` : arg,
+		);
+		return buildAndRun(resolved);
+	} finally {
+		// Cleanup only after the subprocess fully settles (success,
+		// failure, timeout, or abort).
+		for (const file of tempFiles) {
+			try {
+				rmSync(file, { force: true });
+			} catch {
+				// Best-effort cleanup.
+			}
+		}
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
 export function reviewCodeArgs(input: ReviewCodeScopeInput): string[] {
 	const args = ["review", "code"];
 	switch (input.scope) {
@@ -507,6 +599,35 @@ export function buildNisseTools(deps: NisseToolDependencies = {}): NisseToolRegi
 					{ cwd: ctx.cwd, signal },
 					true,
 				);
+			},
+		}),
+		defineTool({
+			name: "nisse_review_investigation",
+			label: "Nisse investigation review",
+			description:
+				"Run a Nisse reviewer-jury review of investigation results (PLAN_INVESTIGATION.md): claim review (supported / partially supported / contradicted / insufficiently supported / not applicable / outside scope, with confidence tiers) plus coverage review against the task. Use after an investigation/research task produced conclusions that will drive action. Returns InvestigationResult JSON; claim ids and coverage-gap ids are stable within this review.",
+			promptSnippet:
+				"Test whether investigation results hold up: claim scrutiny plus coverage review.",
+			parameters: Type.Object({
+				task: Type.String({
+					description:
+						"The effective task the investigation was supposed to answer (literal text, or a path — a leading `@` forces file interpretation).",
+				}),
+				result: Type.String({
+					description:
+						"The investigation output to review (literal text, or a path — a leading `@` forces file interpretation).",
+				}),
+			}),
+			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+				return reviewInvestigationArgs(params, ctx.cwd, (args) =>
+					executeNisse(
+						"nisse_review_investigation",
+						() => args,
+						run,
+						{ cwd: ctx.cwd, signal },
+						true,
+					),
+				) as Promise<AgentToolResult<NisseToolDetails>>;
 			},
 		}),
 		defineTool({

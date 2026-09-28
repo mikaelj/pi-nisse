@@ -448,7 +448,7 @@ impl App {
     }
 
     /// The complete investigation review operation (PLAN_INVESTIGATION.md).
-    fn investigation_operation(
+    pub(crate) fn investigation_operation(
         &self,
         task: String,
         result: String,

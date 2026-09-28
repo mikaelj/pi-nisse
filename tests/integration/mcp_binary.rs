@@ -31,10 +31,11 @@ const QUEUE_RS: &str = "pub struct Queue {\n    slots: [u8; 32],\n}\n\npub fn en
 const QUEUE_RS_V2: &str = "pub struct Queue {\n    slots: [u8; 32],\n}\n\npub fn enqueue(queue: &mut Queue, item: u8) {\n    queue.slots[0] = item;\n}\n\npub fn drain(queue: &mut Queue) -> u8 {\n    queue.slots[0]\n}\n";
 
 /// The frozen MCP tool surface (plan section 67).
-const MCP_TOOLS: [&str; 4] = [
+const MCP_TOOLS: [&str; 5] = [
     "query_project",
     "record_feedback",
     "review_code",
+    "review_investigation",
     "review_plan",
 ];
 

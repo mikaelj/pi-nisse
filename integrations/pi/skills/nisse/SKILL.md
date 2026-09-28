@@ -128,6 +128,18 @@ understand → implement → test → finish. Do not invoke any Nisse tool
 for a trivial task **unless the user explicitly asks for Nisse** — an
 explicit request always runs the substantial-task workflow above.
 
+## Investigation reviews
+
+When an investigation or research task produced conclusions that will
+drive action, run `nisse_review_investigation` with the effective task
+(including constraints and clarifications) and the investigation output
+(literal text or file paths). Nisse separates claim review (supported /
+partially supported / contradicted / insufficiently supported / not
+applicable / outside scope, each with a confidence tier) from coverage
+review (important areas the investigation missed). Coverage gaps mean
+incompleteness, not proven findings. There is no fix loop: act on the
+verdicts by revising the investigation yourself, and re-run if needed.
+
 ## Feedback semantics
 
 After a code-review loop, submit one `nisse_feedback` call per finding

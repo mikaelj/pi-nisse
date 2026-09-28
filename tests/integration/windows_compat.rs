@@ -44,10 +44,11 @@ const CRLF_QUEUE_RS: &str = "pub struct Queue {\r\n    slots: [u8; 32],\r\n}\r\n
 const CRLF_QUEUE_RS_V2: &str = "pub struct Queue {\r\n    slots: [u8; 32],\r\n}\r\n\r\npub fn enqueue(queue: &mut Queue, item: u8) {\r\n    queue.slots[0] = item;\r\n}\r\n\r\npub fn drain(queue: &mut Queue) -> u8 {\r\n    queue.slots[0]\r\n}\r\n";
 
 /// The frozen MCP tool surface (plan section 67).
-const MCP_TOOLS: [&str; 4] = [
+const MCP_TOOLS: [&str; 5] = [
     "query_project",
     "record_feedback",
     "review_code",
+    "review_investigation",
     "review_plan",
 ];
 

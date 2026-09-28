@@ -201,6 +201,21 @@ impl NisseMcpServer {
     }
 
     #[tool(
+        description = "Run a Nisse reviewer-jury review of investigation results (PLAN_INVESTIGATION.md): claim review (supported / partially supported / contradicted / insufficiently supported / not applicable / outside scope with confidence tiers and overstated notes) plus coverage review against the task. Task and result accept literal text, an explicit @file reference, or a path naming an existing file. Returns InvestigationResult JSON."
+    )]
+    async fn review_investigation(
+        &self,
+        Parameters(params): Parameters<ReviewInvestigationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        reject_blank(&params.task, "task")?;
+        reject_blank(&params.result, "result")?;
+        self.run_json_operation("review investigation", move || {
+            App::new().investigation_operation(params.task, params.result)
+        })
+        .await
+    }
+
+    #[tool(
         description = "Query Nisse's deterministic project index for the current working-tree snapshot of the server's working directory: source symbols and relations, project facts, lessons, and built-in practices. Runs no LLM review; useful for investigating the project and checking finding evidence. Returns a JSON context bundle (query, snapshot, truncated, entries[])."
     )]
     async fn query_project(
@@ -266,6 +281,24 @@ pub struct ReviewPlanParams {
     /// Complete text of the implementation plan to review.
     #[schemars(description = "Complete text of the implementation plan to review.")]
     pub plan: String,
+}
+
+/// Input of `review_investigation` (PLAN_INVESTIGATION.md).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReviewInvestigationParams {
+    /// The effective task the investigation was supposed to answer:
+    /// literal text, an explicit `@file` reference, or a value naming an
+    /// existing file.
+    #[schemars(
+        description = "The effective task (literal text, @file, or an existing file path)."
+    )]
+    pub task: String,
+    /// The investigation output to review: literal text, an explicit
+    /// `@file` reference, or a value naming an existing file.
+    #[schemars(
+        description = "The investigation output to review (literal text, @file, or an existing file path)."
+    )]
+    pub result: String,
 }
 
 /// Input of `review_code`: one scope plus its companion revision, when
