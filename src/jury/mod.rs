@@ -33,6 +33,7 @@ pub mod catalog;
 pub mod execution;
 pub mod findings;
 pub mod host;
+pub mod investigation;
 pub mod plan;
 pub mod protocol;
 pub mod review;

@@ -15,6 +15,7 @@ mod facts_binary;
 mod feedback_binary;
 mod final_regression;
 mod git_env;
+mod investigation_binary;
 mod lessons_binary;
 mod mcp_binary;
 mod needle_binary;

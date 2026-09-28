@@ -644,7 +644,7 @@ fn bounded(text: &str, max_bytes: usize) -> String {
 /// target snapshot (plan section 48). Assessment is deterministic —
 /// content-key provenance, path presence, excerpt containment — and
 /// never consults an LLM.
-fn stale_fact_ids(
+pub(crate) fn stale_fact_ids(
     ctx: &RepoContext,
     resolved: &ResolvedSnapshot,
     records: &[StoredRecord],
@@ -657,7 +657,7 @@ fn stale_fact_ids(
 /// Distinct index languages of the freshly refreshed target snapshot,
 /// read from the worktree manifest (the same refresh that bound the
 /// snapshot; `Retriever::open` has already verified the binding).
-fn snapshot_languages(paths: &StoragePaths) -> Result<Vec<String>, PlanReviewError> {
+pub(crate) fn snapshot_languages(paths: &StoragePaths) -> Result<Vec<String>, PlanReviewError> {
     let cache = |err: rusqlite::Error| PlanReviewError::Cache(err.to_string());
     let db = open_or_recover(&paths.worktree, DbKind::Worktree)
         .map_err(|err| PlanReviewError::Cache(format!("{}: {err}", err)))?;
@@ -679,7 +679,7 @@ fn snapshot_languages(paths: &StoragePaths) -> Result<Vec<String>, PlanReviewErr
 
 /// Deterministic routing tags from the retrieved records: the tags of
 /// matched facts and lessons (plan section 33 classifier input).
-fn record_tags(context: &ContextBundle, active: &[&StoredRecord]) -> Vec<String> {
+pub(crate) fn record_tags(context: &ContextBundle, active: &[&StoredRecord]) -> Vec<String> {
     let wanted: BTreeSet<&str> = context
         .entries
         .iter()
@@ -722,15 +722,17 @@ pub(crate) fn active_lesson_hints(active: &[&StoredRecord]) -> Vec<RoutingHint> 
 /// One reviewer seat's adjusted methodology for a review: the static
 /// profile combined with review-kind instructions and, for the dynamic
 /// expert, the constrained domain description.
-struct SeatPlan {
+pub(crate) struct SeatPlan {
+    /// Seat reviewer id.
+    pub(crate) reviewer: String,
     /// Seat specialization label.
-    specialization: String,
+    pub(crate) specialization: String,
     /// Full reviewer instructions.
-    instructions: String,
+    pub(crate) instructions: String,
     /// Checklist items (static first, domain risks appended).
-    checklist: Vec<String>,
+    pub(crate) checklist: Vec<String>,
     /// Practice tags whose packs may enter the reviewer's context.
-    practice_tags: Vec<String>,
+    pub(crate) practice_tags: Vec<String>,
 }
 
 /// Combine a reviewer profile with review-kind instructions and an
@@ -738,11 +740,12 @@ struct SeatPlan {
 /// description can never add tools, providers, or capabilities — those
 /// come only from the static profile; the static checklist items always
 /// come first).
-fn seat_plan(
+pub(crate) fn seat_plan(
     profile: &ReviewerProfile,
     kind_instructions: String,
     description: Option<&DynamicDomainDescription>,
 ) -> SeatPlan {
+    let reviewer = profile.id.clone();
     let mut specialization = profile.description.clone();
     let mut instructions = kind_instructions;
     let mut checklist = profile.checklist.clone();
@@ -781,6 +784,7 @@ fn seat_plan(
     }
 
     SeatPlan {
+        reviewer,
         specialization: bounded(&specialization, MAX_DESCRIPTOR_BYTES * 2),
         instructions,
         checklist,
@@ -790,7 +794,7 @@ fn seat_plan(
 
 /// Assemble one juror's final execution spec from its seat plan and
 /// assembled initial context (plan section 18).
-fn execution_spec(
+pub(crate) fn execution_spec(
     profile: &ReviewerProfile,
     seat: SeatPlan,
     initial_context: ContextBundle,
@@ -832,7 +836,7 @@ fn code_review_instructions(base: &str) -> String {
 /// Assemble one reviewer's bounded initial context (plan section 23):
 /// the review input first, then the shared retrieved context, then the
 /// practices of the reviewer's (possibly domain-extended) tags.
-fn initial_context(
+pub(crate) fn initial_context(
     input_entries: &[ContextEntry],
     shared: &ContextBundle,
     catalog: &Catalog,
@@ -1594,7 +1598,7 @@ fn code_initial_context(
 /// oversized entries, and keep only practice tags the bundled catalog
 /// actually provides. An unusable description (empty label) becomes
 /// `None` so the caller falls back to the static template.
-fn normalize_domain_description(
+pub(crate) fn normalize_domain_description(
     description: Option<DynamicDomainDescription>,
     catalog: &Catalog,
 ) -> Option<DynamicDomainDescription> {

@@ -1224,28 +1224,25 @@ pub struct StartInvestigationPayload {
     pub reviewers: Vec<ReviewerExecutionSpec>,
 }
 
-/// `start_investigation` envelope.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A Rust-to-host `start_investigation` message.
+#[derive(Debug, Clone)]
 pub struct StartInvestigationMessage {
-    pub protocol_version: u32,
+    /// Envelope id.
     pub id: String,
-    #[serde(rename = "type")]
-    pub message_type: String,
+    /// Payload: the investigation to execute.
     pub payload: StartInvestigationPayload,
 }
 
 impl StartInvestigationMessage {
+    /// Build the message for `payload` with an explicit envelope id.
     pub fn new(id: String, payload: StartInvestigationPayload) -> Self {
-        StartInvestigationMessage {
-            protocol_version: PROTOCOL_VERSION,
-            id,
-            message_type: rust_to_host::START_INVESTIGATION.to_string(),
-            payload,
-        }
+        StartInvestigationMessage { id, payload }
     }
 
+    /// Serialize to one JSONL line (flattened payload, matching
+    /// `decodeIncomingMessage` on the host).
     pub fn to_line(&self) -> String {
-        serde_json::to_string(self).expect("start_investigation message serializes")
+        encode_message(rust_to_host::START_INVESTIGATION, &self.id, &self.payload)
     }
 }
 

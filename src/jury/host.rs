@@ -976,6 +976,14 @@ impl HostProcess {
                     let response = tool_handler(&payload);
                     self.send_tool_response(&response)?;
                 }
+                HostEvent::HostError(error) => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "host reported an error during investigation `{review_id}`: {} ({})",
+                            error.code, error.message
+                        ),
+                    });
+                }
                 other => {
                     return Err(HostError::UnexpectedHostMessage {
                         reason: format!(

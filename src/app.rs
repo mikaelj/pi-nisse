@@ -425,21 +425,72 @@ impl App {
         Ok(())
     }
 
-    /// Run `nisse review investigation` (PLAN_INVESTIGATION.md).
-    ///
-    /// The full operation lands with the pipeline milestone; until then
-    /// the frozen surface parses and fails with the typed not-implemented
-    /// error.
+    /// Run `nisse review investigation` (PLAN_INVESTIGATION.md): thin CLI
+    /// wrapper around [`App::investigation_operation`].
     fn run_review_investigation(
         &self,
         task: String,
         result: String,
-        _json: bool,
+        json: bool,
     ) -> Result<(), AppError> {
-        let _ = (task, result);
-        Err(AppError::NotImplemented(
-            "nisse review investigation".to_string(),
-        ))
+        let rendered = self.investigation_operation(task, result)?;
+        if json {
+            print_to_stdout(
+                &serde_json::to_string(&rendered)
+                    .map_err(|err| AppError::Other(anyhow::anyhow!("{err}")))?,
+            );
+        } else {
+            print_to_stdout(&crate::jury::investigation::render_investigation_text(
+                &rendered,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The complete investigation review operation (PLAN_INVESTIGATION.md).
+    fn investigation_operation(
+        &self,
+        task: String,
+        result: String,
+    ) -> Result<crate::domain::investigation::InvestigationResult, AppError> {
+        use crate::domain::investigation::resolve_input_value;
+        use crate::jury::investigation::{self as pipeline, InvestigationInputs};
+
+        let cwd = std::env::current_dir()
+            .map_err(|err| anyhow::anyhow!("failed to determine the current directory: {err}"))?;
+        let (ctx, paths) = self.discover_storage()?;
+        let worktree_root = ctx.worktree_root.clone();
+        let environment = self.review_environment(&ctx, "review investigation")?;
+
+        let task_input = resolve_input_value(&task, "task", Some(&worktree_root), &cwd)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("{err}")))?;
+        let result_input = resolve_input_value(&result, "result", Some(&worktree_root), &cwd)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("{err}")))?;
+        let resolved = crate::git::resolve_snapshot(&ctx, &crate::git::SnapshotSpec::Working)
+            .map_err(|err| {
+                AppError::Other(anyhow::anyhow!(
+                    "investigation review failed to resolve the working-tree snapshot: {err}"
+                ))
+            })?;
+        let options = pipeline::InvestigationReviewOptions {
+            launch: environment.launch,
+            model_profiles: environment.model_profiles,
+            routing_provider: environment.routing_provider,
+            embedding_provider: environment.embedding_provider,
+            contributor_id: environment.contributor_id,
+            max_concurrent_reviewers: environment.max_concurrent_reviewers,
+        };
+        pipeline::run_investigation_review(
+            &ctx,
+            &resolved,
+            &paths,
+            &InvestigationInputs {
+                task: task_input,
+                result: result_input,
+            },
+            &options,
+        )
+        .map_err(|err| AppError::Other(anyhow::anyhow!("investigation review failed: {err}")))
     }
 
     /// Run `nisse feedback` (plan sections 49 and 50).
