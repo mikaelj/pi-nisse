@@ -19,7 +19,9 @@ use thiserror::Error;
 
 use crate::domain::jury::{JuryPlan, JuryRole, JurySeat};
 use crate::domain::routing::RoutingDecision;
-use crate::jury::catalog::{Catalog, DYNAMIC_DOMAIN_EXPERT_ID, QUALITY_ID};
+use crate::jury::catalog::{
+    CLAIM_SKEPTIC_ID, COVERAGE_AUDITOR_ID, Catalog, DYNAMIC_DOMAIN_EXPERT_ID, QUALITY_ID,
+};
 
 /// Maximum number of scored specialists in one jury (plan section 17).
 pub const MAX_SELECTED_SPECIALISTS: usize = 3;
@@ -123,6 +125,80 @@ pub fn build_jury_plan(
     Ok(JuryPlan { seats })
 }
 
+/// Build the frozen INVESTIGATION jury plan (PLAN_INVESTIGATION.md and
+/// the section 17 amendment):
+///
+///     quality + claim-skeptic + coverage-auditor + one domain reviewer
+///
+/// The domain seat takes the best-scoring specialist from the routing
+/// decision (exactly one), or the dynamic fallback when no specialist
+/// reaches the threshold. Claim review and coverage review are separate
+/// review tasks in separate isolated sessions (invariant 30); they are
+/// structural, never routed by score.
+pub fn build_investigation_jury_plan(
+    decision: &RoutingDecision,
+    catalog: &Catalog,
+) -> Result<JuryPlan, JuryPlanError> {
+    let structural = |id: &str, role: JuryRole| -> Result<JurySeat, JuryPlanError> {
+        let profile = catalog
+            .profile(id)
+            .ok_or_else(|| JuryPlanError::UnknownReviewer(id.to_string()))?;
+        Ok(JurySeat {
+            reviewer_id: profile.id.clone(),
+            score: None,
+            role,
+        })
+    };
+
+    let mut seats = Vec::with_capacity(MAX_JURY_SIZE);
+    seats.push(structural(QUALITY_ID, JuryRole::Quality)?);
+    seats.push(structural(CLAIM_SKEPTIC_ID, JuryRole::InvestigationClaim)?);
+    seats.push(structural(
+        COVERAGE_AUDITOR_ID,
+        JuryRole::InvestigationCoverage,
+    )?);
+
+    // Exactly one domain reviewer: the best-scoring specialist, or the
+    // dynamic fallback when none qualifies.
+    let domain: Option<(String, Option<f64>, bool)> = decision
+        .selected_specialists
+        .first()
+        .map(|reviewer_id| {
+            let score = decision
+                .scores
+                .iter()
+                .find(|score| &score.reviewer_id == reviewer_id)
+                .map(|score| score.score);
+            (reviewer_id.clone(), score, false)
+        })
+        .or_else(|| {
+            decision
+                .dynamic_fallback
+                .then(|| (DYNAMIC_DOMAIN_EXPERT_ID.to_string(), None, true))
+        });
+    match domain {
+        Some((reviewer_id, score, fallback)) => seats.push(JurySeat {
+            reviewer_id,
+            score,
+            role: if fallback {
+                JuryRole::DynamicFallback
+            } else {
+                JuryRole::Specialist
+            },
+        }),
+        // No specialist and no fallback flag cannot happen for a
+        // well-formed decision, but fail closed rather than guess.
+        None => {
+            return Err(JuryPlanError::InconsistentFallback {
+                actual: decision.selected_specialists.len(),
+            });
+        }
+    }
+
+    validate_seats(&seats)?;
+    Ok(JuryPlan { seats })
+}
+
 /// Enforce the frozen jury invariants on the constructed seats.
 ///
 /// The builder guarantees structurally that `quality` holds the
@@ -151,6 +227,70 @@ mod tests {
 
     fn catalog() -> Catalog {
         Catalog::bundled().expect("bundled catalog must load")
+    }
+
+    #[test]
+    fn investigation_jury_is_quality_claim_coverage_plus_one_domain() {
+        // A routing decision that selects specialists: only the best one
+        // joins the investigation jury.
+        let decision = RoutingDecision {
+            scores: vec![
+                RoutingScore::for_test("security", 0.9),
+                RoutingScore::for_test("networking", 0.8),
+            ],
+            selected_specialists: vec!["security".to_string(), "networking".to_string()],
+            dynamic_fallback: false,
+            threshold: 0.35,
+        };
+        let plan = build_investigation_jury_plan(&decision, &catalog()).unwrap();
+        let ids: Vec<&str> = plan.seats.iter().map(|s| s.reviewer_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["quality", "claim-skeptic", "coverage-auditor", "security"]
+        );
+        assert_eq!(plan.seats[1].role, JuryRole::InvestigationClaim);
+        assert_eq!(plan.seats[2].role, JuryRole::InvestigationCoverage);
+        assert_eq!(plan.seats[3].role, JuryRole::Specialist);
+        assert_eq!(plan.seats[3].score, Some(0.9));
+    }
+
+    #[test]
+    fn investigation_jury_uses_dynamic_fallback_when_no_specialist_scores() {
+        let decision = RoutingDecision {
+            scores: vec![],
+            selected_specialists: vec![],
+            dynamic_fallback: true,
+            threshold: 0.35,
+        };
+        let plan = build_investigation_jury_plan(&decision, &catalog()).unwrap();
+        let ids: Vec<&str> = plan.seats.iter().map(|s| s.reviewer_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "quality",
+                "claim-skeptic",
+                "coverage-auditor",
+                "dynamic-domain-expert"
+            ]
+        );
+        assert_eq!(plan.seats[3].role, JuryRole::DynamicFallback);
+    }
+
+    #[test]
+    fn routing_never_scores_structural_investigation_reviewers() {
+        let classifier = RulesClassifier::new(catalog());
+        let input = RoutingInput {
+            descriptors: vec!["claim-skeptic coverage-auditor investigation".to_string()],
+            ..RoutingInput::empty()
+        };
+        let decision = classifier.classify(&input);
+        let scored: Vec<&str> = decision
+            .scores
+            .iter()
+            .map(|s| s.reviewer_id.as_str())
+            .collect();
+        assert!(!scored.contains(&"claim-skeptic"));
+        assert!(!scored.contains(&"coverage-auditor"));
     }
 
     fn decision_for(input: &RoutingInput) -> RoutingDecision {

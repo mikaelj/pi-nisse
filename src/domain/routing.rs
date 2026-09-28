@@ -71,6 +71,22 @@ pub struct RoutingScore {
     pub lesson_boost: f64,
 }
 
+impl RoutingScore {
+    /// A score with empty match details (test helper).
+    #[cfg(test)]
+    pub(crate) fn for_test(reviewer_id: &str, score: f64) -> Self {
+        RoutingScore {
+            reviewer_id: reviewer_id.to_string(),
+            score,
+            matched_trigger_terms: Vec::new(),
+            matched_paths: Vec::new(),
+            matched_languages: Vec::new(),
+            matched_tags: Vec::new(),
+            lesson_boost: 0.0,
+        }
+    }
+}
+
 /// The result of deterministic routing over the static catalog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

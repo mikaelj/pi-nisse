@@ -27,6 +27,14 @@ pub const QUALITY_ID: &str = "quality";
 /// selected by routing scores.
 pub const DYNAMIC_DOMAIN_EXPERT_ID: &str = "dynamic-domain-expert";
 
+/// The investigation claim reviewer (PLAN_INVESTIGATION.md); structural
+/// in every investigation jury, never routed by score.
+pub const CLAIM_SKEPTIC_ID: &str = "claim-skeptic";
+
+/// The investigation coverage reviewer (PLAN_INVESTIGATION.md);
+/// structural in every investigation jury, never routed by score.
+pub const COVERAGE_AUDITOR_ID: &str = "coverage-auditor";
+
 /// The frozen set of built-in reviewer ids (plan section 16).
 pub const BUILTIN_REVIEWER_IDS: &[&str] = &[
     "quality",
@@ -44,6 +52,8 @@ pub const BUILTIN_REVIEWER_IDS: &[&str] = &[
     "error-handling",
     "maintainability",
     "dynamic-domain-expert",
+    "claim-skeptic",
+    "coverage-auditor",
 ];
 
 /// The frozen set of built-in practice pack ids (plan section 32).
@@ -81,13 +91,26 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &[
 
 /// Reviewers that are added structurally by jury construction instead of
 /// being scored by routing. They carry no trigger terms by design.
-const STRUCTURAL_REVIEWER_IDS: &[&str] = &[QUALITY_ID, DYNAMIC_DOMAIN_EXPERT_ID];
+const STRUCTURAL_REVIEWER_IDS: &[&str] = &[
+    QUALITY_ID,
+    DYNAMIC_DOMAIN_EXPERT_ID,
+    CLAIM_SKEPTIC_ID,
+    COVERAGE_AUDITOR_ID,
+];
 
 /// Bundled reviewer assets, embedded at compile time.
 static REVIEWER_ASSETS: &[(&str, &str)] = &[
     (
         "quality",
         include_str!("../../assets/reviewers/quality.json"),
+    ),
+    (
+        "claim-skeptic",
+        include_str!("../../assets/reviewers/claim-skeptic.json"),
+    ),
+    (
+        "coverage-auditor",
+        include_str!("../../assets/reviewers/coverage-auditor.json"),
     ),
     (
         "testing",

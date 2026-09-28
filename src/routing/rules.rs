@@ -23,7 +23,9 @@ use std::collections::BTreeSet;
 
 use crate::domain::records::{MAX_ROUTING_BOOST, RoutingHint};
 use crate::domain::routing::{RoutingDecision, RoutingInput, RoutingScore};
-use crate::jury::catalog::{Catalog, DYNAMIC_DOMAIN_EXPERT_ID, QUALITY_ID};
+use crate::jury::catalog::{
+    CLAIM_SKEPTIC_ID, COVERAGE_AUDITOR_ID, Catalog, DYNAMIC_DOMAIN_EXPERT_ID, QUALITY_ID,
+};
 use crate::jury::plan::MAX_SELECTED_SPECIALISTS;
 use crate::routing::pathglob::glob_match;
 
@@ -98,7 +100,12 @@ impl RulesClassifier {
             .catalog
             .profiles()
             .iter()
-            .filter(|profile| profile.id != QUALITY_ID && profile.id != DYNAMIC_DOMAIN_EXPERT_ID)
+            .filter(|profile| {
+                profile.id != QUALITY_ID
+                    && profile.id != DYNAMIC_DOMAIN_EXPERT_ID
+                    && profile.id != CLAIM_SKEPTIC_ID
+                    && profile.id != COVERAGE_AUDITOR_ID
+            })
             .map(|profile| {
                 score_profile(
                     profile,
@@ -398,8 +405,10 @@ mod tests {
                 score.reviewer_id
             );
         }
-        // Every static specialist is scored exactly once.
-        assert_eq!(decision.scores.len(), catalog().profiles().len() - 2);
+        // Every static specialist is scored exactly once (structural
+        // reviewers are never scored: quality, the dynamic expert, and
+        // the two investigation reviewers).
+        assert_eq!(decision.scores.len(), catalog().profiles().len() - 4);
 
         let plan = build_jury_plan(&decision, &catalog()).unwrap();
         assert_eq!(

@@ -20,6 +20,12 @@ pub enum JuryRole {
     /// The dynamic domain expert, added only when no static specialist
     /// reaches the routing threshold.
     DynamicFallback,
+    /// The investigation claim reviewer, structural in every
+    /// investigation jury (PLAN_INVESTIGATION.md).
+    InvestigationClaim,
+    /// The investigation coverage reviewer, structural in every
+    /// investigation jury (PLAN_INVESTIGATION.md).
+    InvestigationCoverage,
 }
 
 /// One seat in a jury plan.
