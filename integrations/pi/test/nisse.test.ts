@@ -387,6 +387,10 @@ describe("thin adapter invariant", () => {
 		assert.ok(specs.length > 0, "expected imports to be found");
 		const allowed = new Set([
 			"node:child_process",
+			"node:crypto",
+			"node:fs",
+			"node:os",
+			"node:path",
 			"@earendil-works/pi-ai",
 			"@earendil-works/pi-coding-agent",
 			"typebox",

@@ -24,6 +24,7 @@ import { resolveFakeModel, resolvePiModel, type HostModelTable } from "./models.
 import { UNTRUSTED_DATA_RULES, untrustedBlock } from "./untrusted.ts";
 import type { ToolBridge } from "./tools.ts";
 import {
+  MIN_INPUT_SPAN_EXCERPT_CHARS,
   REVIEW_KINDS,
   REVIEWER_TOOLS,
   validateInvestigationReport,
@@ -1018,7 +1019,14 @@ export class FakeInvestigationReviewerSession {
 function firstWords(text: string, count: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   const words = normalized.split(" ").slice(0, count).join(" ");
-  return words.length >= 24 ? words : `${words} — end of excerpt`.slice(0, 40);
+  if (words.length >= MIN_INPUT_SPAN_EXCERPT_CHARS) {
+    return words;
+  }
+  // Short input: extend verbatim until the excerpt is long enough.
+  const extended = normalized.slice(0, Math.max(words.length + 40, MIN_INPUT_SPAN_EXCERPT_CHARS));
+  return extended.length >= MIN_INPUT_SPAN_EXCERPT_CHARS
+    ? extended
+    : extended.padEnd(MIN_INPUT_SPAN_EXCERPT_CHARS, ".");
 }
 
 /** Attempt counters for the fake runtime's fail-once fault. */

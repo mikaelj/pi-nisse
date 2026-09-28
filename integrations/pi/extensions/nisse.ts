@@ -19,7 +19,9 @@ import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-wo
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TSchema } from "typebox";
@@ -245,21 +247,26 @@ export interface InvestigationInput {
 	readonly result: string;
 }
 
-/** Short random token for temp-file uniqueness. */
+/**
+ * Short random token for temp-file uniqueness (cryptographic source).
+ */
 function randomToken(): string {
-	return Math.random().toString(36).slice(2, 10);
+	return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 }
 
 /**
  * Resolve one investigation input to CLI args. A leading `@` passes
- * through unchanged (the CLI resolves it); a value naming an existing
- * file passes through; literal text is written to a unique temp file
- * inside `dir` and referenced as `@file`.
+ * through unchanged (relative values resolve inside the CLI against the
+ * session cwd, which matches `base` here); a bare value naming an
+ * existing file (resolved against `base`) passes through; literal text
+ * is written to a unique temp file inside `dir` and referenced as
+ * `@file` (absolute, so the CLI's cwd cannot diverge).
  */
 function investigationInputArgs(
 	value: string,
 	name: string,
 	dir: string,
+	base: string,
 ): { args: string[]; tempFile?: string } {
 	const looksLikeFile = (candidate: string): boolean => {
 		try {
@@ -271,8 +278,9 @@ function investigationInputArgs(
 	if (value.startsWith("@")) {
 		return { args: [`--${name}`, value] };
 	}
-	if (looksLikeFile(value)) {
-		return { args: [`--${name}`, value] };
+	const direct = isAbsolute(value) ? value : join(base, value);
+	if (looksLikeFile(direct)) {
+		return { args: [`--${name}`, direct] };
 	}
 	const tempFile = join(dir, `nisse-${name}-${randomToken()}.txt`);
 	writeFileSync(tempFile, value, "utf8");
@@ -282,27 +290,28 @@ function investigationInputArgs(
 /**
  * Build `review investigation` args with the temp-file lifecycle frozen
  * by PLAN_INVESTIGATION.md: a unique per-invocation temp directory,
- * files fully written before the CLI spawns, cleanup only after the
- * subprocess fully settles.
+ * files fully written before the CLI spawns, and cleanup strictly after
+ * the subprocess settles (success, failure, timeout, or abort — the
+ * awaited promise).
  */
-export function reviewInvestigationArgs(
+export async function reviewInvestigationArgs<T>(
 	input: InvestigationInput,
 	cwd: string,
-	buildAndRun: (args: string[]) => Promise<unknown>,
-): Promise<unknown> {
+	buildAndRun: (args: string[]) => Promise<T>,
+): Promise<T> {
 	const dir = mkdtempSync(join(tmpdir(), "nisse-investigation-"));
 	const tempFiles: string[] = [];
 	try {
-		const task = investigationInputArgs(input.task, "task", dir);
-		const result = investigationInputArgs(input.result, "result", dir);
+		const task = investigationInputArgs(input.task, "task", dir, cwd);
+		const result = investigationInputArgs(input.result, "result", dir, cwd);
 		if (task.tempFile !== undefined) {
 			tempFiles.push(task.tempFile);
 		}
 		if (result.tempFile !== undefined) {
 			tempFiles.push(result.tempFile);
 		}
-		// Inputs are fully written and closed above; the CLI receives
-		// absolute paths, so its cwd cannot diverge from ours.
+		// Temp-file paths are absolute; user @/bare paths pass through
+		// exactly as the CLI documents them.
 		const args = [
 			"review",
 			"investigation",
@@ -310,13 +319,8 @@ export function reviewInvestigationArgs(
 			...result.args,
 			"--json",
 		];
-		const resolved = args.map((arg) =>
-			arg.startsWith("@") ? `@${join(dir, arg.slice(1))}` : arg,
-		);
-		return buildAndRun(resolved);
+		return await buildAndRun(args);
 	} finally {
-		// Cleanup only after the subprocess fully settles (success,
-		// failure, timeout, or abort).
 		for (const file of tempFiles) {
 			try {
 				rmSync(file, { force: true });
@@ -627,7 +631,7 @@ export function buildNisseTools(deps: NisseToolDependencies = {}): NisseToolRegi
 						{ cwd: ctx.cwd, signal },
 						true,
 					),
-				) as Promise<AgentToolResult<NisseToolDetails>>;
+				);
 			},
 		}),
 		defineTool({

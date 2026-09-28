@@ -715,7 +715,7 @@ export function validateInvestigationCoverageGap(
     area: requireNonEmptyString(object, "area"),
     why_expected: requireNonEmptyString(object, "why_expected"),
     importance: requireEnum(object, "importance", COVERAGE_IMPORTANCES),
-    evidence: evidence.map(validateEvidenceRef),
+    evidence: evidence.map(validateInvestigationEvidence),
   };
 }
 

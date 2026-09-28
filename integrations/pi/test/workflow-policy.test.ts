@@ -131,10 +131,11 @@ describe("policy fixture", () => {
 		);
 	});
 
-	it("freezes exactly the four Main Pi tools", () => {
+	it("freezes exactly the five Main Pi tools", () => {
 		assert.deepEqual(policy.tools, [
 			"nisse_review_plan",
 			"nisse_review_code",
+			"nisse_review_investigation",
 			"nisse_query_project",
 			"nisse_feedback",
 		]);
@@ -259,7 +260,7 @@ describe("skill policy text aligns with the fixture", () => {
 /* ------------------------------------------------------------------ */
 
 describe("tool behavior aligns with the fixture", () => {
-	it("registers exactly the four frozen tools in fixture order", () => {
+	it("registers exactly the five frozen tools in fixture order", () => {
 		const tools = buildNisseTools({ run: okRunner });
 		assert.deepEqual(
 			tools.map((tool) => tool.name),
