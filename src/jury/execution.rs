@@ -15,8 +15,72 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use super::host::{HostError, HostProcess, ReviewerOutcome};
+use super::host::{HostError, HostProcess, InvestigationReviewerOutcome, ReviewerOutcome};
+use super::protocol::StartInvestigationPayload;
 use super::protocol::{StartReviewPayload, ToolRequestPayload, ToolResponsePayload};
+
+/// Drive one investigation review to completion with the one-retry
+/// policy (PLAN_INVESTIGATION.md): identical specs, same review id, and
+/// a fresh round budget for the single retry round. Tool requests of
+/// all rounds are answered through `tool_handler`.
+pub fn execute_investigation(
+    host: &mut HostProcess,
+    payload: &StartInvestigationPayload,
+    tool_handler: &mut dyn FnMut(&ToolRequestPayload) -> ToolResponsePayload,
+    timeout: Duration,
+) -> Result<Vec<(String, InvestigationReviewerOutcome)>, HostError> {
+    let review_id = payload.review_id.clone();
+    let expected: Vec<String> = payload
+        .reviewers
+        .iter()
+        .map(|s| s.reviewer_id.clone())
+        .collect();
+
+    host.start_investigation(payload)?;
+    let first = host.complete_investigation(&review_id, &expected, tool_handler, timeout)?;
+
+    let mut outcomes: BTreeMap<String, InvestigationReviewerOutcome> = first.into_iter().collect();
+
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, InvestigationReviewerOutcome::Failed(_)))
+        .map(|(reviewer_id, _)| reviewer_id.clone())
+        .collect();
+    if !failed.is_empty() {
+        let retry_specs: Vec<_> = payload
+            .reviewers
+            .iter()
+            .filter(|spec| failed.contains(&spec.reviewer_id))
+            .cloned()
+            .collect();
+        let retry_payload = StartInvestigationPayload {
+            review_id: payload.review_id.clone(),
+            task: payload.task.clone(),
+            result: payload.result.clone(),
+            reviewers: retry_specs,
+        };
+        host.start_investigation(&retry_payload)?;
+        let retried = host.complete_investigation(&review_id, &failed, tool_handler, timeout)?;
+        for (reviewer_id, outcome) in retried {
+            outcomes.insert(reviewer_id, outcome);
+        }
+    }
+
+    let mut resolved: Vec<(String, InvestigationReviewerOutcome)> =
+        Vec::with_capacity(expected.len());
+    for reviewer_id in expected {
+        let outcome =
+            outcomes
+                .remove(&reviewer_id)
+                .ok_or_else(|| HostError::UnexpectedHostMessage {
+                    reason: format!(
+                        "investigation `{review_id}` never resolved reviewer `{reviewer_id}`"
+                    ),
+                })?;
+        resolved.push((reviewer_id, outcome));
+    }
+    Ok(resolved)
+}
 
 /// Drive one review to completion with the one-retry policy.
 ///

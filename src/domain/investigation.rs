@@ -187,6 +187,63 @@ pub enum GapImportance {
     Low,
 }
 
+/// One claim assessment emitted by a single investigation reviewer.
+/// Identity fields (assessment ids, reviewer ids) are stamped by Rust:
+/// the model never supplies provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewerClaimAssessment {
+    /// The claim under assessment (compressed quote of the result text).
+    pub claim: String,
+    /// The verdict.
+    pub verdict: InvestigationVerdict,
+    /// How well the surviving evidence establishes the claim.
+    pub confidence: ConfidenceTier,
+    /// What is overstated in the original conclusion and why, if anything.
+    pub overstated: Option<String>,
+    /// Why the claim matters (or not) for the original task.
+    pub task_relevance: String,
+    /// Evidence backing the assessment.
+    pub evidence: Vec<EvidenceRef>,
+    /// The reasoning connecting evidence to verdict.
+    pub reasoning: String,
+}
+
+/// One coverage gap emitted by the coverage reviewer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewerCoverageGap {
+    /// The under-investigated area.
+    pub area: String,
+    /// Why this area was reasonably in scope for the task (citing the
+    /// task text).
+    pub why_expected: String,
+    /// How important the gap is.
+    pub importance: GapImportance,
+    /// Evidence for the gap assessment.
+    pub evidence: Vec<EvidenceRef>,
+}
+
+/// The strict per-reviewer investigation report (host-stamped identity
+/// and metadata; the model never supplies provenance).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvestigationReport {
+    /// Identity of the reviewer that produced this report.
+    pub reviewer_id: String,
+    /// Reviewer summary.
+    pub summary: String,
+    /// Claim assessments (claim reviewers; empty for the coverage
+    /// reviewer).
+    pub claim_assessments: Vec<ReviewerClaimAssessment>,
+    /// Coverage gaps (coverage reviewer; empty otherwise).
+    pub coverage_gaps: Vec<ReviewerCoverageGap>,
+    /// Durable fact candidates through the existing verification path.
+    pub candidate_project_facts: Vec<crate::domain::report::CandidateProjectFact>,
+    /// Host-stamped model metadata (opaque JSON: runtime, model,
+    /// thinking level, turns, repaired).
+    pub model_metadata: serde_json::Value,
+    /// Session duration in milliseconds (host-stamped).
+    pub duration_ms: u64,
+}
+
 /// The result of one investigation review.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvestigationResult {

@@ -160,7 +160,41 @@ export const IMPACT_CLASSES = [
   "other",
 ] as const;
 
-export const EVIDENCE_KINDS = ["source", "diff", "plan", "project_fact"] as const;
+export const EVIDENCE_KINDS = [
+  "source",
+  "diff",
+  "plan",
+  "project_fact",
+  "investigation",
+] as const;
+
+/** Which investigation input an `investigation` evidence ref points at. */
+export const INVESTIGATION_INPUT_PARTS = ["task", "result"] as const;
+
+/** Investigation claim verdicts (PLAN_INVESTIGATION.md). */
+export const INVESTIGATION_VERDICTS = [
+  "supported",
+  "partially_supported",
+  "contradicted",
+  "insufficiently_supported",
+  "not_applicable",
+  "outside_scope",
+] as const;
+
+/** Investigation confidence tiers, in ascending support. */
+export const INVESTIGATION_CONFIDENCE_TIERS = [
+  "unsupported",
+  "merely_possible",
+  "plausible",
+  "strongly_supported",
+  "demonstrated",
+] as const;
+
+/** Coverage-gap importance levels. */
+export const COVERAGE_IMPORTANCES = ["high", "medium", "low"] as const;
+
+/** Minimum normalized length of an input-span evidence excerpt. */
+export const MIN_INPUT_SPAN_EXCERPT_CHARS = 24;
 
 export const THINKING_LEVELS = ["off", "low", "medium", "high"] as const;
 
@@ -225,6 +259,8 @@ export interface EvidenceRef {
   readonly content_key?: string;
   readonly plan_section?: string;
   readonly record_id?: string;
+  /** Which investigation input (investigation evidence only). */
+  readonly input_part?: (typeof INVESTIGATION_INPUT_PARTS)[number];
   readonly excerpt: string;
 }
 
@@ -252,6 +288,38 @@ export interface ReviewerReport {
   readonly reviewer_id: string;
   readonly summary: string;
   readonly findings: ReviewerFinding[];
+  readonly candidate_project_facts: CandidateProjectFact[];
+  readonly model_metadata: unknown;
+  readonly duration_ms: number;
+}
+
+export interface InvestigationClaimAssessment {
+  readonly claim: string;
+  readonly verdict: (typeof INVESTIGATION_VERDICTS)[number];
+  readonly confidence: (typeof INVESTIGATION_CONFIDENCE_TIERS)[number];
+  readonly overstated?: string;
+  readonly task_relevance: string;
+  readonly evidence: EvidenceRef[];
+  readonly reasoning: string;
+}
+
+export interface InvestigationCoverageGap {
+  readonly area: string;
+  readonly why_expected: string;
+  readonly importance: (typeof COVERAGE_IMPORTANCES)[number];
+  readonly evidence: EvidenceRef[];
+}
+
+/**
+ * Per-reviewer investigation report. Reviewer identity and metadata are
+ * stamped by the host after validation; the model never supplies them.
+ */
+export interface InvestigationReport {
+  /** Identity of the reviewer that produced this report (host-stamped). */
+  readonly reviewer_id: string;
+  readonly summary: string;
+  readonly claim_assessments: InvestigationClaimAssessment[];
+  readonly coverage_gaps: InvestigationCoverageGap[];
   readonly candidate_project_facts: CandidateProjectFact[];
   readonly model_metadata: unknown;
   readonly duration_ms: number;
@@ -519,6 +587,10 @@ export function validateEvidenceRef(value: unknown): EvidenceRef {
   ) {
     throw new ValidationError("`line_end` must be a positive integer when present");
   }
+  const inputPart =
+    object["input_part"] === undefined
+      ? undefined
+      : requireEnum(object, "input_part", INVESTIGATION_INPUT_PARTS);
   const evidence: EvidenceRef = {
     kind,
     excerpt,
@@ -529,6 +601,7 @@ export function validateEvidenceRef(value: unknown): EvidenceRef {
     ...(optional.record_id !== undefined ? { record_id: optional.record_id } : {}),
     ...(lineStart !== undefined ? { line_start: lineStart } : {}),
     ...(lineEnd !== undefined ? { line_end: lineEnd } : {}),
+    ...(inputPart !== undefined ? { input_part: inputPart } : {}),
   };
   return evidence;
 }
@@ -587,6 +660,92 @@ export function validateReviewerReport(value: unknown): ReviewerReport {
   };
 }
 
+/** Validate one investigation evidence ref (input-span discipline). */
+export function validateInvestigationEvidence(value: unknown): EvidenceRef {
+  const evidence = validateEvidenceRef(value);
+  if (evidence.kind !== "investigation") {
+    throw new ValidationError(
+      "investigation evidence must have kind `investigation`",
+    );
+  }
+  if (evidence.input_part === undefined) {
+    throw new ValidationError("investigation evidence requires `input_part`");
+  }
+  if (evidence.excerpt.trim().length < MIN_INPUT_SPAN_EXCERPT_CHARS) {
+    throw new ValidationError(
+      `investigation evidence excerpt is shorter than ${MIN_INPUT_SPAN_EXCERPT_CHARS} characters`,
+    );
+  }
+  return evidence;
+}
+
+/** Validate one investigation claim assessment. */
+export function validateInvestigationClaimAssessment(
+  value: unknown,
+): InvestigationClaimAssessment {
+  const object = requireObject(value, "claim assessment");
+  const evidence = object["evidence"];
+  if (!Array.isArray(evidence)) {
+    throw new ValidationError("`evidence` must be an array");
+  }
+  const assessment: InvestigationClaimAssessment = {
+    claim: requireNonEmptyString(object, "claim"),
+    verdict: requireEnum(object, "verdict", INVESTIGATION_VERDICTS),
+    confidence: requireEnum(object, "confidence", INVESTIGATION_CONFIDENCE_TIERS),
+    task_relevance: requireNonEmptyString(object, "task_relevance"),
+    reasoning: requireString(object, "reasoning"),
+    evidence: evidence.map(validateInvestigationEvidence),
+    ...(object["overstated"] !== undefined
+      ? { overstated: requireNonEmptyString(object, "overstated") }
+      : {}),
+  };
+  return assessment;
+}
+
+/** Validate one investigation coverage gap. */
+export function validateInvestigationCoverageGap(
+  value: unknown,
+): InvestigationCoverageGap {
+  const object = requireObject(value, "coverage gap");
+  const evidence = object["evidence"];
+  if (!Array.isArray(evidence)) {
+    throw new ValidationError("`evidence` must be an array");
+  }
+  return {
+    area: requireNonEmptyString(object, "area"),
+    why_expected: requireNonEmptyString(object, "why_expected"),
+    importance: requireEnum(object, "importance", COVERAGE_IMPORTANCES),
+    evidence: evidence.map(validateEvidenceRef),
+  };
+}
+
+/** Validate one investigation report (strict; one-repair policy upstream). */
+export function validateInvestigationReport(
+  value: unknown,
+): Omit<InvestigationReport, "reviewer_id"> {
+  const object = requireObject(value, "investigation report");
+  const claims = object["claim_assessments"];
+  if (!Array.isArray(claims)) {
+    throw new ValidationError("`claim_assessments` must be an array");
+  }
+  const gaps = object["coverage_gaps"];
+  if (!Array.isArray(gaps)) {
+    throw new ValidationError("`coverage_gaps` must be an array");
+  }
+  const facts = object["candidate_project_facts"];
+  if (!Array.isArray(facts)) {
+    throw new ValidationError("`candidate_project_facts` must be an array");
+  }
+  return {
+    summary: requireNonEmptyString(object, "summary"),
+    claim_assessments: claims.map(validateInvestigationClaimAssessment),
+    coverage_gaps: gaps.map(validateInvestigationCoverageGap),
+    candidate_project_facts: facts.map(validateCandidateProjectFact),
+    model_metadata: {},
+    duration_ms: 0,
+  };
+}
+
 export function validateReviewerExecutionSpec(value: unknown): ReviewerExecutionSpec {
   const object = requireObject(value, "reviewer execution spec");
   const context = object["initial_context"];
@@ -616,6 +775,31 @@ export function validateReviewerExecutionSpec(value: unknown): ReviewerExecution
       "max_returned_context_bytes",
     ),
     timeout_ms: requirePositiveInteger(object, "timeout_ms"),
+  };
+}
+
+export interface StartInvestigation {
+  readonly review_id: string;
+  readonly task: string;
+  readonly result: string;
+  readonly reviewers: ReviewerExecutionSpec[];
+}
+
+/** Validate one `start_investigation` payload (PLAN_INVESTIGATION.md). */
+export function validateStartInvestigation(value: unknown): StartInvestigation {
+  const object = requireObject(value, "start investigation payload");
+  const reviewers = object["reviewers"];
+  if (!Array.isArray(reviewers)) {
+    throw new ValidationError("`reviewers` must be an array");
+  }
+  if (reviewers.length === 0) {
+    throw new ValidationError("`reviewers` must not be empty");
+  }
+  return {
+    review_id: requireNonEmptyString(object, "review_id"),
+    task: requireNonEmptyString(object, "task"),
+    result: requireNonEmptyString(object, "result"),
+    reviewers: reviewers.map(validateReviewerExecutionSpec),
   };
 }
 

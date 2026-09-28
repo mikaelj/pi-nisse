@@ -21,6 +21,7 @@ export const PROTOCOL_VERSION = 1;
 export const RUST_TO_HOST_TYPES = [
   "host_config",
   "start_review",
+  "start_investigation",
   "start_fact_verification",
   "start_fact_synthesis",
   "start_domain_description",
@@ -40,6 +41,7 @@ export const HOST_TO_RUST_TYPES = [
   "fact_synthesis_completed",
   "domain_description_completed",
   "finding_equivalence_completed",
+  "investigation_reviewer_completed",
   "host_error",
 ] as const;
 

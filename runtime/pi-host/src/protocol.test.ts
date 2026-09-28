@@ -32,6 +32,7 @@ test("vocabularies match the frozen plan section 21", () => {
   assert.deepEqual(RUST_TO_HOST_TYPES, [
     "host_config",
     "start_review",
+    "start_investigation",
     "start_fact_verification",
     "start_fact_synthesis",
     "start_domain_description",
@@ -49,6 +50,7 @@ test("vocabularies match the frozen plan section 21", () => {
     "fact_synthesis_completed",
     "domain_description_completed",
     "finding_equivalence_completed",
+    "investigation_reviewer_completed",
     "host_error",
   ]);
 });

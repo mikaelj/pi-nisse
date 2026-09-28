@@ -27,8 +27,9 @@ use super::protocol::{
     FactSynthesisPayload, FactVerificationPayload, FindingEquivalenceCheckPayload,
     FindingEquivalenceOutcome, HostConfigMessage, HostConfigPayload, HostEvent, HostReady,
     HostRuntime, ProtocolError, StartDomainDescriptionMessage, StartFactSynthesisMessage,
-    StartFactVerificationMessage, StartFindingEquivalenceCheckMessage, StartReviewMessage,
-    StartReviewPayload, ToolRequestPayload, ToolResponseMessage, ToolResponsePayload,
+    StartFactVerificationMessage, StartFindingEquivalenceCheckMessage, StartInvestigationMessage,
+    StartInvestigationPayload, StartReviewMessage, StartReviewPayload, ToolRequestPayload,
+    ToolResponseMessage, ToolResponsePayload,
 };
 use crate::domain::facts::FactVerificationResult;
 use crate::domain::report::ReviewerReport;
@@ -220,6 +221,15 @@ pub enum ReviewerOutcome {
     Failed(protocol::HostErrorInfo),
 }
 
+/// Outcome of one investigation reviewer (PLAN_INVESTIGATION.md).
+#[derive(Debug, Clone)]
+pub enum InvestigationReviewerOutcome {
+    /// The reviewer produced a structured investigation report.
+    Completed(crate::domain::investigation::InvestigationReport),
+    /// The reviewer session failed.
+    Failed(protocol::HostErrorInfo),
+}
+
 impl ReviewerOutcome {
     /// The completed report, if this outcome is a completion.
     pub fn as_report(&self) -> Option<&ReviewerReport> {
@@ -332,6 +342,16 @@ impl HostProcess {
     }
 
     /// Send `start_review`.
+    /// Send `start_investigation` (PLAN_INVESTIGATION.md).
+    pub fn start_investigation(
+        &mut self,
+        payload: &StartInvestigationPayload,
+    ) -> Result<(), HostError> {
+        let id = crate::domain::ids::new_ulid();
+        let line = StartInvestigationMessage::new(id, payload.clone()).to_line();
+        self.write_line(&line)
+    }
+
     pub fn start_review(&mut self, payload: &StartReviewPayload) -> Result<(), HostError> {
         let id = crate::domain::ids::new_ulid();
         let line = StartReviewMessage::new(id, payload.clone()).to_line();
@@ -513,6 +533,13 @@ impl HostProcess {
                             "reviewer_completed for unexpected or duplicate reviewer `{reviewer_id}`"
                         ),
                     })?;
+                }
+                HostEvent::InvestigationReviewerCompleted { review_id: r, .. } => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "investigation_reviewer_completed for review `{r}` while driving `{review_id}`"
+                        ),
+                    });
                 }
                 HostEvent::ReviewerFailed {
                     review_id: r,
@@ -869,6 +896,99 @@ impl HostProcess {
         })
     }
 
+    /// Wait for every investigation reviewer to complete or fail
+    /// (mirrors [`Self::complete_review`] for investigation reports).
+    pub fn complete_investigation(
+        &mut self,
+        review_id: &str,
+        reviewers: &[String],
+        tool_handler: &mut dyn FnMut(&ToolRequestPayload) -> ToolResponsePayload,
+        timeout: Duration,
+    ) -> Result<Vec<(String, InvestigationReviewerOutcome)>, HostError> {
+        if !self.ready {
+            return Err(HostError::UnexpectedHostMessage {
+                reason: "complete_investigation called before host_ready".to_string(),
+            });
+        }
+        let deadline = Instant::now() + timeout;
+        let mut pending: Vec<String> = reviewers.to_vec();
+        let mut outcomes: Vec<(String, InvestigationReviewerOutcome)> = Vec::new();
+
+        while !pending.is_empty() {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| HostError::Timeout {
+                    what: format!("investigation `{review_id}` to complete"),
+                })?;
+            match self.recv_event(remaining)? {
+                HostEvent::ReviewerStarted { review_id: r, .. } => {
+                    if r != review_id {
+                        return Err(HostError::UnexpectedHostMessage {
+                            reason: format!(
+                                "reviewer_started for review `{r}` while driving `{review_id}`"
+                            ),
+                        });
+                    }
+                }
+                HostEvent::InvestigationReviewerCompleted {
+                    review_id: r,
+                    reviewer_id,
+                    report,
+                } => {
+                    if r != review_id {
+                        return Err(HostError::UnexpectedHostMessage {
+                            reason: format!(
+                                "investigation_reviewer_completed for review `{r}` while driving `{review_id}`"
+                            ),
+                        });
+                    }
+                    resolve(&mut pending, &mut outcomes, &reviewer_id, || {
+                        InvestigationReviewerOutcome::Completed(report.clone())
+                    })
+                    .map_err(|reviewer_id| HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "investigation_reviewer_completed for unexpected or duplicate reviewer `{reviewer_id}`"
+                        ),
+                    })?;
+                }
+                HostEvent::ReviewerFailed {
+                    review_id: r,
+                    reviewer_id,
+                    error,
+                } => {
+                    if r != review_id {
+                        return Err(HostError::UnexpectedHostMessage {
+                            reason: format!(
+                                "reviewer_failed for review `{r}` while driving `{review_id}`"
+                            ),
+                        });
+                    }
+                    resolve(&mut pending, &mut outcomes, &reviewer_id, || {
+                        InvestigationReviewerOutcome::Failed(error.clone())
+                    })
+                    .map_err(|reviewer_id| HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "reviewer_failed for unexpected or duplicate reviewer `{reviewer_id}`"
+                        ),
+                    })?;
+                }
+                HostEvent::ToolRequest { payload, .. } => {
+                    let response = tool_handler(&payload);
+                    self.send_tool_response(&response)?;
+                }
+                other => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "expected investigation progress for `{review_id}`, got `{}`",
+                            event_type_name_pub(&other)
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(outcomes)
+    }
+
     /// The child's stderr output captured so far (lossy UTF-8, bounded).
     pub fn stderr_text(&self) -> String {
         let buffer = self.stderr_buffer.lock().expect("stderr buffer poisoned");
@@ -922,11 +1042,11 @@ impl Drop for HostProcess {
     }
 }
 
-fn resolve(
+fn resolve<T>(
     pending: &mut Vec<String>,
-    outcomes: &mut Vec<(String, ReviewerOutcome)>,
+    outcomes: &mut Vec<(String, T)>,
     reviewer_id: &str,
-    build: impl FnOnce() -> ReviewerOutcome,
+    build: impl FnOnce() -> T,
 ) -> Result<(), String> {
     let Some(index) = pending.iter().position(|id| id == reviewer_id) else {
         return Err(reviewer_id.to_string());
@@ -936,12 +1056,17 @@ fn resolve(
     Ok(())
 }
 
+fn event_type_name_pub(event: &HostEvent) -> &'static str {
+    event_type_name(event)
+}
+
 fn event_type_name(event: &HostEvent) -> &'static str {
     match event {
         HostEvent::HostReady(_) => "host_ready",
         HostEvent::ReviewerStarted { .. } => "reviewer_started",
         HostEvent::ReviewerCompleted { .. } => "reviewer_completed",
         HostEvent::ReviewerFailed { .. } => "reviewer_failed",
+        HostEvent::InvestigationReviewerCompleted { .. } => "investigation_reviewer_completed",
         HostEvent::ToolRequest { .. } => "tool_request",
         HostEvent::FindingEquivalenceCompleted { .. } => "finding_equivalence_completed",
         HostEvent::DomainDescriptionCompleted { .. } => "domain_description_completed",

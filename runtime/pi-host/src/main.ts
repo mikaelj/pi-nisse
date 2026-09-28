@@ -40,6 +40,7 @@ import {
 } from "./protocol.ts";
 import { loadSessionScript, createScriptedAgentFactory } from "./scripted.ts";
 import {
+  createInvestigationSession,
   createReviewerSession,
   ReviewerSessionError,
   type PiSessionDeps,
@@ -54,6 +55,7 @@ import {
   validateFactVerificationRequest,
   validateFindingEquivalenceCheck,
   validateHostConfig,
+  validateStartInvestigation,
   validateStartReview,
   ValidationError,
   type DomainDescriptionRequest,
@@ -227,6 +229,71 @@ async function runReviewer(
     .done;
 }
 
+async function runInvestigationReviewer(
+  reviewId: string,
+  spec: ReviewerExecutionSpec,
+  task: string,
+  result: string,
+): Promise<void> {
+  await reviewerLimiter
+    .run(async (): Promise<void> => {
+      if (isCancelled(reviewId)) {
+        return;
+      }
+      send("reviewer_started", nextId(), {
+        review_id: reviewId,
+        reviewer_id: spec.reviewer_id,
+      });
+      try {
+        const session = createInvestigationSession(options.runtime, spec, {
+          models: hostModels,
+          task,
+          result,
+          resolveAgent: resolvePiAgentFactory,
+        });
+        const report = await session.run({
+          reviewId,
+          tools: bridge,
+          isCancelled: () => isCancelled(reviewId),
+        });
+        if (isCancelled(reviewId)) {
+          return;
+        }
+        send("investigation_reviewer_completed", nextId(), {
+          review_id: reviewId,
+          reviewer_id: spec.reviewer_id,
+          report,
+        });
+      } catch (err) {
+        if (isCancelled(reviewId)) {
+          return;
+        }
+        send("reviewer_failed", nextId(), {
+          review_id: reviewId,
+          reviewer_id: spec.reviewer_id,
+          error: {
+            code: err instanceof ReviewerSessionError ? err.code : "session_error",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+    })
+    .done;
+}
+
+function handleStartInvestigation(payload: unknown): void {
+  const investigation = validateStartInvestigation(payload);
+  startedReviews.add(investigation.review_id);
+  for (const spec of investigation.reviewers) {
+    void runInvestigationReviewer(
+      investigation.review_id,
+      spec,
+      investigation.task,
+      investigation.result,
+    );
+  }
+}
+
 function handleStartReview(payload: unknown): void {
   const review = validateStartReview(payload);
   if (fault === "malformed-after-ready") {
@@ -391,6 +458,9 @@ function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
       return;
     case "start_review":
       handleStartReview(message.payload);
+      return;
+    case "start_investigation":
+      handleStartInvestigation(message.payload);
       return;
     case "start_finding_equivalence_check": {
       const check = validateFindingEquivalenceCheck(message.payload);

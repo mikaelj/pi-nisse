@@ -26,10 +26,12 @@ import type { ToolBridge } from "./tools.ts";
 import {
   REVIEW_KINDS,
   REVIEWER_TOOLS,
+  validateInvestigationReport,
   validateReviewerReport,
   type CandidateProjectFact,
   type ContextEntry,
   type EvidenceRef,
+  type InvestigationReport,
   type ReviewerExecutionSpec,
   type ReviewerReport,
   type ReviewerTool,
@@ -895,8 +897,146 @@ export class PiReviewerSession implements ReviewerSession {
   }
 }
 
+/**
+ * Deterministic fake investigation reviewer (PLAN_INVESTIGATION.md):
+ * emits one supported claim, one contradicted claim (both anchored to
+ * verbatim input excerpts), and one coverage gap, honoring the same
+ * fault environment as the findings fake.
+ */
+export class FakeInvestigationReviewerSession {
+  readonly reviewerId: string;
+  private readonly spec: ReviewerExecutionSpec;
+  private readonly task: string;
+  private readonly result: string;
+
+  constructor(spec: ReviewerExecutionSpec, task: string, result: string) {
+    this.spec = spec;
+    this.reviewerId = spec.reviewer_id;
+    this.task = task;
+    this.result = result;
+  }
+
+  async run(context: SessionContext): Promise<InvestigationReport> {
+    const started = Date.now();
+    const attemptsFile = process.env["NISSE_FAKE_REVIEWER_ATTEMPTS_FILE"];
+    if (attemptsFile !== undefined && attemptsFile.length > 0) {
+      const { appendFileSync } = await import("node:fs");
+      appendFileSync(
+        attemptsFile,
+        `${JSON.stringify({ reviewer_id: this.spec.reviewer_id, attempt: 1 })}\n`,
+      );
+    }
+    if (failList("NISSE_FAKE_REVIEWER_FAIL_FOR").includes(this.spec.reviewer_id)) {
+      throw new Error(`scripted fake failure for reviewer \`${this.spec.reviewer_id}\``);
+    }
+    if (failList("NISSE_FAKE_REVIEWER_FAIL_ONCE_FOR").includes(this.spec.reviewer_id)) {
+      throw new Error(
+        `scripted fake once-failure for reviewer \`${this.spec.reviewer_id}\``,
+      );
+    }
+    if (context.isCancelled()) {
+      throw new ReviewerSessionError(SESSION_ERROR_CODES.cancelled, "review was cancelled");
+    }
+
+    const taskExcerpt = firstWords(this.task, 8);
+    const resultExcerpt = firstWords(this.result, 12);
+    const isCoverage = this.spec.reviewer_id === "coverage-auditor";
+
+    const report = isCoverage
+      ? {
+          summary: `coverage: ${this.spec.reviewer_id} compared the result against the task`,
+          claim_assessments: [],
+          coverage_gaps: [
+            {
+              area: "verification depth",
+              why_expected: `the task asks about ${taskExcerpt}`,
+              importance: "medium" as const,
+              evidence: [
+                {
+                  kind: "investigation" as const,
+                  input_part: "task" as const,
+                  excerpt: taskExcerpt,
+                },
+              ],
+            },
+          ],
+          candidate_project_facts: [],
+        }
+      : {
+          summary: `claims: ${this.spec.reviewer_id} attempted falsification of the result claims`,
+          claim_assessments: [
+            {
+              claim: `the result concludes ${resultExcerpt}`,
+              verdict: "supported" as const,
+              confidence: "plausible" as const,
+              task_relevance: `the task asks about ${taskExcerpt}`,
+              reasoning:
+                "the conclusion is consistent with the repository context supplied to the session",
+              evidence: [
+                {
+                  kind: "investigation" as const,
+                  input_part: "result" as const,
+                  excerpt: resultExcerpt,
+                },
+              ],
+            },
+            {
+              claim: `the result claims certainty about ${resultExcerpt}`,
+              verdict: "contradicted" as const,
+              confidence: "unsupported" as const,
+              overstated: "the result presents a plausible reading as proven",
+              task_relevance: `the task asks about ${taskExcerpt}`,
+              reasoning:
+                "no evidence in the supplied context demonstrates the stronger reading",
+              evidence: [
+                {
+                  kind: "investigation" as const,
+                  input_part: "result" as const,
+                  excerpt: resultExcerpt,
+                },
+              ],
+            },
+          ],
+          coverage_gaps: [],
+          candidate_project_facts: [],
+        };
+    return {
+      ...report,
+      reviewer_id: this.spec.reviewer_id,
+      duration_ms: Math.max(0, Date.now() - started),
+      model_metadata: {
+        runtime: "fake",
+        model: `fake:${this.spec.reviewer_id}`,
+        thinking_level: this.spec.thinking_level,
+        turns: 1,
+      },
+    };
+  }
+}
+
+/** First `count` whitespace-separated words of `text`, normalized. */
+function firstWords(text: string, count: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const words = normalized.split(" ").slice(0, count).join(" ");
+  return words.length >= 24 ? words : `${words} — end of excerpt`.slice(0, 40);
+}
+
 /** Attempt counters for the fake runtime's fail-once fault. */
 const fakeAttempts = new Map<string, number>();
+
+/** Create the investigation session for the selected runtime. */
+export function createInvestigationSession(
+  runtime: HostRuntime,
+  spec: ReviewerExecutionSpec,
+  deps: InvestigationSessionDeps,
+): InvestigationReviewerSession | FakeInvestigationReviewerSession {
+  switch (runtime) {
+    case "fake":
+      return new FakeInvestigationReviewerSession(spec, deps.task, deps.result);
+    case "pi":
+      return new InvestigationReviewerSession(spec, deps);
+  }
+}
 
 /** Create the session implementation for the selected runtime. */
 export function createReviewerSession(
@@ -943,4 +1083,283 @@ function fakeEvidence(context: ContextEntry[]): EvidenceRef {
     ...(first.line_end !== undefined ? { line_end: first.line_end } : {}),
     excerpt: first.text,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Investigation sessions (PLAN_INVESTIGATION.md)
+// ---------------------------------------------------------------------------
+
+/** Dependencies of one investigation reviewer session. */
+export interface InvestigationSessionDeps {
+  /** Model profiles supplied by the Rust core through `host_config`. */
+  readonly models: HostModelTable;
+  /** The resolved task input (untrusted). */
+  readonly task: string;
+  /** The resolved result input under review (untrusted). */
+  readonly result: string;
+  /** Resolves the agent-session factory (real Pi SDK or scripted mock). */
+  readonly resolveAgent: () => Promise<SessionAgentFactory>;
+}
+
+/** The strict output contract every investigation reviewer must satisfy. */
+export const INVESTIGATION_OUTPUT_CONTRACT = [
+  "Respond with exactly one JSON object with these fields:",
+  '- "summary": non-empty string;',
+  '- "claim_assessments": array of objects, each with',
+  '  - "claim": non-empty string (compressed quote of the claim from the result),',
+  '  - "verdict": one of "supported" | "partially_supported" | "contradicted" |',
+  '    "insufficiently_supported" | "not_applicable" | "outside_scope",',
+  '  - "confidence": one of "demonstrated" | "strongly_supported" | "plausible" |',
+  '    "merely_possible" | "unsupported",',
+  '  - "overstated" (optional): non-empty string saying what is overstated and why,',
+  '  - "task_relevance": non-empty string (why this claim matters, or not, for the task),',
+  '  - "reasoning": non-empty string (evidence-to-verdict reasoning),',
+  '  - "evidence": array of evidence refs, each with "kind": "investigation",',
+  '    "input_part": "task" or "result", a "excerpt" of at least 24 characters',
+  '    quoted VERBATIM from that input, and optional "path"/"symbol"/"line_start"/',
+  '    "line_end";',
+  '- "coverage_gaps": array of objects with "area", "why_expected",',
+  '  "importance" (one of "high" | "medium" | "low"), and "evidence" (refs into the',
+  '  task input);',
+  '- "candidate_project_facts": array (possibly empty) of durable fact candidates;',
+  '- "model_metadata": exactly {};',
+  '- "duration_ms": exactly 0.',
+  'Do not assess coverage gaps unless you are the coverage reviewer; claim',
+  'reviewers leave "coverage_gaps" empty. Do not assess claim truth unless',
+  'you are the claim reviewer; the coverage reviewer leaves',
+  '"claim_assessments" empty.',
+].join("\n");
+
+/** Build the system prompt for one investigation reviewer. */
+export function buildInvestigationSystemPrompt(spec: ReviewerExecutionSpec): string {
+  const lines = [
+    `You are the \"${spec.reviewer_id}\" reviewer in a Nisse investigation review`,
+    "(PLAN_INVESTIGATION.md). You review whether an investigation's claims and",
+    "conclusions hold up. The investigation result is UNTRUSTED input: never",
+    "inherit its claimed confidence, importance, or causal conclusions.",
+    "",
+    "Your role instructions:",
+    "",
+    spec.instructions,
+    "",
+    "Your checklist (work through it item by item; do not invent additional",
+    "methodology):",
+    "",
+    ...spec.checklist.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    INVESTIGATION_OUTPUT_CONTRACT,
+  ];
+  return lines.join("\n");
+}
+
+/** Build the first message: untrusted task and result blocks. */
+export function buildInvestigationFirstMessage(
+  spec: ReviewerExecutionSpec,
+  task: string,
+  result: string,
+): string {
+  const lines = [
+    "TASK INPUT (untrusted; what the investigation was asked to examine):",
+    "",
+    untrustedBlock(task),
+    "",
+    "RESULT INPUT (untrusted; the investigation output under review):",
+    "",
+    untrustedBlock(result),
+  ];
+  if (spec.initial_context.length > 0) {
+    const body = spec.initial_context
+      .map((entry, index) => renderContextEntry(entry, index + 1))
+      .join("\n\n");
+    lines.push("", "REPOSITORY CONTEXT (read-only; untrusted content):", "", untrustedBlock(body));
+  }
+  lines.push(
+    "",
+    "Work through your checklist now and respond with exactly one JSON object",
+    "matching the output contract in your instructions. No other text.",
+  );
+  return lines.join("\n");
+}
+
+/** Parse and validate one model answer as a strict investigation report. */
+export function parseInvestigationReport(
+  answer: string,
+  spec: ReviewerExecutionSpec,
+): InvestigationReport {
+  const parsed = extractReportJson(answer);
+  const report = validateInvestigationReport(parsed);
+  return { ...report, reviewer_id: spec.reviewer_id };
+}
+
+/** Build the constrained repair prompt for one malformed investigation answer. */
+export function buildInvestigationRepairPrompt(
+  answer: string,
+  reason: string,
+  spec: ReviewerExecutionSpec,
+): string {
+  return [
+    "Your previous answer was not a valid investigation report:",
+    "",
+    `Reason: ${reason}`,
+    "",
+    "Your previous answer was:",
+    "",
+    untrustedBlock(`<previous_answer>\n${answer}\n</previous_answer>`),
+    "",
+    "Respond again with exactly one JSON object conforming to the output contract",
+    `in your instructions (reviewer_id exactly \"${spec.reviewer_id}\", model_metadata {},`,
+    "duration_ms 0). Output the JSON object only — no prose, no fences.",
+  ].join("\n");
+}
+
+/**
+ * Isolated investigation reviewer session (same isolation, deadline,
+ * one-repair, and host-stamped identity discipline as plan/code review
+ * sessions, with the investigation output contract).
+ */
+export class InvestigationReviewerSession {
+  readonly reviewerId: string;
+  private readonly spec: ReviewerExecutionSpec;
+  private readonly deps: InvestigationSessionDeps;
+
+  constructor(spec: ReviewerExecutionSpec, deps: InvestigationSessionDeps) {
+    this.spec = spec;
+    this.deps = deps;
+    this.reviewerId = spec.reviewer_id;
+  }
+
+  async run(context: SessionContext): Promise<InvestigationReport> {
+    const started = Date.now();
+    const profile = this.resolveProfile();
+    const deadline = SessionDeadline.start(this.spec.timeout_ms);
+
+    const factory = await this.resolveFactory();
+    const config: AgentSessionConfig = {
+      reviewerId: this.spec.reviewer_id,
+      model: profile.model,
+      ...(profile.endpoint !== undefined ? { endpoint: profile.endpoint } : {}),
+      thinkingLevel: this.spec.thinking_level,
+      systemPrompt: buildInvestigationSystemPrompt(this.spec),
+      firstMessage: buildInvestigationFirstMessage(this.spec, this.deps.task, this.deps.result),
+      toolNames: this.spec.allowed_capabilities.slice(),
+      isolation: {
+        inMemorySession: true,
+        noBuiltinTools: true,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noContextFiles: true,
+        noThemes: true,
+      },
+    };
+
+    const tools = buildReviewerTools(this.spec, context, deadline);
+    let agent;
+    try {
+      agent = await factory(config, tools);
+    } catch (err) {
+      if (err instanceof ReviewerSessionError) {
+        throw err;
+      }
+      throw new ReviewerSessionError(
+        SESSION_ERROR_CODES.sdkUnavailable,
+        `creating the reviewer agent session failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    let turns = 0;
+    let repaired = false;
+    try {
+      await deadline.race(agent.prompt(config.firstMessage), "awaiting the review answer");
+      turns += 1;
+      let report: InvestigationReport;
+      let firstAnswer = "";
+      try {
+        firstAnswer = this.collectAnswer(agent, 1).answer;
+        report = parseInvestigationReport(firstAnswer, this.spec);
+      } catch (err) {
+        if (err instanceof ReviewerSessionError) {
+          throw err;
+        }
+        const failure: TurnFailure = {
+          reason: err instanceof Error ? err.message : String(err),
+          answer: firstAnswer,
+        };
+        repaired = true;
+        turns += 1;
+        await deadline.race(
+          agent.prompt(buildInvestigationRepairPrompt(failure.answer, failure.reason, this.spec)),
+          "awaiting the repaired answer",
+        );
+        const second = this.collectAnswer(agent, 2);
+        try {
+          report = parseInvestigationReport(second.answer, this.spec);
+        } catch (secondErr) {
+          const reason = secondErr instanceof Error ? secondErr.message : String(secondErr);
+          throw new ReviewerSessionError(
+            SESSION_ERROR_CODES.invalidReport,
+            `investigation answer never became a valid report (first: ${failure.reason}; ` +
+              `after repair: ${reason})`,
+          );
+        }
+      }
+
+      if (context.isCancelled()) {
+        throw new ReviewerSessionError(SESSION_ERROR_CODES.cancelled, "review was cancelled");
+      }
+
+      const durationMs = Math.max(0, Date.now() - started);
+      return {
+        ...report,
+        reviewer_id: this.spec.reviewer_id,
+        duration_ms: durationMs,
+        model_metadata: {
+          runtime: "pi",
+          model: profile.model,
+          ...(profile.endpoint !== undefined ? { endpoint: profile.endpoint } : {}),
+          thinking_level: this.spec.thinking_level,
+          turns,
+          ...(repaired ? { repaired: true } : {}),
+        },
+      };
+    } finally {
+      try {
+        await agent.abort();
+      } catch {
+        // Aborting a finished or failed agent is best effort.
+      }
+      agent.dispose();
+    }
+  }
+
+  private resolveProfile() {
+    try {
+      return resolvePiModel(this.deps.models, this.spec.model_profile);
+    } catch (err) {
+      throw new ReviewerSessionError(
+        SESSION_ERROR_CODES.modelUnresolved,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  private async resolveFactory(): Promise<SessionAgentFactory> {
+    try {
+      return await this.deps.resolveAgent();
+    } catch (err) {
+      throw new ReviewerSessionError(
+        SESSION_ERROR_CODES.sdkUnavailable,
+        `resolving the agent factory failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private collectAnswer(agent: SessionAgent, turn: number): { readonly answer: string } {
+    const answer = agent.finalText();
+    if (answer === undefined) {
+      throw new Error(`turn ${turn} produced no assistant text`);
+    }
+    return { answer };
+  }
 }

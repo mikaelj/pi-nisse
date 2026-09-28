@@ -52,6 +52,9 @@ pub mod rust_to_host {
     pub const HOST_CONFIG: &str = "host_config";
     /// Start a review: execute the given reviewer specs.
     pub const START_REVIEW: &str = "start_review";
+    /// Start an investigation review (PLAN_INVESTIGATION.md): execute
+    /// the given reviewer specs over the task/result inputs.
+    pub const START_INVESTIGATION: &str = "start_investigation";
     /// Start an independent fact verification job (plan section 47).
     pub const START_FACT_VERIFICATION: &str = "start_fact_verification";
     /// Start a fresh fact synthesis job (plan section 54).
@@ -67,9 +70,10 @@ pub mod rust_to_host {
     pub const CANCEL: &str = "cancel";
 
     /// The complete frozen Rust-to-host vocabulary, in plan order.
-    pub const ALL: [&str; 8] = [
+    pub const ALL: [&str; 9] = [
         HOST_CONFIG,
         START_REVIEW,
+        START_INVESTIGATION,
         START_FACT_VERIFICATION,
         START_FACT_SYNTHESIS,
         START_DOMAIN_DESCRIPTION,
@@ -100,11 +104,14 @@ pub mod host_to_rust {
     pub const DOMAIN_DESCRIPTION_COMPLETED: &str = "domain_description_completed";
     /// Narrow finding equivalence check finished (plan section 38).
     pub const FINDING_EQUIVALENCE_COMPLETED: &str = "finding_equivalence_completed";
+    /// One investigation reviewer session produced a valid structured
+    /// report (PLAN_INVESTIGATION.md).
+    pub const INVESTIGATION_REVIEWER_COMPLETED: &str = "investigation_reviewer_completed";
     /// The host reports a protocol-level failure.
     pub const HOST_ERROR: &str = "host_error";
 
     /// The complete frozen host-to-Rust vocabulary, in plan order.
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 11] = [
         HOST_READY,
         REVIEWER_STARTED,
         REVIEWER_COMPLETED,
@@ -114,6 +121,7 @@ pub mod host_to_rust {
         FACT_SYNTHESIS_COMPLETED,
         DOMAIN_DESCRIPTION_COMPLETED,
         FINDING_EQUIVALENCE_COMPLETED,
+        INVESTIGATION_REVIEWER_COMPLETED,
         HOST_ERROR,
     ];
 }
@@ -341,6 +349,16 @@ pub enum HostEvent {
         reviewer_id: String,
         /// The failure reported by the host.
         error: HostErrorInfo,
+    },
+    /// An investigation reviewer session produced a valid structured
+    /// report (PLAN_INVESTIGATION.md).
+    InvestigationReviewerCompleted {
+        /// The investigation the reviewer belongs to.
+        review_id: String,
+        /// The reviewer that completed.
+        reviewer_id: String,
+        /// The strict structured investigation report.
+        report: crate::domain::investigation::InvestigationReport,
     },
     /// The host requested a read-only lookup.
     ToolRequest {
@@ -575,6 +593,30 @@ pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> 
                 )));
             }
             Ok(HostEvent::ReviewerCompleted {
+                review_id: payload.review_id,
+                reviewer_id: payload.reviewer_id,
+                report: payload.report,
+            })
+        }
+        host_to_rust::INVESTIGATION_REVIEWER_COMPLETED => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Payload {
+                review_id: String,
+                reviewer_id: String,
+                report: crate::domain::investigation::InvestigationReport,
+            }
+            let payload: Payload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.review_id, "review_id", &invalid)?;
+            require_non_empty(&payload.reviewer_id, "reviewer_id", &invalid)?;
+            if payload.report.reviewer_id != payload.reviewer_id {
+                return Err(invalid(format!(
+                    "report reviewer_id `{}` does not match message reviewer_id `{}`",
+                    payload.report.reviewer_id, payload.reviewer_id
+                )));
+            }
+            Ok(HostEvent::InvestigationReviewerCompleted {
                 review_id: payload.review_id,
                 reviewer_id: payload.reviewer_id,
                 report: payload.report,
@@ -1169,6 +1211,44 @@ pub struct StartReviewMessage {
     pub payload: StartReviewPayload,
 }
 
+/// `start_investigation` payload (PLAN_INVESTIGATION.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StartInvestigationPayload {
+    /// Identifier of the review (assigned by Rust).
+    pub review_id: String,
+    /// The resolved task input (untrusted content).
+    pub task: String,
+    /// The resolved result input under review (untrusted content).
+    pub result: String,
+    /// One execution spec per juror (structural composition).
+    pub reviewers: Vec<ReviewerExecutionSpec>,
+}
+
+/// `start_investigation` envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StartInvestigationMessage {
+    pub protocol_version: u32,
+    pub id: String,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    pub payload: StartInvestigationPayload,
+}
+
+impl StartInvestigationMessage {
+    pub fn new(id: String, payload: StartInvestigationPayload) -> Self {
+        StartInvestigationMessage {
+            protocol_version: PROTOCOL_VERSION,
+            id,
+            message_type: rust_to_host::START_INVESTIGATION.to_string(),
+            payload,
+        }
+    }
+
+    pub fn to_line(&self) -> String {
+        serde_json::to_string(self).expect("start_investigation message serializes")
+    }
+}
+
 impl StartReviewMessage {
     /// Build the message for `payload` with an explicit envelope id.
     pub fn new(id: String, payload: StartReviewPayload) -> Self {
@@ -1264,6 +1344,7 @@ mod tests {
             [
                 "host_config",
                 "start_review",
+                "start_investigation",
                 "start_fact_verification",
                 "start_fact_synthesis",
                 "start_domain_description",
@@ -1284,6 +1365,7 @@ mod tests {
                 "fact_synthesis_completed",
                 "domain_description_completed",
                 "finding_equivalence_completed",
+                "investigation_reviewer_completed",
                 "host_error",
             ]
         );
