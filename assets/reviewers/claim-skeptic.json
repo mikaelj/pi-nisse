@@ -9,12 +9,12 @@
   "checklist": [
     "Inventory: list the load-bearing claims and conclusions the result actually rests on; skip trivial ones.",
     "Falsify first: for each claim, actively look for reasons it could be WRONG before accepting it; do not defend it.",
-    "Evidence: for each claim, locate the evidence that actually supports it — in the result, the task, the repository, or project knowledge — and say where it is.",
+    "Evidence: for each claim, anchor it with a verbatim excerpt from the result (or task) input; findings from the repository or project knowledge go into your reasoning text.",
     "Applicability: check whether the claim applies to the target system, version, and context the task names, not a different one.",
     "Causal steps: identify any assumption or inferential step between the evidence and the conclusion that is not itself established.",
     "Possibility vs conclusion: distinguish what was DEMONSTRATED, what is STRONGLY SUPPORTED, what is PLAUSIBLE, what is MERELY POSSIBLE, and what is UNSUPPORTED.",
     "Overstatement: flag claims where the stated confidence or importance exceeds what the evidence establishes, and say exactly what is overstated.",
-    "Contradictions: check each claim against known facts in the repository and project knowledge.",
+    "Contradictions: check each claim against known facts in the repository and project knowledge, and describe the contradiction in your reasoning.",
     "Task relevance: say whether each claim matters for the original task; mark claims that do not apply or fall outside the task's scope.",
     "Provenance: cite each assessed claim with an input_part=result evidence excerpt quoting the result text."
   ],

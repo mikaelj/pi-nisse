@@ -907,12 +907,14 @@ export class PiReviewerSession implements ReviewerSession {
 export class FakeInvestigationReviewerSession {
   readonly reviewerId: string;
   private readonly spec: ReviewerExecutionSpec;
+  private readonly attempt: number;
   private readonly task: string;
   private readonly result: string;
 
-  constructor(spec: ReviewerExecutionSpec, task: string, result: string) {
+  constructor(spec: ReviewerExecutionSpec, attempt: number, task: string, result: string) {
     this.spec = spec;
     this.reviewerId = spec.reviewer_id;
+    this.attempt = attempt;
     this.task = task;
     this.result = result;
   }
@@ -924,13 +926,17 @@ export class FakeInvestigationReviewerSession {
       const { appendFileSync } = await import("node:fs");
       appendFileSync(
         attemptsFile,
-        `${JSON.stringify({ reviewer_id: this.spec.reviewer_id, attempt: 1 })}\n`,
+        `${JSON.stringify({ reviewer_id: this.spec.reviewer_id, attempt: this.attempt })}\n`,
       );
     }
     if (failList("NISSE_FAKE_REVIEWER_FAIL_FOR").includes(this.spec.reviewer_id)) {
       throw new Error(`scripted fake failure for reviewer \`${this.spec.reviewer_id}\``);
     }
-    if (failList("NISSE_FAKE_REVIEWER_FAIL_ONCE_FOR").includes(this.spec.reviewer_id)) {
+    if (
+      this.attempt === 1 &&
+      failList("NISSE_FAKE_REVIEWER_FAIL_ONCE_FOR").includes(this.spec.reviewer_id)
+    ) {
+      // Fail-once fault: the retry (attempt 2) recovers.
       throw new Error(
         `scripted fake once-failure for reviewer \`${this.spec.reviewer_id}\``,
       );
@@ -1039,8 +1045,16 @@ export function createInvestigationSession(
   deps: InvestigationSessionDeps,
 ): InvestigationReviewerSession | FakeInvestigationReviewerSession {
   switch (runtime) {
-    case "fake":
-      return new FakeInvestigationReviewerSession(spec, deps.task, deps.result);
+    case "fake": {
+      const attempt = (fakeAttempts.get(spec.reviewer_id) ?? 0) + 1;
+      fakeAttempts.set(spec.reviewer_id, attempt);
+      return new FakeInvestigationReviewerSession(
+        spec,
+        attempt,
+        deps.task,
+        deps.result,
+      );
+    }
     case "pi":
       return new InvestigationReviewerSession(spec, deps);
   }
