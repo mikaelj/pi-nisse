@@ -146,9 +146,12 @@ fn records_list_in_fresh_repository_reports_zero_records() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(stderr, "", "an empty listing must not write to stderr");
-    assert!(stdout.starts_with("nisse records list\n"));
-    assert!(stdout.contains(&format!("records: {}", repo_root.join(".nisse").display())));
-    assert!(stdout.contains("0 records (0 superseded)"));
+    assert!(stdout.starts_with("nisse records — 0 records in "));
+    assert!(stdout.contains(&format!("in {}\n", repo_root.join(".nisse").display())));
+    assert!(stdout.contains("facts (0)"));
+    assert!(stdout.contains("lessons (0)"));
+    assert!(stdout.contains("observations (0)"));
+    assert!(stdout.contains("options: --kind observation|fact|lesson"));
     // Listing never creates the record tree.
     assert!(!repo_root.join(".nisse").exists());
 }
@@ -174,11 +177,14 @@ fn records_list_prints_records_of_every_kind_with_provenance() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(stderr, "");
-    assert!(stdout.contains("observation 01ARZ3NDEKTSV4RRFFQ69G5FAV people/alice"));
-    assert!(stdout.contains("review_outcome fixed race"));
-    assert!(stdout.contains("fact        01ARZ3NDEKTSV4RRFFQ69G5FB0 common"));
-    assert!(stdout.contains("supported queue discipline"));
-    assert!(stdout.contains("2 records (0 superseded)"));
+    assert!(stdout.contains("01ARZ3NDEKTSV4RRFFQ69G5FA: race by quality "));
+    assert!(stdout.contains(", fixed\n"));
+    assert!(stdout.contains("review 01ARZ3NDEKTS, finding q-1"));
+    assert!(stdout.contains("submitted by alice"));
+    assert!(stdout.contains("01ARZ3NDEKTSV4RRFFQ69G5FB: queue discipline by common "));
+    assert!(stdout.contains(", supported\n"));
+    assert!(stdout.contains("facts (1)"));
+    assert!(stdout.contains("observations (1)"));
 }
 
 #[test]
@@ -204,12 +210,11 @@ fn records_list_marks_superseded_records() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}");
     assert!(
-        stdout.contains("01ARZ3NDEKTSV4RRFFQ69G5FAV alice 2026-01-19T12:05:00.000Z supported")
-            || stdout.contains("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-        "listing must include the superseded record: {stdout}"
+        stdout.contains("01ARZ3NDEKTSV4RRFFQ69G5FA: queue discipline"),
+        "colliding fixture ULIDs auto-extend to the minimal unique prefix: {stdout}"
     );
-    assert!(stdout.contains("[superseded]"));
-    assert!(stdout.contains("2 records (1 superseded)"));
+    assert!(stdout.contains(", supported, superseded"));
+    assert!(stdout.contains("facts (2, 1 superseded)"));
 }
 
 #[test]
@@ -286,10 +291,11 @@ fn records_list_kind_filter_selects_records_and_reports_filtering() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}");
-    assert!(stdout.contains("kinds: fact\n"));
-    assert!(stdout.contains("fact        01ARZ3NDEKTSV4RRFFQ69G5FB0 common"));
-    assert!(!stdout.contains("review_outcome"));
-    assert!(stdout.ends_with("1 records shown of 2 total (0 superseded; 1 filtered out)\n"));
+    assert!(stdout.contains("01ARZ3NDEKTSV4RRFFQ69G5FB: queue discipline by common"));
+    assert!(!stdout.contains("by quality"));
+    assert!(stdout.contains("facts (1)"));
+    assert!(!stdout.contains("observations ("));
+    assert!(!stdout.contains("options:"));
 
     // Repeated flags union kinds; observation rows carry the finding id.
     let out = run_nisse_in(
@@ -306,10 +312,11 @@ fn records_list_kind_filter_selects_records_and_reports_filtering() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}");
-    assert!(stdout.contains("kinds: observation,lesson\n"));
-    assert!(stdout.contains("(finding q-1)"));
-    assert!(!stdout.contains("supported queue discipline"));
-    assert!(stdout.ends_with("1 records shown of 2 total (0 superseded; 1 filtered out)\n"));
+    assert!(stdout.contains(": race by quality "));
+    assert!(stdout.contains("finding q-1"));
+    assert!(!stdout.contains("queue discipline"));
+    assert!(stdout.contains("observations (1)"));
+    assert!(!stdout.contains("facts ("));
 
     // Unknown kinds are rejected by the CLI contract.
     let out = run_nisse_in(

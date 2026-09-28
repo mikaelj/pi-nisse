@@ -406,8 +406,8 @@ fn observations_merge_across_branches() {
     let out = run_nisse_in_with_env(&repo, &["records", "list"], home.path(), &[]);
     let listing = String::from_utf8(out.stdout).expect("stdout utf8");
     assert!(out.status.success(), "{listing}");
-    assert!(listing.contains("4 records"), "{listing}");
-    assert!(listing.contains("review_outcome"), "{listing}");
+    assert!(listing.contains("observations (4)"), "{listing}");
+    assert!(listing.contains("submitted by alice"), "{listing}");
 }
 
 #[test]
@@ -422,4 +422,45 @@ fn finding_ids_are_visible_in_the_text_review_output() {
         stdout.contains("id: "),
         "text output must expose finding ids for feedback: {stdout}"
     );
+}
+
+#[test]
+fn feedback_accepts_unambiguous_ulid_prefixes_and_rejects_ambiguous_ones() {
+    let (repo_dir, repo, _home_guard) = dirty_rust_repo("feedback-prefix");
+    let _ = repo_dir;
+    let home = TempDir::new().unwrap();
+    configure_alice(&home);
+
+    let result = review_working(&repo, &home);
+    let review_id = result["review_id"].as_str().unwrap().to_string();
+    let finding = finding_id(&result);
+
+    // A unique 12-character review-id prefix resolves.
+    let prefix = &review_id[..12];
+    let (ok, stdout, stderr) = submit(&repo, &home, prefix, &finding, "--fixed");
+    assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("recorded observations: 2"), "{stdout}");
+
+    // A finding-id prefix resolves the same way.
+    let finding_prefix = &finding[..12];
+    let (ok, stdout, stderr) = submit(&repo, &home, &review_id, finding_prefix, "--fixed");
+    assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("already recorded: fixed"), "{stdout}");
+
+    // A different outcome for the same finding stays a typed conflict.
+    let (ok, _stdout, stderr) = submit(&repo, &home, prefix, finding_prefix, "--dismissed");
+    assert!(!ok, "outcomes are immutable");
+    assert!(stderr.contains("immutable"), "{stderr}");
+
+    // Unknown and non-matching prefixes fail loudly without writing.
+    let (ok, _stdout, stderr) = submit(
+        &repo,
+        &home,
+        "01AAAAAAAAAAAAAAAAAAAAAAAA",
+        &finding,
+        "--fixed",
+    );
+    assert!(!ok);
+    assert!(stderr.contains("no stored review"), "{stderr}");
+    assert_eq!(observation_records(&repo).len(), 2);
 }

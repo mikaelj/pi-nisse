@@ -196,12 +196,33 @@ pub enum RecordsCommand {
         /// when omitted.
         #[arg(long = "kind", value_name = "KIND")]
         kind: Vec<RecordKindArg>,
+
+        /// Print record header lines only (greppable, pipeable).
+        #[arg(long = "oneline")]
+        oneline: bool,
+
+        /// Cap how many records each section shows; counts always report
+        /// true totals, with truncation noted.
+        #[arg(long = "limit", value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+        limit: Option<u64>,
+
+        /// Emit machine-readable JSON (the format scripts must use;
+        /// honors --kind, ignores --oneline/--limit).
+        #[arg(long = "json")]
+        json: bool,
     },
 
-    /// List pending learning state.
+    /// List learning outcomes that did not become durable knowledge.
+    ///
+    /// Shows pending or rejected fact candidates, consent-deferred
+    /// feedback, and pending lesson maintenance, each with the reason it
+    /// did not persist. This state lives in the regenerable local cache:
+    /// later runs resolve it (a verified candidate becomes a durable
+    /// fact; granted consent flushes deferred feedback) or `nisse cache
+    /// clear` discards it.
     Pending,
 
-    /// Consolidate durable records.
+    /// Consolidate compatible durable records into canonical common ones.
     Compact,
 }
 
@@ -526,19 +547,30 @@ mod tests {
     }
 
     #[test]
-    fn parses_records_list_kind_filter() {
+    fn parses_records_list_flags() {
         let unfiltered = Cli::try_parse_from(["nisse", "records", "list"]).unwrap();
         match unfiltered.command {
             Command::Records {
-                records: RecordsCommand::List { kind },
-            } => assert!(kind.is_empty()),
+                records:
+                    RecordsCommand::List {
+                        kind,
+                        oneline,
+                        limit,
+                        json,
+                    },
+            } => {
+                assert!(kind.is_empty());
+                assert!(!oneline);
+                assert_eq!(limit, None);
+                assert!(!json);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
 
         let filtered = Cli::try_parse_from(["nisse", "records", "list", "--kind", "fact"]).unwrap();
         match filtered.command {
             Command::Records {
-                records: RecordsCommand::List { kind },
+                records: RecordsCommand::List { kind, .. },
             } => {
                 assert_eq!(kind, vec![RecordKindArg::Fact]);
                 assert_eq!(kind[0].record_kind(), RecordKind::Fact);
@@ -552,7 +584,7 @@ mod tests {
         .unwrap();
         match repeated.command {
             Command::Records {
-                records: RecordsCommand::List { kind },
+                records: RecordsCommand::List { kind, .. },
             } => {
                 assert_eq!(
                     kind.iter().map(|k| k.record_kind()).collect::<Vec<_>>(),
@@ -562,8 +594,38 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        let rejected = Cli::try_parse_from(["nisse", "records", "list", "--kind", "gospel"]);
-        assert!(rejected.is_err());
+        let everything = Cli::try_parse_from([
+            "nisse",
+            "records",
+            "list",
+            "--oneline",
+            "--limit",
+            "20",
+            "--json",
+        ])
+        .unwrap();
+        match everything.command {
+            Command::Records {
+                records:
+                    RecordsCommand::List {
+                        oneline,
+                        limit,
+                        json,
+                        ..
+                    },
+            } => {
+                assert!(oneline);
+                assert_eq!(limit, Some(20));
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // The limit is a positive count; zero and negatives are parse
+        // errors.
+        assert!(Cli::try_parse_from(["nisse", "records", "list", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["nisse", "records", "list", "--limit", "-3"]).is_err());
+        assert!(Cli::try_parse_from(["nisse", "records", "list", "--kind", "gospel"]).is_err());
     }
 
     #[test]

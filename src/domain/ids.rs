@@ -14,6 +14,41 @@ pub fn is_valid_ulid(value: &str) -> bool {
     Ulid::from_string(value).is_ok()
 }
 
+/// The outcome of prefix-based identifier resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixResolution {
+    /// The input matched exactly one candidate (or one candidate
+    /// equal to the whole input).
+    Resolved(String),
+
+    /// The input matched several candidates; they are listed for the
+    /// user to disambiguate.
+    Ambiguous(Vec<String>),
+
+    /// The input matched no candidate.
+    Unknown,
+}
+
+/// Resolve `input` against `candidates` by exact match first, then by
+/// unambiguous string prefix. Works over any identifier space: record
+/// ULIDs resolve via 12-character prefixes, free-form finding ids
+/// (which need not be ULIDs) match verbatim.
+pub fn resolve_id_prefix(input: &str, candidates: &[String]) -> PrefixResolution {
+    if candidates.iter().any(|candidate| candidate == input) {
+        return PrefixResolution::Resolved(input.to_string());
+    }
+    let matches: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| candidate.starts_with(input))
+        .cloned()
+        .collect();
+    match matches.as_slice() {
+        [] => PrefixResolution::Unknown,
+        [only] => PrefixResolution::Resolved(only.clone()),
+        _ => PrefixResolution::Ambiguous(matches),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

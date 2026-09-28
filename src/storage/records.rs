@@ -621,74 +621,273 @@ fn entry_name(entry: &std::fs::DirEntry, blame: &Path) -> Result<String, RecordS
 }
 
 /// Render the human-readable `nisse records list` report.
-/// Renders the human listing for `nisse records list`. When `kinds` is
-/// non-empty only records of the selected kinds are shown; the footer
-/// then reports how many records were filtered out. Observation rows
-/// include their finding id so two findings of the same review never
-/// render as indistinguishable lines.
-pub fn render_listing(root: &Path, records: &[StoredRecord], kinds: &[RecordKind]) -> String {
-    let superseded = superseded_ids(records);
-    let shown: Vec<&StoredRecord> = if kinds.is_empty() {
-        records.iter().collect()
-    } else {
-        records
-            .iter()
-            .filter(|stored| kinds.contains(&stored.record.kind()))
-            .collect()
-    };
-    let superseded_count = shown
-        .iter()
-        .filter(|stored| superseded.contains(stored.id()))
-        .count();
+/// Options for the human records listing.
+#[derive(Default)]
+pub struct ListingOptions<'a> {
+    /// Only list these kinds; empty lists every kind.
+    pub kinds: &'a [RecordKind],
+    /// Print record header lines only (greppable, pipeable).
+    pub oneline: bool,
+    /// Per-section cap on records shown; counts always report true
+    /// totals, with truncation noted.
+    pub limit: Option<usize>,
+}
 
-    let mut out = String::from("nisse records list\n");
-    out.push_str(&format!("records: {}\n", root.display()));
-    if !kinds.is_empty() {
-        let names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
-        out.push_str(&format!("kinds: {}\n", names.join(",")));
+/// Relative rendering of `created_at` against `now` (both RFC3339).
+/// Unparseable timestamps fall back to the raw string.
+pub fn relative_time(created_at: &str, now: &str) -> String {
+    let (Ok(created), Ok(now)) = (
+        chrono::DateTime::parse_from_rfc3339(created_at),
+        chrono::DateTime::parse_from_rfc3339(now),
+    ) else {
+        return created_at.to_string();
+    };
+    let seconds = (now - created).num_seconds().max(0);
+    let plural = |count: i64, unit: &str| {
+        if count == 1 {
+            format!("a {unit} ago")
+        } else {
+            format!("{count} {unit}s ago")
+        }
+    };
+    match seconds {
+        0..=44 => "just now".to_string(),
+        45..=89 => "a minute ago".to_string(),
+        90..=2699 => plural(seconds / 60, "minute"),
+        2700..=7199 => "an hour ago".to_string(),
+        7200..=79199 => plural(seconds / 3600, "hour"),
+        79200..=129599 => "a day ago".to_string(),
+        129600..=2159999 => plural(seconds / 86400, "day"),
+        2160000..=3887999 => "a month ago".to_string(),
+        3888000..=29807999 => plural(seconds / 2592000, "month"),
+        29808000..=52703999 => "a year ago".to_string(),
+        _ => plural(seconds / 31536000, "year"),
     }
-    for stored in &shown {
-        let summary = match &stored.record {
-            ProjectRecord::Observation(record) => format!(
-                "{} {} {} (finding {})",
-                record.observation_type, record.outcome, record.category, record.finding_id
-            ),
-            ProjectRecord::Fact(record) => {
-                format!("{} {}", record.state, record.subject)
-            }
-            ProjectRecord::Lesson(record) => {
-                format!("{} {}", record.routing_hint.reviewer_id, record.subject)
-            }
-        };
-        let marker = if superseded.contains(stored.id()) {
-            " [superseded]"
+}
+
+/// The 12-character prefix used for identifiers in human output. Shorter
+/// identifiers (free-form finding ids) pass through verbatim.
+fn short_id(id: &str) -> &str {
+    id.get(..12).unwrap_or(id)
+}
+
+/// Display identifiers for every record: a 12-character prefix, extended
+/// while the prefix is ambiguous with another record's (git short-hash
+/// discipline). Never shorter than 12 or longer than the id.
+fn display_ids(records: &[StoredRecord]) -> std::collections::HashMap<String, String> {
+    let mut ids: Vec<&str> = records.iter().map(|stored| stored.id()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut display = std::collections::HashMap::new();
+    for id in &ids {
+        let mut len = 12.min(id.len());
+        while len < id.len()
+            && ids
+                .iter()
+                .any(|other| *other != *id && other.starts_with(&id[..len]))
+        {
+            len += 1;
+        }
+        display.insert((*id).to_string(), id[..len].to_string());
+    }
+    display
+}
+
+fn evidence_line(refs: &[crate::domain::evidence::EvidenceRef]) -> Option<String> {
+    let first = refs.first()?;
+    let mut line = String::from("evidence:");
+    if let Some(path) = &first.path {
+        line.push_str(&format!(" {path}"));
+    }
+    if let Some(symbol) = &first.symbol {
+        line.push_str(&format!(" {symbol}"));
+    }
+    if let (Some(start), Some(end)) = (first.line_start, first.line_end) {
+        line.push_str(&format!(" L{start}-L{end}"));
+    }
+    Some(line)
+}
+
+/// One record header line: `shortid: description by place time, status`.
+fn record_header(
+    stored: &StoredRecord,
+    superseded: &HashSet<String>,
+    display: &std::collections::HashMap<String, String>,
+    finding_titles: &std::collections::HashMap<(String, String), String>,
+    now: &str,
+) -> String {
+    let short = display
+        .get(stored.id())
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| short_id(stored.id()));
+    let place = stored.location.label();
+    let when = relative_time(stored.record.created_at(), now);
+    let superseded_marker = |already: bool| {
+        if superseded.contains(stored.id()) && !already {
+            ", superseded"
         } else {
             ""
-        };
-        out.push_str(&format!(
-            "{:<11} {} {} {} {}{}\n",
-            stored.record.kind().as_str(),
-            stored.id(),
-            stored.location.label(),
-            stored.record.created_at(),
-            summary,
-            marker
-        ));
+        }
+    };
+    match &stored.record {
+        ProjectRecord::Fact(record) => format!(
+            "{short}: {} by {place} {when}, {}{}",
+            record.subject,
+            record.state,
+            superseded_marker(false)
+        ),
+        ProjectRecord::Lesson(record) => {
+            let status = if superseded.contains(stored.id()) {
+                "superseded"
+            } else {
+                "active"
+            };
+            format!("{short}: {} by {place} {when}, {status}", record.subject)
+        }
+        ProjectRecord::Observation(record) => {
+            let description = finding_titles
+                .get(&(record.review_id.clone(), record.finding_id.clone()))
+                .map(|title| format!("{title} ({})", record.category))
+                .unwrap_or_else(|| record.category.clone());
+            format!(
+                "{short}: {description} by {} {when}, {}{}",
+                record.reviewer_id,
+                record.outcome,
+                superseded_marker(false)
+            )
+        }
     }
-    if kinds.is_empty() {
-        out.push_str(&format!(
-            "{} records ({} superseded)\n",
-            shown.len(),
-            superseded_count
-        ));
-    } else {
-        out.push_str(&format!(
-            "{} records shown of {} total ({} superseded; {} filtered out)\n",
-            shown.len(),
-            records.len(),
-            superseded_count,
-            records.len() - shown.len()
-        ));
+}
+
+fn record_body(
+    stored: &StoredRecord,
+    finding_titles: &std::collections::HashMap<(String, String), String>,
+) -> Vec<String> {
+    match &stored.record {
+        ProjectRecord::Fact(record) => {
+            let mut lines = vec![record.text.clone()];
+            if let Some(evidence) = evidence_line(&record.evidence) {
+                lines.push(evidence);
+            }
+            lines
+        }
+        ProjectRecord::Lesson(record) => {
+            let mut lines = vec![record.text.clone()];
+            let mut derivation = format!(
+                "derived from {} observations",
+                record.source_observation_ids.len()
+            );
+            if !record.supersedes.is_empty() {
+                derivation.push_str(&format!(
+                    ", supersedes {} earlier records",
+                    record.supersedes.len()
+                ));
+            }
+            lines.push(derivation);
+            lines
+        }
+        ProjectRecord::Observation(record) => {
+            let finding = if finding_titles
+                .contains_key(&(record.review_id.clone(), record.finding_id.clone()))
+            {
+                short_id(&record.finding_id).to_string()
+            } else {
+                record.finding_id.clone()
+            };
+            vec![format!(
+                "review {}, finding {}, {}, submitted by {}",
+                short_id(&record.review_id),
+                finding,
+                record.impact_class.as_str(),
+                record.author
+            )]
+        }
+    }
+}
+
+/// Renders the human listing for `nisse records list`: one header line
+/// per record (`shortid: description by place time, status`), plain
+/// prose body lines, records newest first. The machine format is
+/// `--json`, never this one.
+pub fn render_listing(
+    root: &Path,
+    records: &[StoredRecord],
+    finding_titles: &std::collections::HashMap<(String, String), String>,
+    now: &str,
+    options: &ListingOptions<'_>,
+) -> String {
+    let superseded = superseded_ids(records);
+    let display = display_ids(records);
+    let unfiltered = options.kinds.is_empty();
+
+    let mut out = format!(
+        "nisse records — {} records in {}\n",
+        records.len(),
+        root.display()
+    );
+    for kind in [
+        RecordKind::Fact,
+        RecordKind::Lesson,
+        RecordKind::Observation,
+    ] {
+        if !unfiltered && !options.kinds.contains(&kind) {
+            continue;
+        }
+        let mut section: Vec<&StoredRecord> = records
+            .iter()
+            .filter(|stored| stored.record.kind() == kind)
+            .collect();
+        section.sort_by(|a, b| {
+            b.record
+                .created_at()
+                .cmp(a.record.created_at())
+                .then_with(|| b.id().cmp(a.id()))
+        });
+        let total = section.len();
+        let superseded_count = section
+            .iter()
+            .filter(|stored| superseded.contains(stored.id()))
+            .count();
+        let shown = options.limit.map_or(total, |limit| limit.min(total));
+        let mut count_line = if options.limit.is_some() {
+            format!("{kind}s (shown {shown} of {total}")
+        } else {
+            format!("{kind}s ({total}")
+        };
+        if superseded_count > 0 {
+            count_line.push_str(&format!(", {superseded_count} superseded"));
+        }
+        count_line.push(')');
+        out.push_str(&count_line);
+        out.push('\n');
+        for (index, stored) in section.iter().take(shown).enumerate() {
+            if index > 0 && !options.oneline {
+                out.push('\n');
+            }
+            out.push_str(&record_header(
+                stored,
+                &superseded,
+                &display,
+                finding_titles,
+                now,
+            ));
+            out.push('\n');
+            if !options.oneline {
+                for line in record_body(stored, finding_titles) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+        if shown > 0 && !options.oneline {
+            out.push('\n');
+        }
+    }
+    if unfiltered && !options.oneline && options.limit.is_none() {
+        out.push_str(
+            "options: --kind observation|fact|lesson, --oneline, --limit N, --json; \
+             see `nisse records list --help`\n",
+        );
     }
     out
 }
@@ -1235,20 +1434,61 @@ mod tests {
         store.create_common(&lesson("carol")).unwrap();
 
         let loaded = store.load().unwrap();
-        let text = render_listing(&store.nisse_dir(), &loaded, &[]);
-        assert!(text.starts_with("nisse records list\n"));
-        assert!(text.contains("fact"));
-        assert!(text.contains("observation"));
-        assert!(text.contains("lesson"));
-        assert!(text.contains("people/alice"));
-        assert!(text.contains("common"));
-        assert!(text.contains("supported queue discipline"));
-        assert!(text.contains("[superseded]"));
-        assert!(text.ends_with("4 records (1 superseded)\n"));
+        let titles = std::collections::HashMap::new();
+        let now = "2026-09-28T12:00:00.000Z";
+        let text = render_listing(
+            &store.nisse_dir(),
+            &loaded,
+            &titles,
+            now,
+            &ListingOptions::default(),
+        );
+        assert!(text.starts_with("nisse records — 4 records in "));
+        assert!(text.contains("facts (2, 1 superseded)\n"));
+        assert!(text.contains("lessons (1)\n"));
+        assert!(text.contains("observations (1)\n"));
+        // Record header shape: shortid: subject by place time, status.
+        assert!(text.contains(": queue discipline by people/alice "));
+        assert!(text.contains(", supported, superseded\n"));
+        assert!(text.contains(": interrupt safety by common "));
+        assert!(text.contains(", active\n"));
+        assert!(text.contains(": race by quality "));
+        // Body lines: fact text, evidence line, lesson derivation.
+        assert!(text.contains("The sensor queue is single-producer single-consumer.\n"));
+        assert!(text.contains("evidence: "));
+        assert!(text.contains("derived from "));
+        // No-params discovery line.
+        assert!(
+            text.contains("options: --kind observation|fact|lesson, --oneline, --limit N, --json")
+        );
     }
 
     #[test]
-    fn render_listing_kind_filter_selects_and_counts() {
+    fn relative_time_ladder_is_human() {
+        let now = "2026-09-28T12:00:00.000Z";
+        assert_eq!(relative_time("2026-09-28T11:59:50.000Z", now), "just now");
+        assert_eq!(
+            relative_time("2026-09-28T11:30:00.000Z", now),
+            "30 minutes ago"
+        );
+        assert_eq!(
+            relative_time("2026-09-28T06:00:00.000Z", now),
+            "6 hours ago"
+        );
+        assert_eq!(relative_time("2026-09-21T12:00:00.000Z", now), "7 days ago");
+        assert_eq!(
+            relative_time("2026-06-01T12:00:00.000Z", now),
+            "3 months ago"
+        );
+        assert_eq!(
+            relative_time("2024-01-01T12:00:00.000Z", now),
+            "2 years ago"
+        );
+        assert_eq!(relative_time("not-a-timestamp", now), "not-a-timestamp");
+    }
+
+    #[test]
+    fn render_listing_oneline_limit_and_filter() {
         let dir = tempfile::tempdir().unwrap();
         let store = new_store(dir.path());
 
@@ -1258,24 +1498,82 @@ mod tests {
         store.create_common(&lesson("carol")).unwrap();
 
         let loaded = store.load().unwrap();
+        let titles = std::collections::HashMap::new();
+        let now = "2026-09-28T12:00:00.000Z";
+        let id_of = |stored: &StoredRecord| stored.id().to_string();
+        let fact_id = id_of(
+            loaded
+                .iter()
+                .find(|s| matches!(s.record, ProjectRecord::Fact(_)))
+                .unwrap(),
+        );
 
-        // Facts only: header records the selection, footer the filtering.
-        let text = render_listing(&store.nisse_dir(), &loaded, &[RecordKind::Fact]);
-        assert!(text.contains("kinds: fact\n"));
-        assert!(!text.contains("observation "));
-        assert!(!text.contains("lesson "));
-        assert!(text.ends_with("1 records shown of 4 total (0 superseded; 3 filtered out)\n"));
-
-        // Repeated kinds union; observations carry finding ids.
+        // Facts only: one section, no bodies, no discovery line.
         let text = render_listing(
             &store.nisse_dir(),
             &loaded,
-            &[RecordKind::Fact, RecordKind::Observation],
+            &titles,
+            now,
+            &ListingOptions {
+                kinds: &[RecordKind::Fact],
+                oneline: true,
+                limit: None,
+            },
         );
-        assert!(text.contains("kinds: fact,observation\n"));
-        assert!(text.contains("(finding "));
-        assert!(!text.contains("lesson "));
-        assert!(text.ends_with("3 records shown of 4 total (0 superseded; 1 filtered out)\n"));
+        assert!(text.contains("facts (1)\n"));
+        assert!(text.contains(&format!("{}: queue discipline", &fact_id[..12])));
+        assert!(!text.contains("observations"));
+        assert!(!text.contains("options:"));
+
+        // Limit truncates but counts stay true, in both modes.
+        for oneline in [false, true] {
+            let text = render_listing(
+                &store.nisse_dir(),
+                &loaded,
+                &titles,
+                now,
+                &ListingOptions {
+                    kinds: &[],
+                    oneline,
+                    limit: Some(1),
+                },
+            );
+            assert!(text.contains("facts (shown 1 of 1)\n"));
+            assert!(text.contains("observations (shown 1 of 2)\n"));
+            assert!(!text.contains("options:"));
+        }
+    }
+
+    #[test]
+    fn render_listing_observation_joins_finding_title_from_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = new_store(dir.path());
+        let stored = store.create(&observation("alice")).unwrap();
+        let observation = match &stored.record {
+            ProjectRecord::Observation(observation) => observation.clone(),
+            other => panic!("unexpected record: {other:?}"),
+        };
+
+        let loaded = store.load().unwrap();
+        let mut titles = std::collections::HashMap::new();
+        titles.insert(
+            (
+                observation.review_id.clone(),
+                observation.finding_id.clone(),
+            ),
+            "Missing coverage for the concurrent-write path".to_string(),
+        );
+        let text = render_listing(
+            &store.nisse_dir(),
+            &loaded,
+            &titles,
+            "2026-09-28T12:00:00.000Z",
+            &ListingOptions::default(),
+        );
+        assert!(
+            text.contains(": Missing coverage for the concurrent-write path (race) by quality ")
+        );
+        assert!(text.contains("submitted by alice"));
     }
 
     #[test]

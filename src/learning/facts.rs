@@ -854,6 +854,10 @@ pub fn load_pending(paths: &StoragePaths) -> Result<Vec<PendingRow>, String> {
 /// Render the human-readable `nisse records pending` report.
 pub fn render_pending(rows: &[PendingRow]) -> String {
     let mut out = String::from("nisse records pending\n");
+    out.push_str(
+        "learning that did not (yet) become durable project knowledge, with the reason;\n\
+         regenerable local cache — later runs resolve it, `nisse cache clear` discards it\n",
+    );
     if rows.is_empty() {
         out.push_str("no pending learning state\n");
         return out;

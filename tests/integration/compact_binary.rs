@@ -343,7 +343,7 @@ fn compatible_facts_merge_into_one_verified_common_fact() {
     let out = run_nisse_in_with_env(&root, &["records", "list"], home.path(), &[]);
     let listing = String::from_utf8(out.stdout).expect("stdout utf8");
     assert!(out.status.success(), "{listing}");
-    assert!(listing.contains("[superseded]"), "{listing}");
+    assert!(listing.contains(", superseded"), "{listing}");
     assert!(listing.contains("common"), "{listing}");
 
     // Idempotent: the second run finds a single active fact per subject.

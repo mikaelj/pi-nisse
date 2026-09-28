@@ -73,7 +73,12 @@ impl App {
                 outcome,
             } => self.run_feedback(review_id, finding_id, outcome),
             Command::Records { records } => match records {
-                crate::cli::RecordsCommand::List { kind } => self.run_records_list(&kind),
+                crate::cli::RecordsCommand::List {
+                    kind,
+                    oneline,
+                    limit,
+                    json,
+                } => self.run_records_list(&kind, oneline, limit, json),
                 crate::cli::RecordsCommand::Pending => self.run_records_pending(),
                 crate::cli::RecordsCommand::Compact => self.run_records_compact(),
             },
@@ -383,17 +388,59 @@ impl App {
     /// Lists the durable records of the current worktree. Loading is
     /// strict: an invalid `.nisse` tree fails loudly with the offending
     /// path instead of silently skipping records.
-    fn run_records_list(&self, kinds: &[crate::cli::RecordKindArg]) -> Result<(), AppError> {
-        use crate::storage::records::{RecordStore, render_listing};
+    fn run_records_list(
+        &self,
+        kinds: &[crate::cli::RecordKindArg],
+        oneline: bool,
+        limit: Option<u64>,
+        json: bool,
+    ) -> Result<(), AppError> {
+        use crate::storage::records::{ListingOptions, RecordStore, render_listing};
 
-        let (ctx, _paths) = self.discover_storage()?;
+        let (ctx, paths) = self.discover_storage()?;
         let store = RecordStore::new(&ctx.worktree_root);
         let records = store
             .load()
             .map_err(|err| AppError::Other(anyhow::anyhow!("records list failed: {err}")))?;
         let filter: Vec<crate::domain::records::RecordKind> =
             kinds.iter().map(|kind| kind.record_kind()).collect();
-        print_to_stdout(&render_listing(&store.nisse_dir(), &records, &filter));
+        if json {
+            let selected: Vec<&crate::storage::records::StoredRecord> = records
+                .iter()
+                .filter(|stored| filter.is_empty() || filter.contains(&stored.record.kind()))
+                .collect();
+            let payload = serde_json::json!({
+                "records": selected.iter().map(|stored| serde_json::json!({
+                    "id": stored.id(),
+                    "kind": stored.record.kind().as_str(),
+                    "location": stored.location.label(),
+                    "created_at": stored.record.created_at(),
+                    "record": stored.record,
+                })).collect::<Vec<_>>(),
+                "total": records.len(),
+            });
+            print_to_stdout(&format!(
+                "{}\n",
+                serde_json::to_string_pretty(&payload).map_err(|err| AppError::Other(
+                    anyhow::anyhow!("records list failed: {err}")
+                ))?
+            ));
+            return Ok(());
+        }
+        let finding_titles =
+            crate::learning::feedback::load_finding_titles(&paths).unwrap_or_default();
+        let options = ListingOptions {
+            kinds: &filter,
+            oneline,
+            limit: limit.map(|value| value as usize),
+        };
+        print_to_stdout(&render_listing(
+            &store.nisse_dir(),
+            &records,
+            &finding_titles,
+            &crate::domain::time::now_utc_rfc3339(),
+            &options,
+        ));
         Ok(())
     }
 
@@ -517,7 +564,8 @@ impl App {
             )));
         };
 
-        let recording = self.feedback_operation(&review_id, &finding_id, outcome)?;
+        let (recording, review_id, finding_id) =
+            self.feedback_operation(&review_id, &finding_id, outcome)?;
         print_to_stdout(&feedback::render_feedback(
             &review_id,
             &finding_id,
@@ -538,10 +586,51 @@ impl App {
         review_id: &str,
         finding_id: &str,
         outcome: crate::domain::records::FeedbackOutcome,
-    ) -> Result<crate::learning::feedback::FeedbackRecording, AppError> {
+    ) -> Result<(crate::learning::feedback::FeedbackRecording, String, String), AppError> {
+        use crate::domain::ids::{PrefixResolution, resolve_id_prefix};
         use crate::learning::feedback;
 
         let (ctx, paths) = self.discover_storage()?;
+
+        // Short ids copied from the human records listing resolve here:
+        // exact match first, then unambiguous prefix over the stored id
+        // space of each argument.
+        let stored_review_ids = feedback::list_review_ids(&paths)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("feedback failed: {err}")))?;
+        let review_id = match resolve_id_prefix(review_id, &stored_review_ids) {
+            PrefixResolution::Resolved(id) => id,
+            PrefixResolution::Ambiguous(candidates) => {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "feedback failed: {}",
+                    feedback::FeedbackError::AmbiguousId {
+                        label: "review id",
+                        input: review_id.to_string(),
+                        count: candidates.len(),
+                        candidates,
+                    }
+                )));
+            }
+            PrefixResolution::Unknown => review_id.to_string(),
+        };
+        let stored_finding_ids: Vec<String> = feedback::load_review_result(&paths, &review_id)
+            .map_err(|err| AppError::Other(anyhow::anyhow!("feedback failed: {err}")))?
+            .map(|result| result.findings.iter().map(|f| f.id.clone()).collect())
+            .unwrap_or_default();
+        let finding_id = match resolve_id_prefix(finding_id, &stored_finding_ids) {
+            PrefixResolution::Resolved(id) => id,
+            PrefixResolution::Ambiguous(candidates) => {
+                return Err(AppError::Other(anyhow::anyhow!(
+                    "feedback failed: {}",
+                    feedback::FeedbackError::AmbiguousId {
+                        label: "finding id",
+                        input: finding_id.to_string(),
+                        count: candidates.len(),
+                        candidates,
+                    }
+                )));
+            }
+            PrefixResolution::Unknown => finding_id.to_string(),
+        };
 
         // Contributor identity lives in trusted local configuration;
         // feedback is noninteractive and never prompts.
@@ -562,11 +651,12 @@ impl App {
         feedback::record_feedback(
             &ctx,
             &paths,
-            review_id,
-            finding_id,
+            &review_id,
+            &finding_id,
             outcome,
             contributor.as_deref(),
         )
+        .map(|recording| (recording, review_id, finding_id))
         .map_err(|err| AppError::Other(anyhow::anyhow!("feedback failed: {err}")))
     }
 

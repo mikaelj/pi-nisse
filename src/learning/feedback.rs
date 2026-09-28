@@ -83,6 +83,23 @@ pub enum FeedbackError {
         review_id: String,
     },
 
+    /// A prefix-style identifier matched several stored ids. The user
+    /// re-runs with a longer prefix; the candidates are listed.
+    #[error(
+        "ambiguous {label} `{input}` matches {count} ids: {candidates}",
+        candidates = candidates.join(", ")
+    )]
+    AmbiguousId {
+        /// What kind of id was being resolved ("review id"/"finding id").
+        label: &'static str,
+        /// The ambiguous input.
+        input: String,
+        /// Number of matching candidates.
+        count: usize,
+        /// The matching candidate ids.
+        candidates: Vec<String>,
+    },
+
     /// The stored review has no finding with this identifier.
     #[error("review `{review_id}` has no finding `{finding_id}`")]
     UnknownFinding {
@@ -236,6 +253,46 @@ pub fn load_review_result(
         )));
     }
     Ok(Some(result))
+}
+
+/// Every review id in the local review history, oldest first. An
+/// absent cache database is simply an empty history.
+pub fn list_review_ids(paths: &StoragePaths) -> Result<Vec<String>, FeedbackError> {
+    if !paths.shared.is_file() {
+        return Ok(Vec::new());
+    }
+    let db = open_or_recover(&paths.shared, DbKind::Shared)
+        .map_err(|error| FeedbackError::Cache(format!("{}: {error}", error)))?;
+    let mut statement = db
+        .conn
+        .prepare("SELECT review_id FROM review_event ORDER BY created_at, review_id")
+        .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| FeedbackError::Cache(error.to_string()))
+}
+
+/// Finding titles keyed by `(review_id, finding_id)`, joined from the
+/// stored review payloads. Drives the human records listing: an
+/// observation names the finding it disposed of, not just its category
+/// slug. Absent cache rows simply contribute no entry.
+pub fn load_finding_titles(
+    paths: &StoragePaths,
+) -> Result<std::collections::HashMap<(String, String), String>, FeedbackError> {
+    let mut titles = std::collections::HashMap::new();
+    for review_id in list_review_ids(paths)? {
+        if let Some(result) = load_review_result(paths, &review_id)? {
+            for finding in &result.findings {
+                titles.insert(
+                    (review_id.clone(), finding.id.clone()),
+                    finding.title.clone(),
+                );
+            }
+        }
+    }
+    Ok(titles)
 }
 
 /// Distinct evidence paths of a finding, in evidence order, bounded to

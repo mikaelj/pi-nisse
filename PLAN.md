@@ -2677,9 +2677,14 @@ Required:
     nisse feedback <review-id> <finding-id> --fixed
     nisse feedback <review-id> <finding-id> --accepted
     nisse feedback <review-id> <finding-id> --dismissed
+    nisse feedback ... <review-id|finding-id> may be an unambiguous
+    identifier prefix, resolved against the locally stored id space
 
     nisse records list
     nisse records list --kind <observation|fact|lesson>...
+    nisse records list --oneline
+    nisse records list --limit <N>
+    nisse records list --json
     nisse records pending
     nisse records compact
 

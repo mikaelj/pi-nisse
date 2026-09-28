@@ -229,8 +229,8 @@ fn cache_loss_preserves_durable_records_and_rebuilds() {
     let stderr = String::from_utf8(out.stderr).expect("stderr utf8");
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(stderr, "");
-    assert!(stdout.contains("2 records"), "{stdout}");
-    assert!(stdout.contains("people/alice"), "{stdout}");
+    assert!(stdout.contains("observations (2)"), "{stdout}");
+    assert!(stdout.contains("submitted by alice"), "{stdout}");
     assert_eq!(observation_files(&repo, "alice").len(), 2);
 
     // Status reports the loss without recreating anything.
@@ -321,9 +321,9 @@ fn different_contributor_records_survive_team_merge() {
     let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
     let stderr = String::from_utf8(out.stderr).expect("stderr utf8");
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("4 records"), "{stdout}");
-    assert!(stdout.contains("people/alice"), "{stdout}");
-    assert!(stdout.contains("people/bob"), "{stdout}");
+    assert!(stdout.contains("observations (4)"), "{stdout}");
+    assert!(stdout.contains("submitted by alice"), "{stdout}");
+    assert!(stdout.contains("submitted by bob"), "{stdout}");
     for path in observation_files(&repo, "alice")
         .into_iter()
         .chain(observation_files(&repo, "bob"))

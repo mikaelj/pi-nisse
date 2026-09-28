@@ -252,7 +252,9 @@ impl NisseMcpServer {
         self.run_json_operation("feedback", move || {
             App::new()
                 .feedback_operation(&review_id, &finding_id, outcome)
-                .map(|recording| FeedbackReport::new(review_id, finding_id, outcome, &recording))
+                .map(|(recording, review_id, finding_id)| {
+                    FeedbackReport::new(review_id, finding_id, outcome, &recording)
+                })
         })
         .await
     }

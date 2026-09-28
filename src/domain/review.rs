@@ -49,6 +49,25 @@ pub enum ImpactClass {
 }
 
 impl ImpactClass {
+    /// The serialized name (snake_case, matching the serde rename).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImpactClass::Correctness => "correctness",
+            ImpactClass::Security => "security",
+            ImpactClass::DataLoss => "data_loss",
+            ImpactClass::Deadlock => "deadlock",
+            ImpactClass::Crash => "crash",
+            ImpactClass::Compatibility => "compatibility",
+            ImpactClass::Performance => "performance",
+            ImpactClass::TestGap => "test_gap",
+            ImpactClass::Maintainability => "maintainability",
+            ImpactClass::Style => "style",
+            ImpactClass::Other => "other",
+        }
+    }
+}
+
+impl ImpactClass {
     /// The maximum severity this impact class may carry (plan section 14).
     ///
     /// `style` is capped at `low`; `maintainability` and `test_gap` at

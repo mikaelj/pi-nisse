@@ -243,7 +243,8 @@ fn repeated_outcomes_form_a_deterministic_lesson() {
         stdout.contains("repeated `fake` findings of `quality`"),
         "{stdout}"
     );
-    assert!(stdout.contains("7 records (0 superseded)"), "{stdout}");
+    assert!(stdout.contains("lessons (1)"), "{stdout}");
+    assert!(stdout.contains("observations (6)"), "{stdout}");
 }
 
 #[test]
