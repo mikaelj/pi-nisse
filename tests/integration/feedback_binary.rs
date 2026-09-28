@@ -463,4 +463,21 @@ fn feedback_accepts_unambiguous_ulid_prefixes_and_rejects_ambiguous_ones() {
     assert!(!ok);
     assert!(stderr.contains("no stored review"), "{stderr}");
     assert_eq!(observation_records(&repo).len(), 2);
+
+    // A second stored review makes a shared prefix ambiguous: the typed
+    // error lists the candidates on stderr, nothing records.
+    let second = review_working(&repo, &home);
+    let second_id = second["review_id"].as_str().unwrap().to_string();
+    let common = review_id
+        .chars()
+        .zip(second_id.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ambiguous_prefix = &review_id[..common];
+    let (ok, _stdout, stderr) = submit(&repo, &home, ambiguous_prefix, &finding, "--fixed");
+    assert!(!ok, "ambiguous prefixes fail closed");
+    assert!(stderr.contains("ambiguous review id"), "{stderr}");
+    assert!(stderr.contains(&review_id), "{stderr}");
+    assert!(stderr.contains(&second_id), "{stderr}");
+    assert_eq!(observation_records(&repo).len(), 2);
 }

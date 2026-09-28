@@ -30,9 +30,12 @@ pub enum PrefixResolution {
 }
 
 /// Resolve `input` against `candidates` by exact match first, then by
-/// unambiguous string prefix. Works over any identifier space: record
-/// ULIDs resolve via 12-character prefixes, free-form finding ids
-/// (which need not be ULIDs) match verbatim.
+/// unambiguous string prefix of any length. Works over any identifier
+/// space: record ULIDs are typically pasted as 12-character prefixes,
+/// free-form finding ids (which need not be ULIDs) usually match
+/// verbatim, but both follow the same exact-then-prefix rule. Note the
+/// empty input matches every candidate and is therefore `Ambiguous`,
+/// never a silent first-match pick.
 pub fn resolve_id_prefix(input: &str, candidates: &[String]) -> PrefixResolution {
     if candidates.iter().any(|candidate| candidate == input) {
         return PrefixResolution::Resolved(input.to_string());
@@ -52,6 +55,52 @@ pub fn resolve_id_prefix(input: &str, candidates: &[String]) -> PrefixResolution
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn resolve_id_prefix_prefers_exact_matches() {
+        let candidates = ids(&["01A", "01AB", "B"]);
+        assert_eq!(
+            resolve_id_prefix("01A", &candidates),
+            PrefixResolution::Resolved("01A".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_id_prefix_resolves_unique_prefixes() {
+        let candidates = ids(&["01ABC", "02XYZ"]);
+        assert_eq!(
+            resolve_id_prefix("01A", &candidates),
+            PrefixResolution::Resolved("01ABC".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_id_prefix_lists_ambiguous_candidates() {
+        let candidates = ids(&["01ABC", "01ABD", "9"]);
+        assert_eq!(
+            resolve_id_prefix("01", &candidates),
+            PrefixResolution::Ambiguous(ids(&["01ABC", "01ABD"]))
+        );
+    }
+
+    #[test]
+    fn resolve_id_prefix_reports_unknown_and_empty_input() {
+        let candidates = ids(&["01ABC", "02XYZ"]);
+        assert_eq!(
+            resolve_id_prefix("9", &candidates),
+            PrefixResolution::Unknown
+        );
+        // Empty input matches every candidate: ambiguous, never a pick.
+        assert_eq!(
+            resolve_id_prefix("", &candidates),
+            PrefixResolution::Ambiguous(candidates.clone())
+        );
+        assert_eq!(resolve_id_prefix("x", &[]), PrefixResolution::Unknown);
+    }
 
     #[test]
     fn new_ulid_is_canonical() {
