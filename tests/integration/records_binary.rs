@@ -261,3 +261,61 @@ fn records_list_survives_cache_loss_independently_of_sqlite() {
     assert!(stdout.contains("1 records"));
     assert!(!repo_root.join(".git").join("nisse").exists());
 }
+
+#[test]
+fn records_list_kind_filter_selects_records_and_reports_filtering() {
+    let (_dir, repo_root) = repo("kind-filter");
+    let home = home();
+
+    write_record(
+        &repo_root,
+        "people/alice/01ARZ3NDEKTSV4RRFFQ69G5FAV.json",
+        &observation_json(),
+    );
+    write_record(
+        &repo_root,
+        "common/01ARZ3NDEKTSV4RRFFQ69G5FB0.json",
+        &fact_json("01ARZ3NDEKTSV4RRFFQ69G5FB0", None),
+    );
+
+    // Facts only: the observation is filtered out and counted.
+    let out = run_nisse_in(
+        &repo_root,
+        &["records", "list", "--kind", "fact"],
+        home.path(),
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}");
+    assert!(stdout.contains("kinds: fact\n"));
+    assert!(stdout.contains("fact        01ARZ3NDEKTSV4RRFFQ69G5FB0 common"));
+    assert!(!stdout.contains("review_outcome"));
+    assert!(stdout.ends_with("1 records shown of 2 total (0 superseded; 1 filtered out)\n"));
+
+    // Repeated flags union kinds; observation rows carry the finding id.
+    let out = run_nisse_in(
+        &repo_root,
+        &[
+            "records",
+            "list",
+            "--kind",
+            "observation",
+            "--kind",
+            "lesson",
+        ],
+        home.path(),
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(out.status.success(), "stdout:\n{stdout}");
+    assert!(stdout.contains("kinds: observation,lesson\n"));
+    assert!(stdout.contains("(finding q-1)"));
+    assert!(!stdout.contains("supported queue discipline"));
+    assert!(stdout.ends_with("1 records shown of 2 total (0 superseded; 1 filtered out)\n"));
+
+    // Unknown kinds are rejected by the CLI contract.
+    let out = run_nisse_in(
+        &repo_root,
+        &["records", "list", "--kind", "gospel"],
+        home.path(),
+    );
+    assert!(!out.status.success());
+}

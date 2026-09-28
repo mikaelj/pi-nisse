@@ -621,20 +621,37 @@ fn entry_name(entry: &std::fs::DirEntry, blame: &Path) -> Result<String, RecordS
 }
 
 /// Render the human-readable `nisse records list` report.
-pub fn render_listing(root: &Path, records: &[StoredRecord]) -> String {
+/// Renders the human listing for `nisse records list`. When `kinds` is
+/// non-empty only records of the selected kinds are shown; the footer
+/// then reports how many records were filtered out. Observation rows
+/// include their finding id so two findings of the same review never
+/// render as indistinguishable lines.
+pub fn render_listing(root: &Path, records: &[StoredRecord], kinds: &[RecordKind]) -> String {
     let superseded = superseded_ids(records);
-    let superseded_count = records
+    let shown: Vec<&StoredRecord> = if kinds.is_empty() {
+        records.iter().collect()
+    } else {
+        records
+            .iter()
+            .filter(|stored| kinds.contains(&stored.record.kind()))
+            .collect()
+    };
+    let superseded_count = shown
         .iter()
         .filter(|stored| superseded.contains(stored.id()))
         .count();
 
     let mut out = String::from("nisse records list\n");
     out.push_str(&format!("records: {}\n", root.display()));
-    for stored in records {
+    if !kinds.is_empty() {
+        let names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
+        out.push_str(&format!("kinds: {}\n", names.join(",")));
+    }
+    for stored in &shown {
         let summary = match &stored.record {
             ProjectRecord::Observation(record) => format!(
-                "{} {} {}",
-                record.observation_type, record.outcome, record.category
+                "{} {} {} (finding {})",
+                record.observation_type, record.outcome, record.category, record.finding_id
             ),
             ProjectRecord::Fact(record) => {
                 format!("{} {}", record.state, record.subject)
@@ -658,11 +675,21 @@ pub fn render_listing(root: &Path, records: &[StoredRecord]) -> String {
             marker
         ));
     }
-    out.push_str(&format!(
-        "{} records ({} superseded)\n",
-        records.len(),
-        superseded_count
-    ));
+    if kinds.is_empty() {
+        out.push_str(&format!(
+            "{} records ({} superseded)\n",
+            shown.len(),
+            superseded_count
+        ));
+    } else {
+        out.push_str(&format!(
+            "{} records shown of {} total ({} superseded; {} filtered out)\n",
+            shown.len(),
+            records.len(),
+            superseded_count,
+            records.len() - shown.len()
+        ));
+    }
     out
 }
 
@@ -1208,7 +1235,7 @@ mod tests {
         store.create_common(&lesson("carol")).unwrap();
 
         let loaded = store.load().unwrap();
-        let text = render_listing(&store.nisse_dir(), &loaded);
+        let text = render_listing(&store.nisse_dir(), &loaded, &[]);
         assert!(text.starts_with("nisse records list\n"));
         assert!(text.contains("fact"));
         assert!(text.contains("observation"));
@@ -1218,6 +1245,37 @@ mod tests {
         assert!(text.contains("supported queue discipline"));
         assert!(text.contains("[superseded]"));
         assert!(text.ends_with("4 records (1 superseded)\n"));
+    }
+
+    #[test]
+    fn render_listing_kind_filter_selects_and_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = new_store(dir.path());
+
+        store.create(&fact("alice")).unwrap();
+        store.create(&observation("alice")).unwrap();
+        store.create(&observation("alice")).unwrap();
+        store.create_common(&lesson("carol")).unwrap();
+
+        let loaded = store.load().unwrap();
+
+        // Facts only: header records the selection, footer the filtering.
+        let text = render_listing(&store.nisse_dir(), &loaded, &[RecordKind::Fact]);
+        assert!(text.contains("kinds: fact\n"));
+        assert!(!text.contains("observation "));
+        assert!(!text.contains("lesson "));
+        assert!(text.ends_with("1 records shown of 4 total (0 superseded; 3 filtered out)\n"));
+
+        // Repeated kinds union; observations carry finding ids.
+        let text = render_listing(
+            &store.nisse_dir(),
+            &loaded,
+            &[RecordKind::Fact, RecordKind::Observation],
+        );
+        assert!(text.contains("kinds: fact,observation\n"));
+        assert!(text.contains("(finding "));
+        assert!(!text.contains("lesson "));
+        assert!(text.ends_with("3 records shown of 4 total (0 superseded; 1 filtered out)\n"));
     }
 
     #[test]

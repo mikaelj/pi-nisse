@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::domain::records::RecordKind;
 
 /// Nisse local software-review engine.
 #[derive(Debug, Parser)]
@@ -189,13 +191,37 @@ impl FeedbackOutcome {
 #[derive(Debug, Subcommand)]
 pub enum RecordsCommand {
     /// List durable project records.
-    List,
+    List {
+        /// Only list records of these kinds. Repeatable; lists every kind
+        /// when omitted.
+        #[arg(long = "kind", value_name = "KIND")]
+        kind: Vec<RecordKindArg>,
+    },
 
     /// List pending learning state.
     Pending,
 
     /// Consolidate durable records.
     Compact,
+}
+
+/// `--kind` values accepted by `nisse records list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RecordKindArg {
+    Observation,
+    Fact,
+    Lesson,
+}
+
+impl RecordKindArg {
+    /// The domain kind this CLI value selects.
+    pub fn record_kind(self) -> RecordKind {
+        match self {
+            RecordKindArg::Observation => RecordKind::Observation,
+            RecordKindArg::Fact => RecordKind::Fact,
+            RecordKindArg::Lesson => RecordKind::Lesson,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -470,7 +496,7 @@ mod tests {
             });
             let actual = match cli.command {
                 Command::Records {
-                    records: RecordsCommand::List,
+                    records: RecordsCommand::List { .. },
                 } => "records list",
                 Command::Records {
                     records: RecordsCommand::Pending,
@@ -497,7 +523,51 @@ mod tests {
 
         let mcp = Cli::try_parse_from(["nisse", "mcp"]).unwrap();
         assert!(matches!(mcp.command, Command::Mcp));
+    }
 
+    #[test]
+    fn parses_records_list_kind_filter() {
+        let unfiltered = Cli::try_parse_from(["nisse", "records", "list"]).unwrap();
+        match unfiltered.command {
+            Command::Records {
+                records: RecordsCommand::List { kind },
+            } => assert!(kind.is_empty()),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let filtered = Cli::try_parse_from(["nisse", "records", "list", "--kind", "fact"]).unwrap();
+        match filtered.command {
+            Command::Records {
+                records: RecordsCommand::List { kind },
+            } => {
+                assert_eq!(kind, vec![RecordKindArg::Fact]);
+                assert_eq!(kind[0].record_kind(), RecordKind::Fact);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let repeated = Cli::try_parse_from([
+            "nisse", "records", "list", "--kind", "fact", "--kind", "lesson",
+        ])
+        .unwrap();
+        match repeated.command {
+            Command::Records {
+                records: RecordsCommand::List { kind },
+            } => {
+                assert_eq!(
+                    kind.iter().map(|k| k.record_kind()).collect::<Vec<_>>(),
+                    vec![RecordKind::Fact, RecordKind::Lesson]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let rejected = Cli::try_parse_from(["nisse", "records", "list", "--kind", "gospel"]);
+        assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn parses_doctor_command() {
         let doctor = Cli::try_parse_from(["nisse", "doctor"]).unwrap();
         assert!(matches!(doctor.command, Command::Doctor));
     }

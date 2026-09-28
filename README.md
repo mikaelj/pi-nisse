@@ -235,7 +235,8 @@ nisse query "<query>" [--json]
 
 nisse feedback <review-id> <finding-id> --fixed | --accepted | --dismissed
 
-nisse records list | pending | compact
+nisse records list [--kind <observation|fact|lesson>]...
+nisse records pending | compact
 nisse cache  status | clear
 nisse eval   routing | retrieval
 nisse mcp
@@ -289,7 +290,10 @@ deterministic and trust-minimal:
   `common/` with independent verification, preserving originals.
 
 `nisse records list` / `nisse records pending` inspect the record tree
-and pending local learning state. Records are plain files: they merge
+and pending local learning state. Pass `--kind observation`, `--kind
+fact`, or `--kind lesson` (repeatable) to list only the selected kinds;
+observation rows include their finding id so same-category findings of
+one review stay distinguishable. Records are plain files: they merge
 across branches and survive reviewers, cache loss, and worktree
 boundaries.
 

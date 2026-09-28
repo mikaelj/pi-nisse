@@ -2679,6 +2679,7 @@ Required:
     nisse feedback <review-id> <finding-id> --dismissed
 
     nisse records list
+    nisse records list --kind <observation|fact|lesson>...
     nisse records pending
     nisse records compact
 

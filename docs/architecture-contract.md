@@ -115,7 +115,7 @@ nisse review plan --file <path> | --stdin [--json]
 nisse review code --working | --staged | --commit <oid> | --range <base>..<head> | --branch <base-ref> [--json]
 nisse query "<query>" [--json]
 nisse feedback <review-id> <finding-id> (--fixed | --accepted | --dismissed)
-nisse records list | pending | compact
+nisse records list [--kind <observation|fact|lesson>]... | pending | compact
 nisse cache status | clear
 nisse eval routing | retrieval
 nisse mcp

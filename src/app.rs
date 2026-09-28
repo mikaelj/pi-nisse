@@ -73,7 +73,7 @@ impl App {
                 outcome,
             } => self.run_feedback(review_id, finding_id, outcome),
             Command::Records { records } => match records {
-                crate::cli::RecordsCommand::List => self.run_records_list(),
+                crate::cli::RecordsCommand::List { kind } => self.run_records_list(&kind),
                 crate::cli::RecordsCommand::Pending => self.run_records_pending(),
                 crate::cli::RecordsCommand::Compact => self.run_records_compact(),
             },
@@ -383,7 +383,7 @@ impl App {
     /// Lists the durable records of the current worktree. Loading is
     /// strict: an invalid `.nisse` tree fails loudly with the offending
     /// path instead of silently skipping records.
-    fn run_records_list(&self) -> Result<(), AppError> {
+    fn run_records_list(&self, kinds: &[crate::cli::RecordKindArg]) -> Result<(), AppError> {
         use crate::storage::records::{RecordStore, render_listing};
 
         let (ctx, _paths) = self.discover_storage()?;
@@ -391,7 +391,9 @@ impl App {
         let records = store
             .load()
             .map_err(|err| AppError::Other(anyhow::anyhow!("records list failed: {err}")))?;
-        print_to_stdout(&render_listing(&store.nisse_dir(), &records));
+        let filter: Vec<crate::domain::records::RecordKind> =
+            kinds.iter().map(|kind| kind.record_kind()).collect();
+        print_to_stdout(&render_listing(&store.nisse_dir(), &records, &filter));
         Ok(())
     }
 
