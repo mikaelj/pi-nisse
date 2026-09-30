@@ -18,6 +18,49 @@ The same five operations are served by the CLI, the Pi integration, and the MCP 
 
 The authoritative specification is the frozen [PLAN.md](PLAN.md); the concise architecture summary is [docs/architecture-contract.md](docs/architecture-contract.md).
 
+## Overview
+
+Here's the full surface, organized by how you'd actually ask.
+
+### Through the agent (normal Pi session — just say it)
+
+| You say | Nisse does |
+| --- | --- |
+| "Review my plan before implementing" | `review_plan` — jury review of the plan; blocker/high findings must be fixed or escalated before code is written (max 3 attempts, then it stops and asks you) |
+| "You're done — review your changes" | `review_code` — jury review of the diff (working tree, staged, a commit, a range, or a branch); same bounded loop |
+| "I researched X and concluded Y — check my claims before I act" | `review_investigation` — every load-bearing claim gets a verdict (supported / partially supported / contradicted / insufficiently supported / not applicable / outside scope) with a confidence tier, each anchored to verbatim evidence; plus a coverage report of what the investigation *missed* (gaps = incompleteness, not findings) |
+| "Where/how does X work in this repo?" | `query_project` — retrieval over the indexed source (skeletons, symbols, references) plus project facts and lessons; the agent reasons over the results and answers |
+| "Finding 2 was valid but we're not fixing it — record that" | `record_feedback` — outcome becomes an immutable durable observation that tunes future routing |
+| "What has this project learned?" | `records list` — facts, lessons, and per-finding outcomes |
+| "Show me what didn't stick" | `records pending` — fact candidates that failed verification, deferred feedback |
+| "Tidy up the learning records" | `records compact` — merges duplicate facts/lessons into canonical `common/` records with fresh verification |
+
+### Directly at the shell
+
+```
+nisse doctor                      # is my setup healthy? (config, models, consent)
+nisse query "how does auth work"  # quick retrieval without the agent
+nisse records list --kind fact    # audit learning, any slice, any flag
+nisse records pending             # what failed verification and why
+nisse cache status | clear        # inspect/discard regenerable caches
+nisse review code --staged --json # scripts and CI get the same reviews
+nisse mcp                         # serve Nisse to any MCP client (not just Pi)
+```
+
+### What Nisse deliberately won't do
+
+- **Never writes or fixes source** — it reviews; you (or the agent) implement the fixes
+- **No task mode** — no plan/build/workflow state; the review-loop policy lives in the Pi skill, not in Nisse
+- **Never guesses** — findings need evidence validated against the review snapshot; unanchored claims get clamped to "insufficiently supported" with visible diagnostics; reviewer disagreement is surfaced, never averaged away
+- **No network** — everything is local; the LLMs it calls are your configured model profiles in `~/.nisse/config.toml`
+- **Never bypasses consent** — directory creation is always your call
+
+### The mental model
+
+Nisse is the **adversarial reader** in your loop: plans get a jury before code exists, diffs get a jury before they're claimed done, investigations get claim-by-claim skepticism before they drive action, and everything the loop learns (outcomes, facts, lessons) accumulates in the project so future reviews start smarter. The agent drives it; you steer it.
+
+Practical starting points on any repo: `"draft the plan first and run a Nisse plan review"`, and after implementation: `"run the tests, then a Nisse code review"`.
+
 ## Architecture
 
 ```
