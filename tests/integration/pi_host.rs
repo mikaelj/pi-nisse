@@ -898,7 +898,8 @@ fn capabilities_env_override_restricts_reported_levels() {
 fn a_host_that_never_reports_capabilities_fails_typed_on_timeout() {
     // The capabilities fixture announces host_ready and then goes
     // silent without answering host_config.
-    let mut host = HostProcess::spawn(&linger_launch("capabilities-silent.sh")).expect("spawn failed");
+    let mut host =
+        HostProcess::spawn(&linger_launch("capabilities-silent.sh")).expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
     // send_host_config writes succeed (stdin still open); the reply
     // never comes, so a short explicit budget must fail typed.
