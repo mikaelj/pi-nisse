@@ -1,0 +1,33 @@
+{
+  "author": "mikaelj",
+  "category": "doc-accuracy",
+  "created_at": "2026-10-12T15:31:52.739Z",
+  "finding_id": "01M4RBQYXKKDKJGRJEW0C41F2B",
+  "id": "01M4RBVR93A1XTM6EFDK1G74C7",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "README.md",
+    "src/learning/consolidation.rs",
+    "tests/integration/compact_binary.rs"
+  ],
+  "review_id": "01M4RBJKPJDV8V9J27BTH4T91N",
+  "reviewer_id": "dynamic-domain-expert",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "ba7988a7ac03b698622d20d5cbad703f688909fe",
+    "base_tree": "d499b1c3f08375b2e238836e48a79ae8b5a4a533",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "maintainability",
+    "doc-accuracy"
+  ]
+}

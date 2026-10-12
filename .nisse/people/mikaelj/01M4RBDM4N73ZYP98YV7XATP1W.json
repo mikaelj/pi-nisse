@@ -1,0 +1,29 @@
+{
+  "author": "mikaelj",
+  "category": "verification-gap",
+  "created_at": "2026-10-12T15:24:09.749Z",
+  "finding_id": "01M4RBC21R29XFRZ4PSR5GKY2K",
+  "id": "01M4RBDM4N73ZYP98YV7XATP1W",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "plan"
+  ],
+  "review_id": "01M4RB70D13MMBFRJS5N8WVBNN",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "ba7988a7ac03b698622d20d5cbad703f688909fe",
+    "base_tree": "d499b1c3f08375b2e238836e48a79ae8b5a4a533",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "maintainability",
+    "verification-gap"
+  ]
+}

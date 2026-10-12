@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "documentation accuracy",
+  "created_at": "2026-10-12T15:25:06.590Z",
+  "finding_id": "01M4RBC21RXZ3CA2H9HBRZMX4A",
+  "id": "01M4RBFBMYS6RVX30R01AJFBF3",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/providers/needle.rs",
+    "README.md"
+  ],
+  "review_id": "01M4RB70D13MMBFRJS5N8WVBNN",
+  "reviewer_id": "dynamic-domain-expert",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "ba7988a7ac03b698622d20d5cbad703f688909fe",
+    "base_tree": "d499b1c3f08375b2e238836e48a79ae8b5a4a533",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "correctness",
+    "documentation accuracy"
+  ]
+}

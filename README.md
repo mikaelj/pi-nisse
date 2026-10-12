@@ -52,7 +52,7 @@ nisse mcp                         # serve Nisse to any MCP client (not just Pi)
 - **Never writes or fixes source** — it reviews; you (or the agent) implement the fixes
 - **No task mode** — no plan/build/workflow state; the review-loop policy lives in the Pi skill, not in Nisse
 - **Never guesses** — findings need evidence validated against the review snapshot; unanchored claims get clamped to "insufficiently supported" with visible diagnostics; reviewer disagreement is surfaced, never averaged away
-- **No network** — everything is local; the LLMs it calls are your configured model profiles in `~/.nisse/config.toml`
+- **No network** — everything is local; the LLMs it calls are your configured model profiles in `~/.nisse/config.toml`, and the optional Needle helper is itself a local service ([below](#needle-optional))
 - **Never bypasses consent** — directory creation is always your call
 
 ### The mental model
@@ -314,7 +314,25 @@ Trivial work (spelling, formatting, comment-only, obvious mechanical renames, �
 
 ## Needle (optional)
 
-Needle is an optional local helper used for routing classification and embedding-based reranking. Enable it with the `[classifier]` and/or `[embeddings]` config sections (`provider = "needle"` plus a trusted endpoint). Needle never performs substantive review, never mutates durable state, and never bypasses the deterministic jury constraints (quality always participates; jury size stays 2–4). Any Needle failure, timeout, or malformed output degrades to the deterministic rules-based behavior — reviews work identically without it.
+Needle is a small optional **local service you run yourself** — Nisse ships only a strict adapter for it (the protocol contract is documented in `src/providers/needle.rs`). It exists because two decisions inside every review are otherwise made by pure heuristics, and heuristics can be coarse on large or ambiguous changes. First, **jury routing**: the deterministic rules classifier picks specialist reviewers from languages, changed paths, and practice tags; a Needle classifier proposes specialist scores that Rust blends into that decision, sharpening selection when path and language signals point at adjacent-but-not-ideal specialists. Second, **context relevance**: each reviewer receives a bounded retrieved context, and Needle embeddings rerank that candidate set by semantic similarity so the most relevant evidence makes the budget instead of whatever the baseline ranking surfaced. (`records compact` grouping stays fully deterministic; the design reserves embedding similarity as a widening-only refinement there, but nothing uses it today.)
+
+The safety shape matches everything else in Nisse: Needle never performs substantive review, never mutates durable state, and never decides anything alone. Routing scores may only blend into the rules decision — `quality` always participates, the jury stays 2–4 seats, and reviewer ids returned by the service are validated against the static catalog. Responses are parsed against strict schemas (any violation rejects the whole response), every call is timeout-bounded, and the configured endpoint is trust-checked before every request. Any failure, timeout, or malformed output degrades to the deterministic rules-based behavior — reviews are structurally identical without it.
+
+Each half toggles independently, and both default to off (`provider = "none"`):
+
+```toml
+[classifier]                       # jury-routing score blending
+provider = "needle"
+endpoint = "http://127.0.0.1:8787"
+
+[embeddings]                       # context reranking
+provider = "needle"
+endpoint = "http://127.0.0.1:8787"
+```
+
+Endpoints must belong to a default-permitted class — loopback or private addresses — unless you explicitly opt in with `network.allow_non_private_endpoints = true` (see [docs/security.md](docs/security.md)). Obtaining and running a Needle service is outside this README's scope; the adapter's protocol expectations live in the `src/providers/needle.rs` module documentation.
+
+You never need it: reviews are complete without it. Consider it when specialist selection feels consistently off for your change mix, or when reviewers' initial context fills with less-relevant evidence on a large codebase.
 
 ## MCP
 

@@ -1,0 +1,29 @@
+{
+  "author": "mikaelj",
+  "category": "docs-unverified-claim",
+  "created_at": "2026-10-12T15:31:52.739Z",
+  "finding_id": "01M4RBQYXKF5AYZFRV61FZ6DJS",
+  "id": "01M4RBVR93KBZKXQ281N387Q15",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "README.md"
+  ],
+  "review_id": "01M4RBJKPJDV8V9J27BTH4T91N",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "ba7988a7ac03b698622d20d5cbad703f688909fe",
+    "base_tree": "d499b1c3f08375b2e238836e48a79ae8b5a4a533",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "maintainability",
+    "docs-unverified-claim"
+  ]
+}
