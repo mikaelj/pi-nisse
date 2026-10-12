@@ -45,6 +45,28 @@ impl GitOutput {
     }
 }
 
+/// A completed Git command with undecoded output bytes.
+///
+/// Commands whose output is legitimately arbitrary bytes (blob content)
+/// must not be forced through UTF-8 validation; [`GitRunner::run_raw`]
+/// returns the captured streams verbatim while keeping every other
+/// runner guarantee (explicit cwd, timeout, typed failures, deterministic
+/// environment, and — unlike [`GitRunner::run_unchecked`] — a nonzero
+/// exit remains a typed error).
+#[derive(Debug, Clone)]
+pub struct RawGitOutput {
+    /// Arguments passed after `git`.
+    pub args: Vec<String>,
+    /// Whether Git exited with status 0.
+    pub success: bool,
+    /// Raw exit code; `None` when the process was terminated by a signal.
+    pub code: Option<i32>,
+    /// Captured stdout bytes, undecoded.
+    pub stdout: Vec<u8>,
+    /// Captured stderr bytes, undecoded.
+    pub stderr: Vec<u8>,
+}
+
 /// Runs Git commands with a timeout, capturing stdout and stderr.
 #[derive(Debug, Clone)]
 pub struct GitRunner {
@@ -79,13 +101,48 @@ impl GitRunner {
     }
 
     /// Run Git and fail unless it exits with status 0.
+    ///
+    /// Spawn and timeout failures are typed errors. A nonzero exit is a
+    /// typed [`GitError::Execution`] whose stderr diagnostic is decoded
+    /// lossily — a failing command's diagnostics must not be masked by a
+    /// strict decode — while a successful command's stdout and stderr
+    /// are strictly UTF-8-validated.
     pub fn run(&self, cwd: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
-        let output = self.run_unchecked(cwd, args)?;
+        let output = self.run_raw(cwd, args)?;
+        let stdout = decode_output(&output.stdout)
+            .ok_or_else(|| GitError::InvalidUtf8 {
+                command: render_command(&self.program, args),
+            })?
+            .to_owned();
+        let stderr = decode_output(&output.stderr)
+            .ok_or_else(|| GitError::InvalidUtf8 {
+                command: render_command(&self.program, args),
+            })?
+            .to_owned();
+        Ok(GitOutput {
+            args: output.args,
+            success: output.success,
+            code: output.code,
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Run Git and fail unless it exits with status 0, returning the
+    /// captured output bytes undecoded.
+    ///
+    /// Identical failure semantics to [`GitRunner::run`]: spawn, timeout,
+    /// and nonzero-exit failures are typed errors. Only the UTF-8
+    /// validation of stdout/stderr is skipped — for commands whose
+    /// output is legitimately arbitrary bytes. stderr embedded in a
+    /// nonzero-exit error is decoded lossily for the diagnostic.
+    pub fn run_raw(&self, cwd: &Path, args: &[&str]) -> Result<RawGitOutput, GitError> {
+        let output = self.spawn_and_capture(cwd, args)?;
         if !output.success {
             return Err(GitError::Execution {
                 command: render_command(&self.program, args),
                 exit: output.code,
-                stderr: output.stderr,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
         Ok(output)
@@ -96,6 +153,29 @@ impl GitRunner {
     /// Spawn, timeout, and UTF-8 failures are still typed errors; only the
     /// process exit status is left for the caller to interpret.
     pub fn run_unchecked(&self, cwd: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
+        let output = self.spawn_and_capture(cwd, args)?;
+        let stdout = decode_output(&output.stdout)
+            .ok_or_else(|| GitError::InvalidUtf8 {
+                command: render_command(&self.program, args),
+            })?
+            .to_owned();
+        let stderr = decode_output(&output.stderr)
+            .ok_or_else(|| GitError::InvalidUtf8 {
+                command: render_command(&self.program, args),
+            })?
+            .to_owned();
+        Ok(GitOutput {
+            args: output.args,
+            success: output.success,
+            code: output.code,
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Spawn Git, capture both streams, and wait with the runner's
+    /// timeout; the exit status is returned uninterpreted.
+    fn spawn_and_capture(&self, cwd: &Path, args: &[&str]) -> Result<RawGitOutput, GitError> {
         if !cwd.is_dir() {
             return Err(GitError::MissingCwd {
                 path: cwd.to_owned(),
@@ -151,23 +231,12 @@ impl GitRunner {
         let stdout_bytes = stdout_handle.join().unwrap_or_default();
         let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
-        let stdout = decode_output(&stdout_bytes)
-            .ok_or_else(|| GitError::InvalidUtf8 {
-                command: render_command(&self.program, args),
-            })?
-            .to_owned();
-        let stderr = decode_output(&stderr_bytes)
-            .ok_or_else(|| GitError::InvalidUtf8 {
-                command: render_command(&self.program, args),
-            })?
-            .to_owned();
-
-        Ok(GitOutput {
+        Ok(RawGitOutput {
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
             success: status.success(),
             code: status.code(),
-            stdout,
-            stderr,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
         })
     }
 
@@ -310,6 +379,60 @@ mod tests {
             .run(dir.path(), &["-c", "printf '\\377\\376'"])
             .unwrap_err();
         assert!(matches!(err, GitError::InvalidUtf8 { .. }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn non_zero_exit_with_invalid_utf8_stderr_is_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = GitRunner::new().with_program("/bin/sh");
+        // A failing command whose diagnostics are not valid UTF-8 must
+        // still report the failure (Execution), never a decode error.
+        let err = runner
+            .run(dir.path(), &["-c", "printf '\\377' >&2; exit 3"])
+            .unwrap_err();
+        assert!(matches!(err, GitError::Execution { .. }));
+    }
+
+    #[test]
+    fn run_raw_returns_invalid_utf8_bytes_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = GitRunner::new();
+        runner.run(dir.path(), &["init", "--quiet"]).unwrap();
+        // A commit-graph-shaped header: binary, never valid UTF-8.
+        let bytes: &[u8] = b"CGPH\x01\x01\x04\x00OIDF\x00\x00\xff\xfe";
+        std::fs::write(dir.path().join("blob"), bytes).unwrap();
+        let oid = runner
+            .run(dir.path(), &["hash-object", "-w", "blob"])
+            .unwrap()
+            .stdout_trimmed()
+            .to_owned();
+
+        let raw = runner
+            .run_raw(dir.path(), &["cat-file", "blob", &oid])
+            .unwrap();
+        assert_eq!(raw.stdout, bytes);
+
+        // The strict path still rejects the same bytes: rawness is
+        // opt-in per command, never a global relaxation.
+        assert!(matches!(
+            runner.run(dir.path(), &["cat-file", "blob", &oid]),
+            Err(GitError::InvalidUtf8 { .. })
+        ));
+    }
+
+    #[test]
+    fn run_raw_still_fails_nonzero_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = GitRunner::new();
+        runner.run(dir.path(), &["init", "--quiet"]).unwrap();
+        // A well-formed OID that names no object: nonzero exit must stay
+        // a typed error, not "empty blob bytes".
+        let missing = "0000000000000000000000000000000000000000";
+        assert!(matches!(
+            runner.run_raw(dir.path(), &["cat-file", "blob", missing]),
+            Err(GitError::Execution { .. })
+        ));
     }
 
     // Note: stripping of ambient `GIT_*` environment variables is verified

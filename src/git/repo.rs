@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use super::error::GitError;
-use super::runner::{GitOutput, GitRunner};
+use super::runner::{GitOutput, GitRunner, RawGitOutput};
 
 /// Object-hash format of a repository, decided by `git rev-parse
 /// --show-object-format`.
@@ -424,20 +424,44 @@ impl RepoContext {
     }
 
     /// Read the full content of a blob object.
+    ///
+    /// Blob content is arbitrary bytes (binaries, non-UTF-8 text); it is
+    /// returned verbatim and never UTF-8-validated — a strict decode here
+    /// made one binary fixture file in a target tree fail whole reviews
+    /// (see [`GitRunner::run_raw`]).
     pub fn read_blob(&self, oid: &str) -> Result<Vec<u8>, GitError> {
         Self::validate_oid(oid)?;
-        let output = self.run(&["cat-file", "blob", oid])?;
-        Ok(output.stdout.into_bytes())
+        let output = self.run_raw(&["cat-file", "blob", oid])?;
+        Ok(output.stdout)
+    }
+
+    /// Size in bytes of one blob object.
+    ///
+    /// Used to bound prefix reads on object sides: `git cat-file` cannot
+    /// stream a partial blob, so a caller asking for a bounded prefix of
+    /// a huge blob would otherwise materialize the whole object.
+    pub fn blob_size(&self, oid: &str) -> Result<u64, GitError> {
+        Self::validate_oid(oid)?;
+        let output = self.run(&["cat-file", "-s", oid])?;
+        output
+            .stdout_trimmed()
+            .parse::<u64>()
+            .map_err(|_| GitError::UnexpectedOutput {
+                command: "cat-file -s".to_owned(),
+                message: format!("size is not an integer: {:?}", output.stdout_trimmed()),
+            })
     }
 
     /// Subject line (first line of the message) of one commit.
     ///
     /// Commits without any message yield an empty string; callers decide
     /// whether an empty subject is usable. The revision must already be a
-    /// resolved object ID.
+    /// resolved object ID. Subjects are display-only provenance, so a
+    /// non-UTF-8 subject (legal in Git) decodes lossily instead of
+    /// failing the review.
     pub fn commit_subject(&self, commit: &str) -> Result<String, GitError> {
         Self::validate_oid(commit)?;
-        let output = self.run(&[
+        let output = self.run_raw(&[
             "--no-pager",
             "show",
             "-s",
@@ -445,14 +469,18 @@ impl RepoContext {
             "--end-of-options",
             commit,
         ])?;
-        Ok(output.stdout.trim_end_matches('\n').to_owned())
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches('\n')
+            .to_owned())
     }
 
     /// Subject lines of the commits in `base..head`, newest first,
     /// bounded to `limit`.
     ///
     /// Both revisions must already be resolved object IDs. An empty range
-    /// yields no subjects.
+    /// yields no subjects. Subjects are display-only provenance, so a
+    /// non-UTF-8 subject (legal in Git) decodes lossily instead of
+    /// failing the review.
     pub fn commit_subjects_between(
         &self,
         base: &str,
@@ -465,7 +493,7 @@ impl RepoContext {
             return Ok(Vec::new());
         }
         let range = format!("{base}..{head}");
-        let output = self.run(&[
+        let output = self.run_raw(&[
             "--no-pager",
             "log",
             "--format=%s",
@@ -474,8 +502,7 @@ impl RepoContext {
             "--end-of-options",
             &range,
         ])?;
-        Ok(output
-            .stdout
+        Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(|line| line.trim_end_matches('\r'))
             .filter(|line| !line.is_empty())
@@ -526,6 +553,12 @@ impl RepoContext {
                 oid: oid.to_owned(),
             })
         }
+    }
+
+    /// Run a Git command from the worktree root, requiring success and
+    /// returning undecoded output bytes (see [`GitRunner::run_raw`]).
+    fn run_raw(&self, args: &[&str]) -> Result<RawGitOutput, GitError> {
+        self.runner.run_raw(&self.worktree_root, args)
     }
 
     /// Run a Git command from the worktree root, requiring success.
@@ -952,6 +985,33 @@ mod tests {
     }
 
     #[test]
+    fn read_blob_returns_binary_bytes_verbatim() {
+        let fixture = Fixture::repo("read-blob-binary");
+        // A commit-graph-shaped header: binary, never valid UTF-8.
+        let bytes: &[u8] = b"CGPH\x01\x01\x04\x00OIDF\x00\x00\xff\xfe";
+        std::fs::write(fixture.root.join("commit-graph"), bytes).unwrap();
+        commit_all(&fixture.root, "one");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        let oid = stdout_trimmed(git_in(&fixture.root, &["rev-parse", "HEAD:commit-graph"]));
+        assert_eq!(ctx.read_blob(&oid).unwrap(), bytes);
+    }
+
+    #[test]
+    fn read_blob_nonzero_exit_is_typed() {
+        let fixture = Fixture::repo("read-blob-missing");
+        write_file(&fixture.root, "a.txt", "a\n");
+        commit_all(&fixture.root, "one");
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        let missing = "0000000000000000000000000000000000000000";
+        assert!(matches!(
+            ctx.read_blob(missing),
+            Err(GitError::Execution { .. })
+        ));
+    }
+
+    #[test]
     fn commit_subject_returns_the_subject_line() {
         let fixture = Fixture::repo("commit-subject");
         write_file(&fixture.root, "a.txt", "a\n");
@@ -970,6 +1030,43 @@ mod tests {
             ctx.commit_subject("--exec=evil"),
             Err(GitError::InvalidOid { .. })
         ));
+    }
+
+    #[test]
+    fn commit_subject_decodes_non_utf8_lossily() {
+        let fixture = Fixture::repo("commit-subject-binary");
+        write_file(&fixture.root, "a.txt", "a\n");
+        commit_all(&fixture.root, "one");
+        // `git commit` sanitizes non-UTF-8 messages nowadays, so craft the
+        // commit object directly with raw latin-1 bytes in the subject —
+        // the shape legacy repositories carry (legal in Git objects, and
+        // emitted verbatim by `%s`).
+        let tree = stdout_trimmed(git_in(&fixture.root, &["rev-parse", "HEAD^{tree}"]));
+        let mut raw = format!(
+            "tree {tree}\nauthor A <a@a> 1700000000 +0000\n\
+             committer A <a@a> 1700000000 +0000\n\n"
+        )
+        .into_bytes();
+        raw.extend_from_slice(b"r\xe4ksm\xf6rg\xe5s\n");
+        std::fs::write(fixture.root.join("commit-obj.txt"), &raw).unwrap();
+        let commit = stdout_trimmed(git_in(
+            &fixture.root,
+            &["hash-object", "-t", "commit", "-w", "commit-obj.txt"],
+        ));
+        git_in(
+            &fixture.root,
+            &[
+                "update-ref",
+                &format!("refs/heads/{}", fixture.branch_name),
+                &commit,
+            ],
+        );
+
+        let ctx = RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap();
+        assert_eq!(
+            ctx.commit_subject(&commit).unwrap(),
+            "r\u{FFFD}ksm\u{FFFD}rg\u{FFFD}s"
+        );
     }
 
     #[test]

@@ -1041,6 +1041,98 @@ mod tests {
     }
 
     #[test]
+    fn commit_refresh_skips_extensionless_binary_blob() {
+        // The Forgejo failure shape: a vendored binary fixture
+        // (commit-graph header) at an extensionless path in the target
+        // tree. Before the raw-blob fix this failed the whole refresh
+        // with GitError::InvalidUtf8 regardless of the diff.
+        let fixture = Fixture::repo("idx-refresh-binary-commit");
+        write_file(
+            &fixture.root,
+            "src/a.rs",
+            "pub fn a() {}
+",
+        );
+        let bytes: &[u8] = b"CGPH\x01\x01\x04\x00OIDF\x00\x00\xff\xfe";
+        std::fs::write(fixture.root.join("commit-graph"), bytes).unwrap();
+        commit_all(&fixture.root, "one");
+
+        let ctx = discover(&fixture);
+        let stats = refresh(
+            &ctx,
+            &SnapshotSpec::Commit {
+                revision: "HEAD".to_string(),
+            },
+        );
+        assert_eq!(stats.files_seen, 1, "only the text file is indexable");
+        let manifest = manifest_of(&ctx);
+        assert!(manifest.contains_key("src/a.rs"));
+        assert!(
+            !manifest.contains_key("commit-graph"),
+            "binary content never enters the manifest"
+        );
+    }
+
+    #[test]
+    fn staged_refresh_skips_extensionless_binary_blob() {
+        // The Index target shares the read_index → read_blob path; the
+        // same binary fixture must not fail a staged-scope refresh.
+        let fixture = Fixture::repo("idx-refresh-binary-staged");
+        write_file(
+            &fixture.root,
+            "src/a.rs",
+            "pub fn a() {}
+",
+        );
+        commit_all(&fixture.root, "base");
+        let bytes: &[u8] = b"CGPH\x01\x01\x04\x00OIDF\x00\x00\xff\xfe";
+        std::fs::write(fixture.root.join("commit-graph"), bytes).unwrap();
+        git_in(&fixture.root, &["add", "commit-graph"]);
+
+        let ctx = discover(&fixture);
+        let stats = refresh(&ctx, &SnapshotSpec::Staged);
+        assert_eq!(stats.files_seen, 1, "only the text file is indexable");
+        let manifest = manifest_of(&ctx);
+        assert!(manifest.contains_key("src/a.rs"));
+        assert!(
+            !manifest.contains_key("commit-graph"),
+            "binary content never enters the manifest"
+        );
+    }
+
+    #[test]
+    fn object_refresh_skips_non_utf8_file_with_source_extension() {
+        // An invalid-UTF-8 file that carries a source-language extension
+        // passes language detection and reaches the content decode on the
+        // object sides; it must be skipped, never fail the refresh.
+        let fixture = Fixture::repo("idx-refresh-binary-extension");
+        write_file(&fixture.root, "src/a.rs", "pub fn a() {}\n");
+        let bytes: &[u8] = b"\xff\xfeCGPH\x01\x01\x04\x00";
+        std::fs::write(fixture.root.join("src/bin.rs"), bytes).unwrap();
+        commit_all(&fixture.root, "one");
+
+        let ctx = discover(&fixture);
+        for spec in [
+            SnapshotSpec::Commit {
+                revision: "HEAD".to_string(),
+            },
+            SnapshotSpec::Staged,
+        ] {
+            let stats = refresh(&ctx, &spec);
+            assert_eq!(
+                stats.files_seen, 2,
+                "both files pass language detection by extension"
+            );
+            let manifest = manifest_of(&ctx);
+            assert!(manifest.contains_key("src/a.rs"));
+            assert!(
+                !manifest.contains_key("src/bin.rs"),
+                "non-UTF-8 content is never indexed"
+            );
+        }
+    }
+
+    #[test]
     fn staged_refresh_uses_index_content_not_working_content() {
         let fixture = language_fixture();
         commit_all(&fixture.root, "one");

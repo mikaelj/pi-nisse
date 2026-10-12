@@ -57,6 +57,13 @@ pub struct SnapshotReader<'a> {
     index: BTreeMap<String, IndexEntry>,
 }
 
+/// Upper bound on blob bytes materialized to answer a bounded prefix
+/// request on Git object sides. `git cat-file` cannot stream a partial
+/// blob, so without this bound a prefix read of a huge extensionless
+/// binary would load the entire object into memory; such blobs read as
+/// absent for prefix purposes (they are never indexable anyway).
+const OBJECT_PREFIX_READ_CAP: u64 = 1 << 20;
+
 impl<'a> SnapshotReader<'a> {
     /// Build a reader for the target side of `resolved`.
     ///
@@ -177,12 +184,32 @@ impl<'a> SnapshotReader<'a> {
         validate_relative_path(path)?;
         match self.target {
             SnapshotTarget::Working => self.read_working_prefix(path, limit),
-            SnapshotTarget::Index => Ok(self
-                .read_index(path)?
-                .map(|file| file.bytes[..file.bytes.len().min(limit)].to_vec())),
-            SnapshotTarget::Commit { .. } => Ok(self
-                .read_tree(path)?
-                .map(|file| file.bytes[..file.bytes.len().min(limit)].to_vec())),
+            SnapshotTarget::Index => {
+                let Some(entry) = self.index.get(path) else {
+                    return Ok(None);
+                };
+                if self.ctx.blob_size(&entry.oid)? > OBJECT_PREFIX_READ_CAP {
+                    return Ok(None);
+                }
+                Ok(self
+                    .read_index(path)?
+                    .map(|file| file.bytes[..file.bytes.len().min(limit)].to_vec()))
+            }
+            SnapshotTarget::Commit { .. } => {
+                let Some(entry) = self.tree.get(path) else {
+                    return Ok(None);
+                };
+                // Gitlinks (submodules) have no readable blob here.
+                if entry.kind != ObjectKind::Blob {
+                    return Ok(None);
+                }
+                if self.ctx.blob_size(&entry.oid)? > OBJECT_PREFIX_READ_CAP {
+                    return Ok(None);
+                }
+                Ok(self
+                    .read_tree(path)?
+                    .map(|file| file.bytes[..file.bytes.len().min(limit)].to_vec()))
+            }
         }
     }
 
@@ -371,6 +398,63 @@ mod tests {
 
     fn ctx_of(fixture: &Fixture) -> RepoContext {
         RepoContext::discover(&GitRunner::new(), &fixture.root).unwrap()
+    }
+
+    #[test]
+    fn read_prefix_skips_oversized_object_blobs() {
+        let fixture = Fixture::repo("reader-prefix-cap");
+        write_file(&fixture.root, "small", "#!/bin/sh\n:\n");
+        let big: Vec<u8> = vec![b'x'; OBJECT_PREFIX_READ_CAP as usize + 1];
+        std::fs::write(fixture.root.join("huge"), big).unwrap();
+        commit_all(&fixture.root, "one");
+
+        let ctx = ctx_of(&fixture);
+        let resolved = resolve_snapshot(
+            &ctx,
+            &SnapshotSpec::Commit {
+                revision: "HEAD".to_string(),
+            },
+        )
+        .unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        // A blob above the cap reads as absent for prefix purposes —
+        // never an error, never a full materialization.
+        assert_eq!(reader.read_prefix("huge", 64).unwrap(), None);
+        // Small blobs keep working.
+        assert!(
+            reader
+                .read_prefix("small", 64)
+                .unwrap()
+                .unwrap()
+                .starts_with(b"#!")
+        );
+    }
+
+    #[test]
+    fn read_prefix_of_commit_binary_blob_is_bounded_and_verbatim() {
+        let fixture = Fixture::repo("reader-binary-prefix");
+        // An extensionless binary blob (commit-graph header shape) in the
+        // target tree: full reads and bounded prefix reads must both
+        // return the bytes verbatim, never a UTF-8 error.
+        let bytes: &[u8] = b"CGPH\x01\x01\x04\x00OIDF\x00\x00\x00\xff\xfe";
+        std::fs::write(fixture.root.join("commit-graph"), bytes).unwrap();
+        write_file(&fixture.root, "a.txt", "a\n");
+        commit_all(&fixture.root, "one");
+
+        let ctx = ctx_of(&fixture);
+        let resolved = resolve_snapshot(
+            &ctx,
+            &SnapshotSpec::Commit {
+                revision: "HEAD".to_string(),
+            },
+        )
+        .unwrap();
+        let reader = SnapshotReader::new(&ctx, &resolved).unwrap();
+        assert_eq!(
+            reader.read_prefix("commit-graph", 8).unwrap().unwrap(),
+            &bytes[..8]
+        );
+        assert_eq!(reader.read("commit-graph").unwrap().unwrap().bytes, bytes);
     }
 
     #[test]
