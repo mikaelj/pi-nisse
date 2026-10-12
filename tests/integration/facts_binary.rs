@@ -50,6 +50,8 @@ fn rust_repo(label: &str) -> (TempDir, PathBuf, TempDir) {
     )
     .expect("write source");
     git(&repo, &["init", "--quiet"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    git(&repo, &["config", "user.name", "T"]);
     let home = TempDir::new().expect("home");
     (dir, repo, home)
 }
@@ -419,6 +421,8 @@ fn ungrounded_candidate_is_rejected_for_bad_evidence() {
     std::fs::create_dir_all(&repo).expect("create repo");
     std::fs::write(repo.join("notes.txt"), "meeting notes\n").expect("write notes");
     git(&repo, &["init", "--quiet"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    git(&repo, &["config", "user.name", "T"]);
     let home = TempDir::new().expect("home");
     configure_alice(&home);
 
