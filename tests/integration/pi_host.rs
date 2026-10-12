@@ -895,6 +895,7 @@ fn capabilities_env_override_restricts_reported_levels() {
 }
 
 #[test]
+#[cfg(unix)] // the silent fixture is a POSIX shell script
 fn a_host_that_never_reports_capabilities_fails_typed_on_timeout() {
     // The capabilities fixture announces host_ready and then goes
     // silent without answering host_config.
