@@ -4,5 +4,5 @@
 # core has read the announcement its next stdin write hits a closed
 # pipe deterministically while the child still lives.
 exec 0<&-
-printf '%s\n' '{"protocol_version":1,"id":"fault-ready","type":"host_ready","runtime":"fake"}'
+printf '%s\n' '{"protocol_version":2,"id":"fault-ready","type":"host_ready","runtime":"fake"}'
 exec sleep 15

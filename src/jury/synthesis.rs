@@ -102,8 +102,34 @@ pub fn consolidate(
     kind: ReviewKind,
     findings: &[ValidatedFinding],
     options: &ConsolidationOptions,
+    thinking: &super::thinking::ThinkingPolicy,
 ) -> Result<SynthesisResult, HostError> {
     let mut diagnostics: Vec<SynthesisDiagnostic> = Vec::new();
+
+    // The semantic jobs (equivalence checks and the synthesis session)
+    // share one profile; resolve their thinking level once through the
+    // policy. An unusable profile degrades exactly like a failed
+    // session: checks stay ungrouped and the deterministic wording is
+    // used — never a guessed session.
+    let semantic_level: Option<ThinkingLevel> =
+        match thinking.resolve(&options.model_profile, None, options.thinking_level) {
+            Ok((level, note)) => {
+                if let Some(note) = note {
+                    diagnostics.push(SynthesisDiagnostic::new(SynthesisStage::Synthesis, note));
+                }
+                Some(level)
+            }
+            Err(reason) => {
+                diagnostics.push(SynthesisDiagnostic::new(
+                    SynthesisStage::Synthesis,
+                    format!(
+                        "semantic jobs skipped for model profile `{}`: {reason}",
+                        options.model_profile
+                    ),
+                ));
+                None
+            }
+        };
 
     // 1. Deterministic obvious-duplicate grouping.
     let mut groups = group_findings(findings);
@@ -122,15 +148,27 @@ pub fn consolidate(
         pairs.truncate(options.max_equivalence_checks);
     }
     if !pairs.is_empty() {
-        let outcomes = run_equivalence_checks(host, &groups, &pairs, options)?;
-        groups = apply_equivalence(groups, &pairs, &outcomes, &mut diagnostics);
+        match semantic_level {
+            Some(level) => {
+                let outcomes = run_equivalence_checks(host, &groups, &pairs, options, level)?;
+                groups = apply_equivalence(groups, &pairs, &outcomes, &mut diagnostics);
+            }
+            None => diagnostics.push(SynthesisDiagnostic::new(
+                SynthesisStage::Equivalence,
+                "equivalence checks skipped: no valid thinking level for the semantic-job profile",
+            )),
+        }
     }
 
     // 3. Synthesis session over the surviving groups.
     let mut synthesized = BTreeMap::new();
     let mut session_summary = None;
     if !groups.is_empty() {
-        match run_synthesis_session(host, kind, &groups, options)? {
+        let session = match semantic_level {
+            Some(level) => run_synthesis_session(host, kind, &groups, options, level)?,
+            None => None,
+        };
+        match session {
             Some(report) => {
                 let (map, summary) = validate_synthesis_report(&report, &groups, &mut diagnostics);
                 synthesized = map;
@@ -162,6 +200,7 @@ fn run_equivalence_checks(
     groups: &[FindingGroup],
     pairs: &[(usize, usize)],
     options: &ConsolidationOptions,
+    thinking_level: ThinkingLevel,
 ) -> Result<Vec<FindingEquivalenceOutcome>, HostError> {
     let mut check_ids = Vec::with_capacity(pairs.len());
     for &(a, b) in pairs {
@@ -169,7 +208,7 @@ fn run_equivalence_checks(
             check_id: new_ulid(),
             timeout_ms: options.equivalence_timeout_ms,
             model_profile: options.model_profile.clone(),
-            thinking_level: options.thinking_level,
+            thinking_level,
             finding_a: equivalence_finding(&groups[a]),
             finding_b: equivalence_finding(&groups[b]),
         };
@@ -199,11 +238,12 @@ fn run_synthesis_session(
     kind: ReviewKind,
     groups: &[FindingGroup],
     options: &ConsolidationOptions,
+    thinking_level: ThinkingLevel,
 ) -> Result<Option<ReviewerReport>, HostError> {
     let payload = StartReviewPayload {
         review_id: format!("synthesis-{}", new_ulid()),
         kind,
-        reviewers: vec![synthesizer_spec(groups, options)],
+        reviewers: vec![synthesizer_spec(groups, options, thinking_level)],
     };
     let mut no_tools = |_request: &ToolRequestPayload| -> ToolResponsePayload {
         ToolResponsePayload::failure(
@@ -224,6 +264,7 @@ fn run_synthesis_session(
 fn synthesizer_spec(
     groups: &[FindingGroup],
     options: &ConsolidationOptions,
+    thinking_level: ThinkingLevel,
 ) -> ReviewerExecutionSpec {
     ReviewerExecutionSpec {
         reviewer_id: SYNTHESIZER_ID.to_string(),
@@ -236,7 +277,7 @@ fn synthesizer_spec(
             "Never introduce issues, ids, or evidence that are not in the input.".to_string(),
         ],
         model_profile: options.model_profile.clone(),
-        thinking_level: options.thinking_level,
+        thinking_level,
         initial_context: groups.iter().map(render_group_entry).collect(),
         allowed_capabilities: Vec::new(),
         max_lookup_calls: 0,
@@ -901,7 +942,7 @@ mod tests {
         let members = vec![validated("quality", "q-1", Severity::Low, "claim")];
         let groups = vec![group_of(members)];
         let options = ConsolidationOptions::default();
-        let spec = synthesizer_spec(&groups, &options);
+        let spec = synthesizer_spec(&groups, &options, ThinkingLevel::Medium);
         assert_eq!(spec.reviewer_id, SYNTHESIZER_ID);
         assert!(spec.allowed_capabilities.is_empty());
         assert_eq!(spec.max_lookup_calls, 0);

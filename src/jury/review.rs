@@ -155,6 +155,15 @@ pub const HOST_READY_TIMEOUT: Duration = Duration::from_secs(20);
 /// timeout).
 pub const REVIEW_ROUND_TIMEOUT: Duration = Duration::from_secs(310);
 
+/// The one-round driver budget for a configured reviewer-session
+/// budget: the session timeout plus the frozen slack.
+pub(crate) fn review_round_timeout(reviewer_timeout_ms: u64) -> Duration {
+    Duration::from_millis(reviewer_timeout_ms.saturating_add(REVIEW_ROUND_SLACK_MS))
+}
+
+/// Slack the round driver adds on top of the reviewer-session budget.
+const REVIEW_ROUND_SLACK_MS: u64 = 10_000;
+
 /// Byte bound of the normalized domain label.
 pub const DOMAIN_LABEL_MAX_BYTES: usize = 64;
 
@@ -200,6 +209,11 @@ pub enum PlanReviewError {
     /// The Pi review host boundary failed.
     #[error(transparent)]
     Host(#[from] HostError),
+
+    /// A session's (model profile, thinking level) pair could not be
+    /// made valid (unresolved profile or model).
+    #[error("thinking policy: {0}")]
+    ThinkingPolicy(String),
 
     /// Fewer than two valid independent reviewer reports exist (plan
     /// section 36). The review fails explicitly instead of guessing.
@@ -259,6 +273,10 @@ pub struct PlanReviewOptions {
     /// Bound on concurrently running reviewer sessions in the Pi host
     /// (plan milestone 29: reviewer concurrency obeys config).
     pub max_concurrent_reviewers: u32,
+    /// Whole-session budget of one reviewer session (all turns; the
+    /// frozen single retry uses the same budget). Defaults to
+    /// [`crate::config::DEFAULT_REVIEWER_TIMEOUT_MS`].
+    pub reviewer_timeout_ms: u64,
 }
 
 impl PlanReviewOptions {
@@ -275,6 +293,7 @@ impl PlanReviewOptions {
             contributor_id: None,
             fact_processing: crate::learning::facts::FactProcessingOptions::default(),
             max_concurrent_reviewers: crate::config::DEFAULT_MAX_CONCURRENT_REVIEWERS as u32,
+            reviewer_timeout_ms: crate::config::DEFAULT_REVIEWER_TIMEOUT_MS,
         }
     }
 }
@@ -380,15 +399,44 @@ pub fn run_plan_review(
         .with_max_concurrent_reviewers(options.max_concurrent_reviewers);
     host.send_host_config(&host_config)?;
 
+    // 11b. Thinking policy (protocol version 2): the host reports each
+    // profile's supported thinking levels; every session level below
+    // is routed through it, so an invalid (model, level) pair can
+    // never be constructed.
+    let capabilities = host.wait_model_capabilities(HOST_READY_TIMEOUT)?;
+    let thinking = super::thinking::ThinkingPolicy::build(&capabilities, &options.model_profiles);
+    diagnostics.extend(thinking.warnings().iter().cloned());
+
     // 12. Constrained dynamic-domain description for the fallback seat.
+    // The session level is routed through the thinking policy; an
+    // unusable profile skips the session and falls back to the static
+    // template.
     let mut domain_description: Option<DynamicDomainDescription> = None;
-    if jury.uses_dynamic_fallback() {
+    let dynamic_level = if jury.uses_dynamic_fallback() {
+        let expert = catalog.dynamic_domain_expert();
+        match super::thinking::ThinkingPolicy::resolve_job_level(
+            Some(&thinking),
+            &expert.default_model_profile,
+            expert.default_thinking_level,
+        ) {
+            Ok(level) => Some(level),
+            Err(reason) => {
+                diagnostics.push(format!(
+                    "dynamic domain description fell back to the static template: {reason}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(thinking_level) = dynamic_level {
         let expert = catalog.dynamic_domain_expert();
         let payload = DomainDescriptionPayload {
             description_id: new_ulid(),
             timeout_ms: DOMAIN_DESCRIPTION_TIMEOUT_MS,
             model_profile: expert.default_model_profile.clone(),
-            thinking_level: expert.default_thinking_level,
+            thinking_level,
             descriptors: descriptors.clone(),
             changed_paths: Vec::new(),
             languages: routing_input.languages.clone(),
@@ -418,33 +466,46 @@ pub fn run_plan_review(
         .map(str::to_string)
         .collect();
     let plan_entry = plan_input_entry(plan);
-    let specs: Vec<ReviewerExecutionSpec> = jury
-        .seats
-        .iter()
-        .map(|seat| {
-            let profile = catalog
-                .profile(&seat.reviewer_id)
-                .expect("jury construction validated every seat against the catalog");
-            let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
-                domain_description.as_ref()
-            } else {
-                None
-            };
-            let seat = seat_plan(
-                profile,
-                plan_review_instructions(&profile.base_instructions),
-                description,
-            );
-            let context = initial_context(
-                std::slice::from_ref(&plan_entry),
-                &shared_context,
-                &catalog,
-                &seat.practice_tags,
-                &INITIAL_CONTEXT_BUDGET,
-            );
-            execution_spec(profile, seat, context)
-        })
-        .collect();
+    let mut specs: Vec<ReviewerExecutionSpec> = Vec::with_capacity(jury.seats.len());
+    for seat in &jury.seats {
+        let profile = catalog
+            .profile(&seat.reviewer_id)
+            .expect("jury construction validated every seat against the catalog");
+        let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
+            domain_description.as_ref()
+        } else {
+            None
+        };
+        let seat = seat_plan(
+            profile,
+            plan_review_instructions(&profile.base_instructions),
+            description,
+        );
+        let context = initial_context(
+            std::slice::from_ref(&plan_entry),
+            &shared_context,
+            &catalog,
+            &seat.practice_tags,
+            &INITIAL_CONTEXT_BUDGET,
+        );
+        let (level, note) = thinking
+            .resolve(
+                &profile.default_model_profile,
+                None,
+                profile.default_thinking_level,
+            )
+            .map_err(PlanReviewError::ThinkingPolicy)?;
+        if let Some(note) = note {
+            diagnostics.push(note);
+        }
+        specs.push(execution_spec(
+            profile,
+            seat,
+            context,
+            level,
+            options.reviewer_timeout_ms,
+        ));
+    }
 
     // 13. Execute reviewers independently (frozen one-retry policy).
     let review_id = new_ulid();
@@ -460,8 +521,12 @@ pub fn run_plan_review(
         // `complete_review` stamps the authoritative request id.
         tool_server.handle("", request)
     };
-    let outcomes =
-        super::execution::execute_review(&mut host, &payload, &mut serve, REVIEW_ROUND_TIMEOUT)?;
+    let outcomes = super::execution::execute_review(
+        &mut host,
+        &payload,
+        &mut serve,
+        review_round_timeout(options.reviewer_timeout_ms),
+    )?;
 
     // 14. At least two valid independent reports (plan section 36).
     let mut reports = Vec::new();
@@ -510,6 +575,7 @@ pub fn run_plan_review(
         ReviewKind::Plan,
         &validated,
         &options.consolidation,
+        &thinking,
     )?;
     diagnostics.extend(synthesis.diagnostics.iter().map(|d| d.message.clone()));
 
@@ -561,6 +627,7 @@ pub fn run_plan_review(
         &records,
         options.contributor_id.as_deref(),
         &options.fact_processing,
+        &thinking,
     );
     diagnostics.extend(fact_summary.diagnostics);
 
@@ -798,6 +865,8 @@ pub(crate) fn execution_spec(
     profile: &ReviewerProfile,
     seat: SeatPlan,
     initial_context: ContextBundle,
+    thinking_level: crate::domain::model::ThinkingLevel,
+    timeout_ms: u64,
 ) -> ReviewerExecutionSpec {
     ReviewerExecutionSpec {
         reviewer_id: profile.id.clone(),
@@ -805,12 +874,12 @@ pub(crate) fn execution_spec(
         instructions: seat.instructions,
         checklist: seat.checklist,
         model_profile: profile.default_model_profile.clone(),
-        thinking_level: profile.default_thinking_level,
+        thinking_level,
         initial_context: initial_context.entries,
         allowed_capabilities: profile.allowed_capabilities.clone(),
         max_lookup_calls: REVIEWER_MAX_LOOKUP_CALLS,
         max_returned_context_bytes: REVIEWER_MAX_CONTEXT_BYTES,
-        timeout_ms: REVIEWER_TIMEOUT_MS,
+        timeout_ms,
     }
 }
 
@@ -938,6 +1007,11 @@ pub enum CodeReviewError {
     #[error(transparent)]
     Host(#[from] HostError),
 
+    /// A session's (model profile, thinking level) pair could not be
+    /// made valid (unresolved profile or model).
+    #[error("thinking policy: {0}")]
+    ThinkingPolicy(String),
+
     /// Fewer than two valid independent reviewer reports exist (plan
     /// section 36). The review fails explicitly instead of guessing.
     #[error(
@@ -986,6 +1060,10 @@ pub struct CodeReviewOptions {
     /// Bound on concurrently running reviewer sessions in the Pi host
     /// (plan milestone 29: reviewer concurrency obeys config).
     pub max_concurrent_reviewers: u32,
+    /// Whole-session budget of one reviewer session (all turns; the
+    /// frozen single retry uses the same budget). Defaults to
+    /// [`crate::config::DEFAULT_REVIEWER_TIMEOUT_MS`].
+    pub reviewer_timeout_ms: u64,
 }
 
 impl CodeReviewOptions {
@@ -1002,6 +1080,7 @@ impl CodeReviewOptions {
             contributor_id: None,
             fact_processing: crate::learning::facts::FactProcessingOptions::default(),
             max_concurrent_reviewers: crate::config::DEFAULT_MAX_CONCURRENT_REVIEWERS as u32,
+            reviewer_timeout_ms: crate::config::DEFAULT_REVIEWER_TIMEOUT_MS,
         }
     }
 }
@@ -1119,15 +1198,44 @@ pub fn run_code_review(
         .with_max_concurrent_reviewers(options.max_concurrent_reviewers);
     host.send_host_config(&host_config)?;
 
+    // 11b. Thinking policy (protocol version 2): the host reports each
+    // profile's supported thinking levels; every session level below
+    // is routed through it, so an invalid (model, level) pair can
+    // never be constructed.
+    let capabilities = host.wait_model_capabilities(HOST_READY_TIMEOUT)?;
+    let thinking = super::thinking::ThinkingPolicy::build(&capabilities, &options.model_profiles);
+    diagnostics.extend(thinking.warnings().iter().cloned());
+
     // 12. Constrained dynamic-domain description for the fallback seat.
+    // The session level is routed through the thinking policy; an
+    // unusable profile skips the session and falls back to the static
+    // template.
     let mut domain_description: Option<DynamicDomainDescription> = None;
-    if jury.uses_dynamic_fallback() {
+    let dynamic_level = if jury.uses_dynamic_fallback() {
+        let expert = catalog.dynamic_domain_expert();
+        match super::thinking::ThinkingPolicy::resolve_job_level(
+            Some(&thinking),
+            &expert.default_model_profile,
+            expert.default_thinking_level,
+        ) {
+            Ok(level) => Some(level),
+            Err(reason) => {
+                diagnostics.push(format!(
+                    "dynamic domain description fell back to the static template: {reason}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(thinking_level) = dynamic_level {
         let expert = catalog.dynamic_domain_expert();
         let payload = DomainDescriptionPayload {
             description_id: new_ulid(),
             timeout_ms: DOMAIN_DESCRIPTION_TIMEOUT_MS,
             model_profile: expert.default_model_profile.clone(),
-            thinking_level: expert.default_thinking_level,
+            thinking_level,
             descriptors: descriptors.clone(),
             changed_paths: routing_paths.clone(),
             languages: languages.clone(),
@@ -1165,32 +1273,45 @@ pub fn run_code_review(
         DIFF_ENTRY_MAX_BYTES,
     )?;
     let diff_context = diff_context_entries(&patches);
-    let specs: Vec<ReviewerExecutionSpec> = jury
-        .seats
-        .iter()
-        .map(|seat| {
-            let profile = catalog
-                .profile(&seat.reviewer_id)
-                .expect("jury construction validated every seat against the catalog");
-            let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
-                domain_description.as_ref()
-            } else {
-                None
-            };
-            let seat = seat_plan(
-                profile,
-                code_review_instructions(&profile.base_instructions),
-                description,
-            );
-            let context = code_initial_context(
-                &diff_context,
-                &shared_context,
-                &catalog,
-                &seat.practice_tags,
-            );
-            execution_spec(profile, seat, context)
-        })
-        .collect();
+    let mut specs: Vec<ReviewerExecutionSpec> = Vec::with_capacity(jury.seats.len());
+    for seat in &jury.seats {
+        let profile = catalog
+            .profile(&seat.reviewer_id)
+            .expect("jury construction validated every seat against the catalog");
+        let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
+            domain_description.as_ref()
+        } else {
+            None
+        };
+        let seat = seat_plan(
+            profile,
+            code_review_instructions(&profile.base_instructions),
+            description,
+        );
+        let context = code_initial_context(
+            &diff_context,
+            &shared_context,
+            &catalog,
+            &seat.practice_tags,
+        );
+        let (level, note) = thinking
+            .resolve(
+                &profile.default_model_profile,
+                None,
+                profile.default_thinking_level,
+            )
+            .map_err(CodeReviewError::ThinkingPolicy)?;
+        if let Some(note) = note {
+            diagnostics.push(note);
+        }
+        specs.push(execution_spec(
+            profile,
+            seat,
+            context,
+            level,
+            options.reviewer_timeout_ms,
+        ));
+    }
 
     // 13. Execute reviewers independently (frozen one-retry policy).
     let review_id = new_ulid();
@@ -1206,8 +1327,12 @@ pub fn run_code_review(
         // `complete_review` stamps the authoritative request id.
         tool_server.handle("", request)
     };
-    let outcomes =
-        super::execution::execute_review(&mut host, &payload, &mut serve, REVIEW_ROUND_TIMEOUT)?;
+    let outcomes = super::execution::execute_review(
+        &mut host,
+        &payload,
+        &mut serve,
+        review_round_timeout(options.reviewer_timeout_ms),
+    )?;
 
     // 14. At least two valid independent reports (plan section 36).
     let mut reports = Vec::new();
@@ -1255,6 +1380,7 @@ pub fn run_code_review(
         ReviewKind::Code,
         &validated,
         &options.consolidation,
+        &thinking,
     )?;
     diagnostics.extend(synthesis.diagnostics.iter().map(|d| d.message.clone()));
 
@@ -1308,6 +1434,7 @@ pub fn run_code_review(
         &records,
         options.contributor_id.as_deref(),
         &options.fact_processing,
+        &thinking,
     );
     diagnostics.extend(fact_summary.diagnostics);
 

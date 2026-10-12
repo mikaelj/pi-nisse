@@ -298,6 +298,11 @@ fn config_check(loaded: &LoadedConfig) -> DoctorCheck {
         "reviewer concurrency: max {} concurrent reviewer session(s)",
         loaded.config.performance.max_concurrent_reviewers
     ));
+    lines.push(format!(
+        "reviewer session budget: {} ms (thinking at xhigh/max on large contexts may need more; \
+         raise via performance.reviewer_timeout_ms)",
+        loaded.config.performance.reviewer_timeout_ms
+    ));
     DoctorCheck {
         name: "config",
         status: CheckStatus::Pass,

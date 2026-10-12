@@ -421,6 +421,7 @@ fn update_user_config_locked(config: &Path, path: &Path) -> std::io::Result<()> 
     );
     let rendered_table =
         toml::to_string(&table).map_err(|err| std::io::Error::other(err.to_string()))?;
+    let rendered_table = crate::config::identity::with_model_profile_hint(rendered_table);
     crate::storage::fsutil::atomic_write_replace_private(config, rendered_table.as_bytes())
 }
 
@@ -633,5 +634,26 @@ mod tests {
             other => panic!("expected refusal, got {other:?}"),
         }
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn persisted_consent_writes_the_model_profile_hint() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config = home.path().join("config.toml");
+        super::update_user_config(
+            &config,
+            &home.path().join("repo").join(".git").join("nisse"),
+        )
+        .expect("persist consent");
+        let contents = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            contents.contains("[directories]"),
+            "allow_paths persisted: {contents}"
+        );
+        assert!(
+            contents.contains("Model profiles (optional)"),
+            "the fresh config documents the thinking-level vocabulary: {contents}"
+        );
+        assert!(contents.contains("# [model_profiles.standard]"));
     }
 }

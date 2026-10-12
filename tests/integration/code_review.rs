@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::write_user_config;
+
 use super::run_nisse_in_with_env;
 use tempfile::TempDir;
 
@@ -513,4 +515,62 @@ fn review_code_outside_a_repository_fails_with_a_typed_error() {
             .contains("not inside a Git repository"),
         "stderr must require repository context"
     );
+}
+
+#[test]
+fn code_review_levels_are_clamped_to_the_reported_model_capabilities() {
+    let (_dir, repo, home) = rust_repo("code-clamp");
+    commit_all(&repo, "Add the queue");
+    std::fs::write(repo.join("src").join("queue.rs"), QUEUE_RS_V2).expect("modify");
+
+    write_user_config(
+        home.path(),
+        "[model_profiles.standard]
+model = \"zai/glm-5.3\"
+thinking_level = \"max\"
+
+[model_profiles.strong]
+model = \"zai/glm-5.3\"
+",
+    );
+    // The fake host reports both profiles as supporting only `low`, so
+    // the concurrency specialist's `high` default and the configured
+    // `max` override clamp down with visible diagnostics.
+    let (ok, _stdout, stderr) = review_code(
+        &repo,
+        &home,
+        &["review", "code", "--working"],
+        &[(
+            "NISSE_PI_HOST_CAPABILITIES",
+            r#"{"standard":["low"],"strong":["low"]}"#,
+        )],
+    );
+    assert!(ok, "review failed: {stderr}");
+
+    let event = review_event(&repo);
+    let diagnostics: Vec<String> = event["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|value| value.as_str().expect("diagnostic text").to_string())
+        .collect();
+    assert!(
+        diagnostics.iter().any(|note| note.contains(
+            "thinking level high adjusted to low for model `zai/glm-5.3` (profile `strong`)"
+        )),
+        "expected the concurrency specialist's high default to clamp; diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.iter().any(|note| note.contains(
+            "thinking level max adjusted to low for model `zai/glm-5.3` (profile `standard`)"
+        )),
+        "expected the configured max override to clamp; diagnostics: {diagnostics:?}"
+    );
+    let specs = event["specs"].as_array().expect("specs array");
+    for spec in specs {
+        assert_eq!(
+            spec["thinking_level"], "low",
+            "every reviewer spec must carry the clamped level: {spec}"
+        );
+    }
 }

@@ -26,10 +26,10 @@ use super::protocol::{
     self, CancelMessage, CancelPayload, DomainDescriptionOutcome, FactSynthesisOutcome,
     FactSynthesisPayload, FactVerificationPayload, FindingEquivalenceCheckPayload,
     FindingEquivalenceOutcome, HostConfigMessage, HostConfigPayload, HostEvent, HostReady,
-    HostRuntime, ProtocolError, StartDomainDescriptionMessage, StartFactSynthesisMessage,
-    StartFactVerificationMessage, StartFindingEquivalenceCheckMessage, StartInvestigationMessage,
-    StartInvestigationPayload, StartReviewMessage, StartReviewPayload, ToolRequestPayload,
-    ToolResponseMessage, ToolResponsePayload,
+    HostRuntime, ModelCapabilitiesPayload, ProtocolError, StartDomainDescriptionMessage,
+    StartFactSynthesisMessage, StartFactVerificationMessage, StartFindingEquivalenceCheckMessage,
+    StartInvestigationMessage, StartInvestigationPayload, StartReviewMessage, StartReviewPayload,
+    ToolRequestPayload, ToolResponseMessage, ToolResponsePayload,
 };
 use crate::domain::facts::FactVerificationResult;
 use crate::domain::report::ReviewerReport;
@@ -257,6 +257,13 @@ pub struct HostProcess {
     stderr_handle: Option<JoinHandle<()>>,
     stderr_buffer: Arc<Mutex<Vec<u8>>>,
     ready: bool,
+    /// The `id` of the most recent `host_config` send, awaiting its
+    /// `model_capabilities` reply (protocol version 2).
+    pending_host_config_id: Option<String>,
+    /// `model_capabilities` replies, intercepted from the event stream
+    /// so ordinary consumers never see them. Keyed by
+    /// `host_config_id`; a re-sent `host_config` clears the stash.
+    capabilities_stash: Vec<ModelCapabilitiesPayload>,
 }
 
 impl HostProcess {
@@ -296,6 +303,8 @@ impl HostProcess {
             stderr_handle,
             stderr_buffer,
             ready: false,
+            pending_host_config_id: None,
+            capabilities_stash: Vec::new(),
         })
     }
 
@@ -334,11 +343,66 @@ impl HostProcess {
     }
 
     /// Send `host_config`: the resolved model profiles the host may use for
-    /// reviewer sessions.
+    /// reviewer sessions. The host must answer with `model_capabilities`
+    /// echoing the config's correlation id; a re-sent table resets any
+    /// pending reply.
     pub fn send_host_config(&mut self, payload: &HostConfigPayload) -> Result<(), HostError> {
         let id = crate::domain::ids::new_ulid();
+        self.pending_host_config_id = Some(id.clone());
+        self.capabilities_stash.clear();
         let line = HostConfigMessage::new(id, payload.clone()).to_line();
         self.write_line(&line)
+    }
+
+    /// Wait for the `model_capabilities` reply to the most recent
+    /// `host_config`. Fails typed on timeout, on unexpected traffic, or
+    /// when called before `host_config` was sent.
+    pub fn wait_model_capabilities(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<ModelCapabilitiesPayload, HostError> {
+        let expected = self.pending_host_config_id.clone().ok_or_else(|| {
+            HostError::UnexpectedHostMessage {
+                reason: "wait_model_capabilities called before host_config was sent".to_string(),
+            }
+        })?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(index) = self
+                .capabilities_stash
+                .iter()
+                .position(|caps| caps.host_config_id == expected)
+            {
+                self.pending_host_config_id = None;
+                return Ok(self.capabilities_stash.swap_remove(index));
+            }
+            // Replies for superseded configs are stale; drop them.
+            self.capabilities_stash.clear();
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(capabilities_timeout)?;
+            let event = self.recv_event_raw(remaining).map_err(|err| match err {
+                HostError::Timeout { .. } => capabilities_timeout(),
+                other => other,
+            })?;
+            match event {
+                HostEvent::ModelCapabilities(caps) if caps.host_config_id == expected => {
+                    self.pending_host_config_id = None;
+                    return Ok(caps);
+                }
+                // Stale replies for superseded configs: drop and keep
+                // waiting for the current one.
+                HostEvent::ModelCapabilities(_) => continue,
+                other => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: format!(
+                            "expected `model_capabilities` but received `{}`",
+                            event_type_name(&other)
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     /// Send `start_review`.
@@ -418,8 +482,35 @@ impl HostProcess {
         self.write_line(&line)
     }
 
-    /// Block until the next decoded host event.
+    /// Block until the next decoded host event. `model_capabilities`
+    /// replies are intercepted (stashed for `wait_model_capabilities`)
+    /// and never surface here.
     pub fn recv_event(&mut self, timeout: Duration) -> Result<HostEvent, HostError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| HostError::Timeout {
+                    what: "the next host event".to_string(),
+                })?;
+            let event = self.recv_event_raw(remaining)?;
+            match event {
+                // Capability replies are correlated to their
+                // `host_config` and consumed explicitly by
+                // `wait_model_capabilities`; they never surface in the
+                // ordinary event stream.
+                HostEvent::ModelCapabilities(caps) => {
+                    self.capabilities_stash.push(caps);
+                    continue;
+                }
+                other => return Ok(other),
+            }
+        }
+    }
+
+    /// Block until the next decoded host event without capability
+    /// interception (used by the capability exchange itself).
+    fn recv_event_raw(&mut self, timeout: Duration) -> Result<HostEvent, HostError> {
         match self.events.recv_timeout(timeout) {
             Ok(ChannelEvent::Line(line)) => {
                 let envelope = protocol::Envelope::parse_host_line(&line)?;
@@ -581,6 +672,15 @@ impl HostProcess {
                 HostEvent::HostReady(_) => {
                     return Err(HostError::UnexpectedHostMessage {
                         reason: "duplicate `host_ready` after startup".to_string(),
+                    });
+                }
+                // `model_capabilities` is intercepted inside `recv_event`
+                // and never reaches consumers; this arm is unreachable but
+                // keeps the match exhaustive.
+                HostEvent::ModelCapabilities(_) => {
+                    return Err(HostError::UnexpectedHostMessage {
+                        reason: "model_capabilities surfaced outside the capability exchange"
+                            .to_string(),
                     });
                 }
                 HostEvent::FindingEquivalenceCompleted { check_id, .. } => {
@@ -1064,6 +1164,12 @@ fn resolve<T>(
     Ok(())
 }
 
+fn capabilities_timeout() -> HostError {
+    HostError::Timeout {
+        what: "the host to report model capabilities".to_string(),
+    }
+}
+
 fn event_type_name_pub(event: &HostEvent) -> &'static str {
     event_type_name(event)
 }
@@ -1071,6 +1177,7 @@ fn event_type_name_pub(event: &HostEvent) -> &'static str {
 fn event_type_name(event: &HostEvent) -> &'static str {
     match event {
         HostEvent::HostReady(_) => "host_ready",
+        HostEvent::ModelCapabilities(_) => "model_capabilities",
         HostEvent::ReviewerStarted { .. } => "reviewer_started",
         HostEvent::ReviewerCompleted { .. } => "reviewer_completed",
         HostEvent::ReviewerFailed { .. } => "reviewer_failed",

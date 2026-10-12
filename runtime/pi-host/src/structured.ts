@@ -196,7 +196,21 @@ export const COVERAGE_IMPORTANCES = ["high", "medium", "low"] as const;
 /** Minimum normalized length of an input-span evidence excerpt. */
 export const MIN_INPUT_SPAN_EXCERPT_CHARS = 24;
 
-export const THINKING_LEVELS = ["off", "low", "medium", "high"] as const;
+/** The full pi thinking-level vocabulary (pi's
+ * `EXTENDED_THINKING_LEVELS`); per-model support comes from the catalog's
+ * `thinkingLevelMap` and is reported to the Rust core through
+ * `model_capabilities`). */
+export const THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
 export const REVIEW_KINDS = ["plan", "code"] as const;
 

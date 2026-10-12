@@ -38,6 +38,7 @@ pub mod plan;
 pub mod protocol;
 pub mod review;
 pub mod synthesis;
+pub mod thinking;
 pub mod tools;
 
 pub use catalog::{Catalog, CatalogError};

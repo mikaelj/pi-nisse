@@ -517,6 +517,7 @@ impl ConsolidationSummary {
 /// deterministic. Every semantic failure is conservative: the group is
 /// left untouched and a diagnostic is recorded — uncertainty produces
 /// less automation, never guessed truth.
+#[allow(clippy::too_many_arguments)]
 pub fn run_consolidation(
     host: Option<&mut HostProcess>,
     ctx: &RepoContext,
@@ -525,6 +526,7 @@ pub fn run_consolidation(
     plan: &ConsolidationPlan,
     author: &str,
     options: &ConsolidationOptions,
+    thinking: Option<&crate::jury::thinking::ThinkingPolicy>,
 ) -> ConsolidationSummary {
     let mut summary = ConsolidationSummary {
         diagnostics: plan.diagnostics.clone(),
@@ -541,6 +543,7 @@ pub fn run_consolidation(
             group,
             author,
             options,
+            thinking,
             &created_at,
             &mut summary,
         );
@@ -554,6 +557,7 @@ pub fn run_consolidation(
             group,
             author,
             options,
+            thinking,
             &created_at,
             &mut summary,
         );
@@ -576,6 +580,7 @@ fn consolidate_exact_duplicates(
     group: &FactConsolidationGroup,
     author: &str,
     options: &ConsolidationOptions,
+    thinking: Option<&crate::jury::thinking::ThinkingPolicy>,
     created_at: &str,
     summary: &mut ConsolidationSummary,
 ) {
@@ -608,7 +613,7 @@ fn consolidate_exact_duplicates(
 
     // Independent verification of the agreed statement against the
     // union of the group's evidence (permanent invariant 10).
-    let verification = verify_claim(host, &representative.text, &evidence, options);
+    let verification = verify_claim(host, &representative.text, &evidence, options, thinking);
     let detail = match verification.verdict {
         FactVerificationVerdict::Supported => {
             let record = common_fact_record(
@@ -671,6 +676,7 @@ fn consolidate_semantic_group(
     group: &FactConsolidationGroup,
     author: &str,
     options: &ConsolidationOptions,
+    thinking: Option<&crate::jury::thinking::ThinkingPolicy>,
     created_at: &str,
     summary: &mut ConsolidationSummary,
 ) {
@@ -690,13 +696,33 @@ fn consolidate_semantic_group(
         return;
     };
 
+    // The session level is routed through the thinking policy; an
+    // unusable profile degrades exactly like a failed session.
+    let thinking_level = match crate::jury::thinking::ThinkingPolicy::resolve_job_level(
+        thinking,
+        &options.model_profile,
+        options.thinking_level,
+    ) {
+        Ok(level) => level,
+        Err(reason) => {
+            summary.diagnostics.push(format!(
+                "the fact group `{}` was left untouched: no valid thinking level ({reason})",
+                group.subject
+            ));
+            summary
+                .fact_groups
+                .push(uncertain(group, member_ids, reason));
+            return;
+        }
+    };
+
     // Step 5: one fresh synthesis session over the group's claims and
     // evidence.
     let payload = FactSynthesisPayload {
         synthesis_id: new_ulid(),
         timeout_ms: options.synthesis_timeout_ms,
         model_profile: options.model_profile.clone(),
-        thinking_level: options.thinking_level,
+        thinking_level,
         subject: group.subject.clone(),
         facts: group
             .members
@@ -755,6 +781,7 @@ fn consolidate_semantic_group(
                 member_ids,
                 author,
                 options,
+                thinking,
                 created_at,
                 "synthesis refused to merge the statements",
                 summary,
@@ -788,7 +815,7 @@ fn consolidate_semantic_group(
             group.subject
         ));
     }
-    let verification = verify_claim(host, &candidate, &union, options);
+    let verification = verify_claim(host, &candidate, &union, options, thinking);
     match verification.verdict {
         FactVerificationVerdict::Supported => {
             // Step 7: only a supported verified candidate becomes a
@@ -842,6 +869,7 @@ fn consolidate_semantic_group(
                 member_ids,
                 author,
                 options,
+                thinking,
                 created_at,
                 "independent verification contradicted the merged statement",
                 summary,
@@ -881,6 +909,7 @@ fn handle_conflict(
     member_ids: Vec<String>,
     author: &str,
     options: &ConsolidationOptions,
+    thinking: Option<&crate::jury::thinking::ThinkingPolicy>,
     created_at: &str,
     reason: &str,
     summary: &mut ConsolidationSummary,
@@ -898,7 +927,7 @@ fn handle_conflict(
             .iter()
             .any(|entry| entry.kind == EvidenceKind::Source);
         let verification = if has_current_source {
-            verify_claim(host, &fact.text, &refreshed.evidence, options)
+            verify_claim(host, &fact.text, &refreshed.evidence, options, thinking)
         } else {
             FactVerificationResult {
                 verification_id: String::new(),
@@ -1087,11 +1116,13 @@ fn uncertain(
 /// Run one independent verification session of `claim` against
 /// `evidence`. A session failure is forced `insufficient` (the same
 /// fail-safe as candidate verification).
+#[allow(clippy::too_many_arguments)]
 fn verify_claim(
     host: &mut HostProcess,
     claim: &str,
     evidence: &[EvidenceRef],
     options: &ConsolidationOptions,
+    thinking: Option<&crate::jury::thinking::ThinkingPolicy>,
 ) -> FactVerificationResult {
     let evidence = truncate(evidence.to_vec(), MAX_FACT_EVIDENCE);
     if evidence.is_empty() {
@@ -1101,11 +1132,28 @@ fn verify_claim(
             failure: Some("no evidence to verify against".to_string()),
         };
     }
+    // The session level is routed through the thinking policy; an
+    // unusable profile is forced `insufficient` (the same fail-safe as
+    // a session failure).
+    let thinking_level = match crate::jury::thinking::ThinkingPolicy::resolve_job_level(
+        thinking,
+        &options.model_profile,
+        options.thinking_level,
+    ) {
+        Ok(level) => level,
+        Err(reason) => {
+            return FactVerificationResult {
+                verification_id: String::new(),
+                verdict: FactVerificationVerdict::Insufficient,
+                failure: Some(reason),
+            };
+        }
+    };
     let payload = FactVerificationPayload {
         verification_id: new_ulid(),
         timeout_ms: options.verification_timeout_ms,
         model_profile: options.model_profile.clone(),
-        thinking_level: options.thinking_level,
+        thinking_level,
         claim: claim.to_string(),
         evidence,
     };
@@ -1656,6 +1704,7 @@ mod tests {
             &plan,
             "alice",
             &ConsolidationOptions::default(),
+            None,
         );
         assert_eq!(summary.common_lessons_created(), 1, "{summary:?}");
         assert_eq!(summary.conflicts_retained(), 0);
@@ -1698,6 +1747,7 @@ mod tests {
             &second_plan,
             "alice",
             &ConsolidationOptions::default(),
+            None,
         );
         assert_eq!(second.common_lessons_created(), 0);
         assert_eq!(load(&store).len(), 9);
@@ -1756,6 +1806,7 @@ mod tests {
             &plan,
             "alice",
             &ConsolidationOptions::default(),
+            None,
         );
         assert_eq!(summary.common_lessons_created(), 0);
         assert!(
@@ -1804,6 +1855,7 @@ mod tests {
             &plan,
             "alice",
             &ConsolidationOptions::default(),
+            None,
         );
         // Every fact group degraded to uncertain; nothing was written.
         assert_eq!(summary.common_facts_created(), 0);

@@ -5,17 +5,21 @@
  * stdin/stdout. stdout carries protocol messages only; all logs go to
  * stderr. Every message is one JSON object per line:
  *
- *     { "protocol_version": 1, "id": "...", "type": "...", ...payload }
+ *     { "protocol_version": 2, "id": "...", "type": "...", ...payload }
  *
- * The vocabularies below are the complete frozen sets from plan section 21;
+ * Version 2 added the `model_capabilities` reply (each `host_config` is
+ * answered with the resolved per-profile supported thinking levels,
+ * derived from the local Pi model catalog's `thinkingLevelMap`); every
+ * other exchange is unchanged from version 1. The vocabularies below are
+ * the complete frozen sets (plan section 21 plus the version-2 addition);
  * every entry is active in this host version. Payload validation of
  * inbound messages is strict — malformed payloads are refused
  * deterministically (`host_error{code="invalid_payload"}`) and unknown
  * type names are `unknown_message`.
  */
 
-/** Protocol version of this host (plan section 21: version 1). */
-export const PROTOCOL_VERSION = 1;
+/** Protocol version of this host (version 2: adds `model_capabilities`). */
+export const PROTOCOL_VERSION = 2;
 
 /** Message types the Rust core may send to this host, in frozen order. */
 export const RUST_TO_HOST_TYPES = [
@@ -33,6 +37,7 @@ export const RUST_TO_HOST_TYPES = [
 /** Message types this host may send to the Rust core, in frozen order. */
 export const HOST_TO_RUST_TYPES = [
   "host_ready",
+  "model_capabilities",
   "reviewer_started",
   "reviewer_completed",
   "reviewer_failed",

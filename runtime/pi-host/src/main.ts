@@ -56,6 +56,7 @@ import {
   validateFindingEquivalenceCheck,
   validateHostConfig,
   validateStartInvestigation,
+  THINKING_LEVELS,
   validateStartReview,
   ValidationError,
   type DomainDescriptionRequest,
@@ -129,6 +130,158 @@ const bridge = new ToolBridge({ nextId, send });
 
 /** Model profiles supplied by the Rust core through `host_config`. */
 const hostModels = new Map<string, { readonly model: string; readonly endpoint?: string }>();
+
+/**
+ * Answer every `host_config` with one `model_capabilities` message
+ * (protocol version 2): the resolved model and its supported thinking
+ * levels per profile, derived from the local Pi model catalog.
+ *
+ * Resolution for the real Pi runtime is asynchronous; replies are
+ * chained so they always arrive in `host_config` order. The
+ * deterministic test doubles (fake runtime, scripted sessions) report
+ * every profile as supporting all levels — optionally overridden by
+ * the test-only `NISSE_PI_HOST_CAPABILITIES` environment variable
+ * (active only in fake/scripted modes; malformed there means a broken
+ * test setup and fails loudly).
+ */
+let capabilitiesChain: Promise<void> = Promise.resolve();
+
+function sendModelCapabilities(hostConfigId: string): void {
+  // The recovered promise (`.catch` applied *before* the assignment)
+  // is what chains forward: a single resolution failure must not
+  // poison the chain and silence every later host_config reply.
+  void (capabilitiesChain = capabilitiesChain
+    .then(async () => {
+      const payload = await resolveModelCapabilities();
+      send("model_capabilities", nextId(), {
+        host_config_id: hostConfigId,
+        profiles: Object.fromEntries(
+          [...payload.profiles.entries()].map(([name, entry]) => [
+            name,
+            {
+              model: entry.model,
+              supported_thinking_levels: [...entry.supported_thinking_levels],
+            },
+          ]),
+        ),
+        unresolved: Object.fromEntries(payload.unresolved.entries()),
+      });
+    })
+    .catch((err: unknown) => {
+      // Resolution itself failed for an unexpected reason: report it as
+      // a protocol-level host error and keep the chain alive for the
+      // next host_config (the Rust core fails closed on the missing
+      // capabilities reply).
+      sendHostError(
+        ERROR_CODES.internal,
+        `model capabilities could not be resolved: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }));
+}
+
+/** Resolve capabilities for the currently configured profiles. */
+async function resolveModelCapabilities(): Promise<{
+  readonly profiles: Map<string, { readonly model: string; readonly supported_thinking_levels: readonly string[] }>;
+  readonly unresolved: Map<string, string>;
+}> {
+  const scripted = process.env["NISSE_PI_SESSION_SCRIPT"] !== undefined;
+  if (options.runtime === "fake" || scripted) {
+    return testDoubleCapabilities();
+  }
+  const { loadModelRuntime } = await import("./pi-agent.ts");
+  const { supportedThinkingLevels } = await import("./capabilities.ts");
+  const profiles = new Map();
+  const unresolved = new Map<string, string>();
+  let runtime: Awaited<ReturnType<typeof loadModelRuntime>>;
+  try {
+    runtime = await loadModelRuntime();
+  } catch (err: unknown) {
+    const reason = err instanceof Error ? err.message : String(err);
+    for (const [name] of hostModels) {
+      unresolved.set(name, `the Pi model runtime is unavailable: ${reason}`);
+    }
+    return { profiles, unresolved };
+  }
+  for (const [name, profile] of hostModels) {
+    const separator = profile.model.indexOf("/");
+    const provider = profile.model.slice(0, separator);
+    const modelId = profile.model.slice(separator + 1);
+    try {
+      const model = runtime.getModel(provider, modelId);
+      if (model === undefined) {
+        unresolved.set(
+          name,
+          `model \`${profile.model}\` is not registered in the local model catalog`,
+        );
+        continue;
+      }
+      profiles.set(name, {
+        model: profile.model,
+        supported_thinking_levels: supportedThinkingLevels(model),
+      });
+    } catch (err: unknown) {
+      unresolved.set(
+        name,
+        `model \`${profile.model}\` could not be resolved: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return { profiles, unresolved };
+}
+
+/** Permissive double plus the test-only env override (loud on misuse). */
+function testDoubleCapabilities(): {
+  readonly profiles: Map<string, { readonly model: string; readonly supported_thinking_levels: readonly string[] }>;
+  readonly unresolved: Map<string, string>;
+} {
+  const profiles = new Map();
+  const unresolved = new Map<string, string>();
+  const override = process.env["NISSE_PI_HOST_CAPABILITIES"];
+  if (override === undefined) {
+    for (const [name, entry] of hostModels) {
+      profiles.set(name, { model: entry.model, supported_thinking_levels: [...THINKING_LEVELS] });
+    }
+    return { profiles, unresolved };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(override);
+  } catch (err: unknown) {
+    failLoudOverride(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    failLoudOverride("expected a JSON object of profile name to level array");
+  }
+  for (const [name, entry] of hostModels) {
+    const levels = (parsed as Record<string, unknown>)[name];
+    if (levels === undefined) {
+      profiles.set(name, { model: entry.model, supported_thinking_levels: [...THINKING_LEVELS] });
+      continue;
+    }
+    if (!Array.isArray(levels) || levels.length === 0) {
+      failLoudOverride(`profile \`${name}\`: expected a non-empty array of levels`);
+    }
+    for (const level of levels) {
+      if (!THINKING_LEVELS.includes(level as (typeof THINKING_LEVELS)[number])) {
+        failLoudOverride(`profile \`${name}\`: unknown thinking level \`${String(level)}\``);
+      }
+    }
+    profiles.set(name, { model: entry.model, supported_thinking_levels: levels as string[] });
+  }
+  return { profiles, unresolved };
+}
+
+/** A malformed test override must never be silently ignored. */
+function failLoudOverride(detail: string): never {
+  const message = `NISSE_PI_HOST_CAPABILITIES is malformed (${detail}); refusing to guess`;
+  process.stderr.write(`nisse-pi-host: ${message}\n`);
+  sendHostError(ERROR_CODES.internal, message);
+  process.exit(2);
+}
 
 /** Reviewer-session concurrency bound (plan milestone 29: reviewer
  * concurrency obeys config). The Rust core forwards the configured
@@ -331,7 +484,7 @@ function handleCancel(payload: unknown): void {
   bridge.cancel(undefined);
 }
 
-function handleHostConfig(payload: unknown): void {
+function handleHostConfig(id: string, payload: unknown): void {
   const config: HostConfig = validateHostConfig(payload);
   hostModels.clear();
   for (const [name, profile] of config.models) {
@@ -345,6 +498,10 @@ function handleHostConfig(payload: unknown): void {
       `max ${config.maxConcurrentReviewers ?? DEFAULT_MAX_CONCURRENT_REVIEWERS} ` +
       `concurrent reviewer session(s)`,
   );
+  // Version 2: answer every host_config with the resolved model
+  // capabilities. An empty table still gets an (empty) reply so the
+  // Rust core's wait always completes.
+  sendModelCapabilities(id);
 }
 
 /** Execute one equivalence check job: a completed result always answers
@@ -454,7 +611,7 @@ async function runFactSynthesisJob(request: FactSynthesisRequest): Promise<void>
 function dispatch(message: ReturnType<typeof decodeIncomingMessage>): void {
   switch (message.type) {
     case "host_config":
-      handleHostConfig(message.payload);
+      handleHostConfig(message.id, message.payload);
       return;
     case "start_review":
       handleStartReview(message.payload);

@@ -19,8 +19,8 @@ use nisse::domain::review::ReviewKind;
 use nisse::domain::reviewer::{ReviewerCapability, ReviewerExecutionSpec};
 use nisse::jury::host::{HostError, HostProcess, PiHostLaunch};
 use nisse::jury::protocol::{
-    FactVerificationPayload, HostConfigPayload, HostEvent, HostRuntime, StartReviewPayload,
-    ToolResponsePayload,
+    FactVerificationPayload, HostConfigPayload, HostEvent, HostRuntime, ModelCapabilitiesPayload,
+    StartReviewPayload, ToolResponsePayload,
 };
 
 fn host_script() -> PathBuf {
@@ -121,8 +121,8 @@ fn wrong_protocol_version_from_host_is_a_typed_error() {
         matches!(
             &err,
             HostError::Protocol(nisse::jury::protocol::ProtocolError::UnsupportedVersion {
-                got: 99,
-                expected: 1
+                got: 100,
+                expected: 2
             })
         ),
         "expected an unsupported-version error, got {err:?}"
@@ -133,7 +133,7 @@ fn wrong_protocol_version_from_host_is_a_typed_error() {
 fn wrong_protocol_version_toward_host_reports_host_error() {
     let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
-    host.send_raw_line(r#"{"protocol_version":2,"id":"x-1","type":"cancel"}"#)
+    host.send_raw_line(r#"{"protocol_version":3,"id":"x-1","type":"cancel"}"#)
         .expect("write failed");
     match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
         HostEvent::HostError(info) => {
@@ -388,7 +388,7 @@ fn unsupported_vocabulary_messages_are_refused_deterministically() {
     // (milestone 22 activated `start_fact_synthesis`), so an
     // active-type message with an invalid payload is refused as
     // `invalid_payload` — deterministically, never guessed.
-    host.send_raw_line(r#"{"protocol_version":1,"id":"x-2","type":"start_fact_synthesis"}"#)
+    host.send_raw_line(r#"{"protocol_version":2,"id":"x-2","type":"start_fact_synthesis"}"#)
         .expect("write failed");
     match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
         HostEvent::HostError(info) => {
@@ -793,7 +793,7 @@ fn fact_verification_rejects_malformed_payloads() {
 
     // Missing evidence: the payload never reaches a session.
     host.send_raw_line(
-        r#"{"protocol_version":1,"id":"x-9","type":"start_fact_verification","verification_id":"v","timeout_ms":5000,"model_profile":"standard","thinking_level":"medium","claim":"c","evidence":[]}"#,
+        r#"{"protocol_version":2,"id":"x-9","type":"start_fact_verification","verification_id":"v","timeout_ms":5000,"model_profile":"standard","thinking_level":"medium","claim":"c","evidence":[]}"#,
     )
     .expect("write failed");
     match host.recv_event(READY_TIMEOUT).expect("host_error expected") {
@@ -803,5 +803,127 @@ fn fact_verification_rejects_malformed_payloads() {
         }
         other => panic!("expected host_error, got {other:?}"),
     }
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+// ---- model_capabilities (protocol version 2) -------------------------
+
+fn config_payload() -> HostConfigPayload {
+    HostConfigPayload::from_config_profiles(
+        &[(
+            "standard".to_string(),
+            nisse::domain::model::ModelProfile {
+                model: "zai/glm-5.3".to_string(),
+                endpoint: None,
+                thinking_level: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
+}
+
+#[test]
+fn host_config_is_answered_by_model_capabilities_echoing_the_config() {
+    let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+    host.send_host_config(&config_payload())
+        .expect("host_config failed");
+    let caps: ModelCapabilitiesPayload = host
+        .wait_model_capabilities(READY_TIMEOUT)
+        .expect("model_capabilities expected");
+    let entry = caps.profiles.get("standard").expect("standard resolved");
+    assert_eq!(entry.model, "zai/glm-5.3");
+    // The fake runtime is the permissive double: all seven levels.
+    assert_eq!(
+        entry.supported_thinking_levels,
+        nisse::domain::model::ThinkingLevel::PI_ORDER
+            .into_iter()
+            .collect(),
+    );
+    assert!(caps.unresolved.is_empty());
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+#[test]
+fn a_re_sent_host_config_yields_a_fresh_capabilities_reply() {
+    let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+
+    host.send_host_config(&config_payload())
+        .expect("first host_config failed");
+    let first = host
+        .wait_model_capabilities(READY_TIMEOUT)
+        .expect("first capabilities expected");
+
+    host.send_host_config(&config_payload())
+        .expect("second host_config failed");
+    let second = host
+        .wait_model_capabilities(READY_TIMEOUT)
+        .expect("second capabilities expected");
+    assert_ne!(
+        first.host_config_id, second.host_config_id,
+        "each host_config is answered by its own correlated reply"
+    );
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+#[test]
+fn capabilities_env_override_restricts_reported_levels() {
+    let mut host = HostProcess::spawn(&fake_launch(
+        None,
+        &[(
+            "NISSE_PI_HOST_CAPABILITIES",
+            r#"{"standard":["low","max"]}"#,
+        )],
+    ))
+    .expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+    host.send_host_config(&config_payload())
+        .expect("host_config failed");
+    let caps = host
+        .wait_model_capabilities(READY_TIMEOUT)
+        .expect("model_capabilities expected");
+    let entry = caps.profiles.get("standard").expect("standard resolved");
+    let levels: Vec<String> = entry
+        .supported_thinking_levels
+        .iter()
+        .map(|level| level.to_string())
+        .collect();
+    assert_eq!(levels, ["low", "max"]);
+    host.shutdown(Duration::from_secs(10)).expect("clean exit");
+}
+
+#[test]
+fn a_host_that_never_reports_capabilities_fails_typed_on_timeout() {
+    // The capabilities fixture announces host_ready and then goes
+    // silent without answering host_config.
+    let mut host = HostProcess::spawn(&linger_launch("capabilities-silent.sh")).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+    // send_host_config writes succeed (stdin still open); the reply
+    // never comes, so a short explicit budget must fail typed.
+    host.send_host_config(&config_payload())
+        .expect("host_config write failed");
+    let err = host
+        .wait_model_capabilities(Duration::from_secs(2))
+        .expect_err("must time out");
+    assert!(
+        matches!(err, HostError::Timeout { ref what } if what.contains("model capabilities")),
+        "expected a typed capabilities timeout, got {err:?}"
+    );
+    let _ = host.shutdown(Duration::from_secs(2));
+}
+
+#[test]
+fn wait_model_capabilities_without_a_sent_config_is_a_typed_error() {
+    let mut host = HostProcess::spawn(&fake_launch(None, &[])).expect("spawn failed");
+    host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
+    let err = host
+        .wait_model_capabilities(Duration::from_secs(2))
+        .expect_err("must fail without host_config");
+    assert!(
+        matches!(err, HostError::UnexpectedHostMessage { .. }),
+        "expected a typed ordering error, got {err:?}"
+    );
     host.shutdown(Duration::from_secs(10)).expect("clean exit");
 }

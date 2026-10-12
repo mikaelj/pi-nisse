@@ -7,18 +7,23 @@
 //! Every message is a single JSON object per line with the envelope fields
 //!
 //! ```text
-//! protocol_version  u32    (frozen at 1)
+//! protocol_version  u32    (frozen at 2)
 //! id                string (unique per sender, used for correlation)
 //! type              string (frozen message vocabulary below)
 //! ```
 //!
 //! plus type-specific payload fields flattened into the same object.
 //!
-//! The vocabulary below is the complete frozen set from plan section 21;
+//! Version 2 added the `model_capabilities` reply (each `host_config` is
+//! answered with the resolved per-profile supported thinking levels,
+//! derived from the local Pi model catalog's `thinkingLevelMap`); every
+//! other exchange is unchanged from version 1. The vocabulary below is
+//! the complete frozen set (plan section 21 plus the version-2 addition);
 //! every entry is implemented by this build. The implemented exchanges
 //! are the core review loop (`host_ready`, `start_review`,
 //! `reviewer_started`, `reviewer_completed`, `reviewer_failed`,
-//! `tool_request`, `tool_response`, `cancel`, `host_error`), the narrow
+//! `tool_request`, `tool_response`, `cancel`, `host_error`), the
+//! `host_config` / `model_capabilities` capability exchange, the narrow
 //! `start_finding_equivalence_check` / `finding_equivalence_completed`
 //! exchange of finding consolidation (plan section 38), the constrained
 //! `start_domain_description` / `domain_description_completed` exchange of
@@ -30,21 +35,22 @@
 //! vocabulary-but-unimplemented type is a typed protocol error, not a guess.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::context::ContextBundle;
 use crate::domain::evidence::EvidenceRef;
 use crate::domain::facts::FactVerificationVerdict;
 use crate::domain::finding::ReviewerFinding;
 use crate::domain::model::ModelProfile;
+use crate::domain::model::ThinkingLevel;
 use crate::domain::report::ReviewerReport;
 use crate::domain::review::ReviewKind;
 use crate::domain::reviewer::{
     DynamicDomainDescription, ReviewerCapability, ReviewerExecutionSpec,
 };
 
-/// Protocol version of this build (plan section 21: version 1).
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Protocol version of this build (version 2: adds `model_capabilities`).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Frozen message-type names Nisse Core may send to the host.
 pub mod rust_to_host {
@@ -87,6 +93,9 @@ pub mod rust_to_host {
 pub mod host_to_rust {
     /// The host finished startup and can accept jobs.
     pub const HOST_READY: &str = "host_ready";
+    /// The host answered a `host_config` with resolved per-profile
+    /// supported thinking levels (protocol version 2).
+    pub const MODEL_CAPABILITIES: &str = "model_capabilities";
     /// One reviewer session started.
     pub const REVIEWER_STARTED: &str = "reviewer_started";
     /// One reviewer session produced a valid structured report.
@@ -111,8 +120,9 @@ pub mod host_to_rust {
     pub const HOST_ERROR: &str = "host_error";
 
     /// The complete frozen host-to-Rust vocabulary, in plan order.
-    pub const ALL: [&str; 11] = [
+    pub const ALL: [&str; 12] = [
         HOST_READY,
+        MODEL_CAPABILITIES,
         REVIEWER_STARTED,
         REVIEWER_COMPLETED,
         REVIEWER_FAILED,
@@ -192,6 +202,35 @@ impl HostModelProfile {
             endpoint: profile.endpoint.clone(),
         }
     }
+}
+
+/// `model_capabilities` payload (protocol version 2): the host's
+/// answer to one `host_config`, reporting for every configured profile
+/// the resolved model and the thinking levels its Pi catalog entry
+/// supports (derived from `thinkingLevelMap`). Profiles whose model
+/// could not be resolved are reported in `unresolved` with a reason;
+/// the host never guesses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapabilitiesPayload {
+    /// The `id` of the `host_config` message this reply answers.
+    pub host_config_id: String,
+    /// Successfully resolved profiles.
+    pub profiles: BTreeMap<String, ModelCapabilityEntry>,
+    /// Profiles whose model could not be resolved, with a reason.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unresolved: BTreeMap<String, String>,
+}
+
+/// One resolved profile of a [`ModelCapabilitiesPayload`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapabilityEntry {
+    /// The resolved `provider/model-id` identifier.
+    pub model: String,
+    /// Thinking levels the model supports (pi's
+    /// `getSupportedThinkingLevels` semantics). Never empty.
+    pub supported_thinking_levels: BTreeSet<ThinkingLevel>,
 }
 
 /// `host_config` payload.
@@ -325,6 +364,9 @@ impl CancelPayload {
 pub enum HostEvent {
     /// The host announced readiness.
     HostReady(HostReady),
+    /// The host answered a `host_config` with resolved per-profile
+    /// supported thinking levels (protocol version 2).
+    ModelCapabilities(ModelCapabilitiesPayload),
     /// A reviewer session started.
     ReviewerStarted {
         /// The review the reviewer belongs to.
@@ -557,6 +599,21 @@ pub fn parse_host_event(envelope: Envelope) -> Result<HostEvent, ProtocolError> 
             let ready: HostReady =
                 serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
             Ok(HostEvent::HostReady(ready))
+        }
+        host_to_rust::MODEL_CAPABILITIES => {
+            let payload: ModelCapabilitiesPayload =
+                serde_json::from_value(envelope.payload).map_err(|err| invalid(err.to_string()))?;
+            require_non_empty(&payload.host_config_id, "host_config_id", &invalid)?;
+            for (name, entry) in &payload.profiles {
+                require_non_empty(name, "profile name", &invalid)?;
+                require_non_empty(&entry.model, "model", &invalid)?;
+                if entry.supported_thinking_levels.is_empty() {
+                    return Err(invalid(format!(
+                        "profile `{name}` reports an empty supported_thinking_levels set"
+                    )));
+                }
+            }
+            Ok(HostEvent::ModelCapabilities(payload))
         }
         host_to_rust::REVIEWER_STARTED => {
             #[derive(Deserialize)]
@@ -1330,8 +1387,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_is_frozen_at_one() {
-        assert_eq!(PROTOCOL_VERSION, 1);
+    fn protocol_version_is_frozen_at_two() {
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 
     #[test]
@@ -1354,6 +1411,7 @@ mod tests {
             host_to_rust::ALL,
             [
                 "host_ready",
+                "model_capabilities",
                 "reviewer_started",
                 "reviewer_completed",
                 "reviewer_failed",
@@ -1370,9 +1428,9 @@ mod tests {
 
     #[test]
     fn envelope_parses_host_ready() {
-        let line = r#"{"protocol_version":1,"id":"h-1","type":"host_ready","runtime":"fake"}"#;
+        let line = r#"{"protocol_version":2,"id":"h-1","type":"host_ready","runtime":"fake"}"#;
         let envelope = Envelope::parse_host_line(line).unwrap();
-        assert_eq!(envelope.protocol_version, 1);
+        assert_eq!(envelope.protocol_version, PROTOCOL_VERSION);
         assert_eq!(envelope.id, "h-1");
         assert_eq!(envelope.message_type, "host_ready");
         let event = parse_host_event(envelope).unwrap();
@@ -1398,25 +1456,25 @@ mod tests {
     #[test]
     fn envelope_rejects_wrong_versions_and_bad_common_fields() {
         let err = Envelope::parse_host_line(
-            r#"{"protocol_version":2,"id":"h-1","type":"host_ready","runtime":"fake"}"#,
+            r#"{"protocol_version":3,"id":"h-1","type":"host_ready","runtime":"fake"}"#,
         )
         .unwrap_err();
         assert_eq!(
             err,
             ProtocolError::UnsupportedVersion {
-                got: 2,
-                expected: 1
+                got: 3,
+                expected: PROTOCOL_VERSION
             }
         );
 
         let err = Envelope::parse_host_line(
-            r#"{"protocol_version":1,"type":"host_ready","runtime":"fake"}"#,
+            r#"{"protocol_version":2,"type":"host_ready","runtime":"fake"}"#,
         )
         .unwrap_err();
         assert!(matches!(err, ProtocolError::MalformedLine { .. }));
 
         let err = Envelope::parse_host_line(
-            r#"{"protocol_version":1,"id":"","type":"host_ready","runtime":"fake"}"#,
+            r#"{"protocol_version":2,"id":"","type":"host_ready","runtime":"fake"}"#,
         )
         .unwrap_err();
         assert!(matches!(err, ProtocolError::MalformedLine { .. }));
@@ -1431,7 +1489,7 @@ mod tests {
     #[test]
     fn unknown_types_are_typed_errors_and_every_vocabulary_type_parses() {
         let err = Envelope::parse_host_line(
-            r#"{"protocol_version":1,"id":"h-1","type":"banana","runtime":"fake"}"#,
+            r#"{"protocol_version":2,"id":"h-1","type":"banana","runtime":"fake"}"#,
         )
         .unwrap_err();
         assert_eq!(err, ProtocolError::UnknownMessageType("banana".to_string()));
@@ -1440,7 +1498,7 @@ mod tests {
         // this build: a bare `fact_synthesis_completed` envelope now
         // fails strict payload validation (not as an unsupported type).
         let envelope = Envelope::parse_host_line(
-            r#"{"protocol_version":1,"id":"h-1","type":"fact_synthesis_completed"}"#,
+            r#"{"protocol_version":2,"id":"h-1","type":"fact_synthesis_completed"}"#,
         )
         .unwrap();
         let err = parse_host_event(envelope).unwrap_err();
@@ -1458,7 +1516,7 @@ mod tests {
             "duration_ms": 10
         });
         let line = format!(
-            r#"{{"protocol_version":1,"id":"h-1","type":"reviewer_completed","review_id":"r","reviewer_id":"quality","report":{report}}}"#
+            r#"{{"protocol_version":2,"id":"h-1","type":"reviewer_completed","review_id":"r","reviewer_id":"quality","report":{report}}}"#
         );
         let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
         match event {
@@ -1486,7 +1544,7 @@ mod tests {
 
     #[test]
     fn tool_request_parses_and_rejects_unknown_tools() {
-        let line = r#"{"protocol_version":1,"id":"t-1","type":"tool_request","review_id":"r","reviewer_id":"quality","tool":"source_lookup","arguments":{"path":"src/main.rs"}}"#;
+        let line = r#"{"protocol_version":2,"id":"t-1","type":"tool_request","review_id":"r","reviewer_id":"quality","tool":"source_lookup","arguments":{"path":"src/main.rs"}}"#;
         let event = parse_host_event(Envelope::parse_host_line(line).unwrap()).unwrap();
         match event {
             HostEvent::ToolRequest { id, payload } => {
@@ -1499,18 +1557,18 @@ mod tests {
             other => panic!("expected ToolRequest, got {other:?}"),
         }
 
-        let bad = r#"{"protocol_version":1,"id":"t-1","type":"tool_request","review_id":"r","reviewer_id":"quality","tool":"shell","arguments":{}}"#;
+        let bad = r#"{"protocol_version":2,"id":"t-1","type":"tool_request","review_id":"r","reviewer_id":"quality","tool":"shell","arguments":{}}"#;
         let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
         assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
     }
 
     #[test]
     fn empty_identifiers_and_errors_are_rejected() {
-        let bad = r#"{"protocol_version":1,"id":"h-1","type":"reviewer_started","review_id":"","reviewer_id":"quality"}"#;
+        let bad = r#"{"protocol_version":2,"id":"h-1","type":"reviewer_started","review_id":"","reviewer_id":"quality"}"#;
         let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
         assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
 
-        let bad = r#"{"protocol_version":1,"id":"h-1","type":"host_error","error":{"code":"","message":""}}"#;
+        let bad = r#"{"protocol_version":2,"id":"h-1","type":"host_error","error":{"code":"","message":""}}"#;
         let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
         assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
     }
@@ -1548,7 +1606,7 @@ mod tests {
 
         let line = HostConfigMessage::new("m-0".to_string(), payload.clone()).to_line();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(value["type"], "host_config");
         assert_eq!(value["id"], "m-0");
         assert_eq!(value["models"]["strong"]["model"], "acme/local-large");
@@ -1611,7 +1669,7 @@ mod tests {
         };
         let line = StartFindingEquivalenceCheckMessage::new("m-4".to_string(), payload).to_line();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(value["type"], "start_finding_equivalence_check");
         assert_eq!(value["id"], "m-4");
         assert_eq!(value["check_id"], "chk-1");
@@ -1630,7 +1688,7 @@ mod tests {
             (EquivalenceVerdict::Uncertain, "uncertain"),
         ] {
             let line = format!(
-                r#"{{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"{name}"}}"#
+                r#"{{"protocol_version":2,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"{name}"}}"#
             );
             let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
             assert_eq!(
@@ -1644,7 +1702,7 @@ mod tests {
         }
 
         // An error is only permitted with the uncertain verdict.
-        let fallback = r#"{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"uncertain","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let fallback = r#"{"protocol_version":2,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"uncertain","error":{"code":"session_timeout","message":"timed out"}}"#;
         let event = parse_host_event(Envelope::parse_host_line(fallback).unwrap()).unwrap();
         assert!(matches!(
             event,
@@ -1656,8 +1714,8 @@ mod tests {
 
         // Unknown verdicts and empty check ids are rejected.
         for bad in [
-            r#"{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"maybe"}"#,
-            r#"{"protocol_version":1,"id":"h-9","type":"finding_equivalence_completed","check_id":"","verdict":"same"}"#,
+            r#"{"protocol_version":2,"id":"h-9","type":"finding_equivalence_completed","check_id":"chk-1","verdict":"maybe"}"#,
+            r#"{"protocol_version":2,"id":"h-9","type":"finding_equivalence_completed","check_id":"","verdict":"same"}"#,
         ] {
             let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
             assert!(
@@ -1680,7 +1738,7 @@ mod tests {
         };
         let line = StartDomainDescriptionMessage::new("m-5".to_string(), payload.clone()).to_line();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(value["type"], "start_domain_description");
         assert_eq!(value["id"], "m-5");
         assert_eq!(value["description_id"], "desc-1");
@@ -1697,7 +1755,7 @@ mod tests {
             "relevant_practice_tags": ["realtime"],
         });
         let line = format!(
-            r#"{{"protocol_version":1,"id":"h-10","type":"domain_description_completed","description_id":"desc-1","description":{description}}}"#
+            r#"{{"protocol_version":2,"id":"h-10","type":"domain_description_completed","description_id":"desc-1","description":{description}}}"#
         );
         let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
         match event {
@@ -1717,7 +1775,7 @@ mod tests {
         }
 
         // A failed completion carries an error and no description.
-        let line = r#"{"protocol_version":1,"id":"h-10","type":"domain_description_completed","description_id":"desc-1","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let line = r#"{"protocol_version":2,"id":"h-10","type":"domain_description_completed","description_id":"desc-1","error":{"code":"session_timeout","message":"timed out"}}"#;
         let event = parse_host_event(Envelope::parse_host_line(line).unwrap()).unwrap();
         match event {
             HostEvent::DomainDescriptionCompleted {
@@ -1732,12 +1790,12 @@ mod tests {
         // Malformed completions are rejected: neither field, both fields,
         // empty label, oversized lists, unknown fields.
         for bad in [
-            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d"}"#.to_string(),
-            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"x","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[]},"error":{"code":"c","message":"m"}}"#.to_string(),
-            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"  ","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[]}}"#.to_string(),
+            r#"{"protocol_version":2,"id":"h","type":"domain_description_completed","description_id":"d"}"#.to_string(),
+            r#"{"protocol_version":2,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"x","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[]},"error":{"code":"c","message":"m"}}"#.to_string(),
+            r#"{"protocol_version":2,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"  ","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[]}}"#.to_string(),
             {
                 let mut oversized = serde_json::json!({
-                    "protocol_version": 1, "id": "h", "type": "domain_description_completed",
+                    "protocol_version": 2, "id": "h", "type": "domain_description_completed",
                     "description_id": "d",
                     "description": {
                         "domain_label": "x",
@@ -1753,7 +1811,7 @@ mod tests {
                     serde_json::json!(tags);
                 oversized.to_string()
             },
-            r#"{"protocol_version":1,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"x","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[],"tools":["shell"]}}"#.to_string(),
+            r#"{"protocol_version":2,"id":"h","type":"domain_description_completed","description_id":"d","description":{"domain_label":"x","focus_terms":[],"risks_to_check":[],"relevant_practice_tags":[],"tools":["shell"]}}"#.to_string(),
         ] {
             let err = parse_host_event(Envelope::parse_host_line(&bad).unwrap()).unwrap_err();
             assert!(matches!(err, ProtocolError::InvalidPayload { .. }), "{err:?}");
@@ -1779,7 +1837,7 @@ mod tests {
         };
         let line = StartFactVerificationMessage::new("m-6".to_string(), payload.clone()).to_line();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(value["type"], "start_fact_verification");
         assert_eq!(value["id"], "m-6");
         assert_eq!(value["verification_id"], "ver-1");
@@ -1799,7 +1857,7 @@ mod tests {
             (FactVerificationVerdict::Insufficient, "insufficient"),
         ] {
             let line = format!(
-                r#"{{"protocol_version":1,"id":"h-11","type":"fact_verification_completed","verification_id":"ver-1","verdict":"{name}"}}"#
+                r#"{{"protocol_version":2,"id":"h-11","type":"fact_verification_completed","verification_id":"ver-1","verdict":"{name}"}}"#
             );
             let event = parse_host_event(Envelope::parse_host_line(&line).unwrap()).unwrap();
             assert_eq!(
@@ -1815,7 +1873,7 @@ mod tests {
         // An error is only permitted with the insufficient verdict (a
         // failed verifier session must never look like support or
         // contradiction).
-        let failed = r#"{"protocol_version":1,"id":"h-11","type":"fact_verification_completed","verification_id":"ver-1","verdict":"insufficient","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let failed = r#"{"protocol_version":2,"id":"h-11","type":"fact_verification_completed","verification_id":"ver-1","verdict":"insufficient","error":{"code":"session_timeout","message":"timed out"}}"#;
         let event = parse_host_event(Envelope::parse_host_line(failed).unwrap()).unwrap();
         assert!(matches!(
             event,
@@ -1834,9 +1892,9 @@ mod tests {
 
         // Unknown verdicts and empty ids are rejected.
         for bad in [
-            r#"{"protocol_version":1,"id":"h","type":"fact_verification_completed","verification_id":"v","verdict":"uncertain"}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_verification_completed","verification_id":"","verdict":"supported"}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_verification_completed","verification_id":"v","verdict":"supported","extra":1}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_verification_completed","verification_id":"v","verdict":"uncertain"}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_verification_completed","verification_id":"","verdict":"supported"}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_verification_completed","verification_id":"v","verdict":"supported","extra":1}"#,
         ] {
             let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
             assert!(
@@ -1875,7 +1933,7 @@ mod tests {
         payload.validate().unwrap();
         let line = StartFactSynthesisMessage::new("m-7".to_string(), payload.clone()).to_line();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(value["type"], "start_fact_synthesis");
         assert_eq!(value["id"], "m-7");
         assert_eq!(value["synthesis_id"], "syn-1");
@@ -1890,7 +1948,7 @@ mod tests {
         assert_eq!(back, payload);
 
         // A merged completion carries the candidate.
-        let merged = r#"{"protocol_version":1,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","candidate":"The sensor queue is bounded to 32 slots and guarded by a mutex."}"#;
+        let merged = r#"{"protocol_version":2,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","candidate":"The sensor queue is bounded to 32 slots and guarded by a mutex."}"#;
         let event = parse_host_event(Envelope::parse_host_line(merged).unwrap()).unwrap();
         assert_eq!(
             event,
@@ -1905,7 +1963,7 @@ mod tests {
         );
 
         // A refusal carries `cannot_merge` and nothing else.
-        let refused = r#"{"protocol_version":1,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","cannot_merge":true}"#;
+        let refused = r#"{"protocol_version":2,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","cannot_merge":true}"#;
         let event = parse_host_event(Envelope::parse_host_line(refused).unwrap()).unwrap();
         assert_eq!(
             event,
@@ -1917,7 +1975,7 @@ mod tests {
         );
 
         // A failed session carries an error and no result.
-        let failed = r#"{"protocol_version":1,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","error":{"code":"session_timeout","message":"timed out"}}"#;
+        let failed = r#"{"protocol_version":2,"id":"h-12","type":"fact_synthesis_completed","synthesis_id":"syn-1","error":{"code":"session_timeout","message":"timed out"}}"#;
         let event = parse_host_event(Envelope::parse_host_line(failed).unwrap()).unwrap();
         assert_eq!(
             event,
@@ -1934,12 +1992,12 @@ mod tests {
         // Malformed completions are rejected: nothing set, several set,
         // empty candidate, `cannot_merge: false`, unknown fields.
         for bad in [
-            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s"}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","candidate":"x","cannot_merge":true}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","cannot_merge":true,"error":{"code":"c","message":"m"}}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","candidate":"  "}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","cannot_merge":false}"#,
-            r#"{"protocol_version":1,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","extra":1}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s"}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","candidate":"x","cannot_merge":true}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","cannot_merge":true,"error":{"code":"c","message":"m"}}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","candidate":"  "}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","cannot_merge":false}"#,
+            r#"{"protocol_version":2,"id":"h","type":"fact_synthesis_completed","synthesis_id":"s","extra":1}"#,
         ] {
             let err = parse_host_event(Envelope::parse_host_line(bad).unwrap()).unwrap_err();
             assert!(
@@ -2018,7 +2076,7 @@ mod tests {
         };
         let line = StartReviewMessage::new("m-1".to_string(), payload).to_line();
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["protocol_version"], 1);
+        assert_eq!(value["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(value["type"], "start_review");
         assert_eq!(value["id"], "m-1");
         assert_eq!(value["review_id"], "01J8Z");

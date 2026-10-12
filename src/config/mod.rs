@@ -29,6 +29,12 @@
 //! endpoint = "http://127.0.0.1:8080/v1"
 //! thinking_level = "medium"
 //!
+//! `thinking_level` (one of `off`, `minimal`, `low`, `medium`, `high`,
+//! `xhigh`, `max`) optionally overrides the reviewer-catalog default
+//! for every session on the profile; unsupported levels are clamped to
+//! the model's capabilities (reported by the pi host) with a
+//! diagnostic.
+//!
 //! [model_profiles.strong]
 //! model = "my-strong-model"
 //! endpoint = "http://10.0.0.5:8080/v1"
@@ -45,6 +51,7 @@
 //!
 //! [performance]
 //! max_concurrent_reviewers = 4
+//! reviewer_timeout_ms = 300000
 //! ```
 
 /// Check a contributor ID against the frozen slug pattern.
@@ -81,6 +88,15 @@ pub const OPTIONAL_PROFILE_NAMES: [&str; 2] = ["fast", "strongest"];
 /// review host (plan milestone 29: reviewer concurrency obeys config).
 /// The default lets a full frozen jury (2–4 reviewers) run in parallel.
 pub const DEFAULT_MAX_CONCURRENT_REVIEWERS: usize = 4;
+
+/// Default whole-session budget of one reviewer session (5 minutes).
+pub const DEFAULT_REVIEWER_TIMEOUT_MS: u64 = 300_000;
+
+/// Lower bound for `performance.reviewer_timeout_ms` (1 minute).
+pub const MIN_REVIEWER_TIMEOUT_MS: u64 = 60_000;
+
+/// Upper bound for `performance.reviewer_timeout_ms` (1 hour).
+pub const MAX_REVIEWER_TIMEOUT_MS: u64 = 3_600_000;
 
 /// Upper bound accepted for `performance.max_concurrent_reviewers`.
 /// Reviews never run more reviewers than the frozen jury maximum; the
@@ -204,12 +220,21 @@ pub struct PerformanceConfig {
     /// concurrently. Bounded below by 1 (no unbounded parallelism) and
     /// above by [`MAX_CONCURRENT_REVIEWERS_LIMIT`].
     pub max_concurrent_reviewers: usize,
+    /// Whole-session budget of one reviewer session in milliseconds
+    /// (all turns: thinking, lookups, structured-answer repairs). The
+    /// frozen single retry uses the same budget. Bounded below by
+    /// [`MIN_REVIEWER_TIMEOUT_MS`] and above by
+    /// [`MAX_REVIEWER_TIMEOUT_MS`]; the default
+    /// ([`DEFAULT_REVIEWER_TIMEOUT_MS`]) suits low/medium thinking
+    /// levels — raise it for `xhigh`/`max` thinking on large contexts.
+    pub reviewer_timeout_ms: u64,
 }
 
 impl Default for PerformanceConfig {
     fn default() -> Self {
         PerformanceConfig {
             max_concurrent_reviewers: DEFAULT_MAX_CONCURRENT_REVIEWERS,
+            reviewer_timeout_ms: DEFAULT_REVIEWER_TIMEOUT_MS,
         }
     }
 }
@@ -391,6 +416,19 @@ fn validate_layer(layer: &PartialConfig, path: &Path, origin: Origin) -> Result<
         ));
     }
 
+    if let Some(performance) = &layer.performance
+        && let Some(timeout) = performance.reviewer_timeout_ms
+        && !(MIN_REVIEWER_TIMEOUT_MS..=MAX_REVIEWER_TIMEOUT_MS).contains(&timeout)
+    {
+        return Err(invalid(
+            path,
+            format!(
+                "performance.reviewer_timeout_ms must be between \
+                 {MIN_REVIEWER_TIMEOUT_MS} and {MAX_REVIEWER_TIMEOUT_MS}, got {timeout}"
+            ),
+        ));
+    }
+
     Ok(())
 }
 
@@ -460,6 +498,18 @@ fn validate_merged(config: &NisseConfig, blame: Option<&Path>) -> Result<(), Con
         }
     }
 
+    if !(MIN_REVIEWER_TIMEOUT_MS..=MAX_REVIEWER_TIMEOUT_MS)
+        .contains(&config.performance.reviewer_timeout_ms)
+    {
+        return Err(invalid(
+            path,
+            format!(
+                "performance.reviewer_timeout_ms must be between \
+                 {MIN_REVIEWER_TIMEOUT_MS} and {MAX_REVIEWER_TIMEOUT_MS}, got {}",
+                config.performance.reviewer_timeout_ms
+            ),
+        ));
+    }
     if !(1..=MAX_CONCURRENT_REVIEWERS_LIMIT).contains(&config.performance.max_concurrent_reviewers)
     {
         return Err(invalid(
@@ -519,6 +569,7 @@ struct PartialLearning {
 #[serde(deny_unknown_fields)]
 struct PartialPerformance {
     max_concurrent_reviewers: Option<usize>,
+    reviewer_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -556,10 +607,13 @@ impl PartialConfig {
         {
             config.learning.enabled = enabled;
         }
-        if let Some(performance) = self.performance
-            && let Some(max) = performance.max_concurrent_reviewers
-        {
-            config.performance.max_concurrent_reviewers = max;
+        if let Some(performance) = self.performance {
+            if let Some(max) = performance.max_concurrent_reviewers {
+                config.performance.max_concurrent_reviewers = max;
+            }
+            if let Some(timeout) = performance.reviewer_timeout_ms {
+                config.performance.reviewer_timeout_ms = timeout;
+            }
         }
         if let Some(directories) = self.directories
             && let Some(allow_paths) = directories.allow_paths
@@ -824,6 +878,36 @@ model = "repo-strong"
         );
         let err = load_config(Some(&path), None).unwrap_err();
         assert!(matches!(err, ConfigError::Malformed { .. }), "{err}");
+    }
+
+    #[test]
+    fn reviewer_timeout_ms_validated_and_applied() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // In-range values apply.
+        let path = write_config(dir.path(), "[performance]\nreviewer_timeout_ms = 600000\n");
+        let config = load_config(Some(&path), None).unwrap();
+        assert_eq!(config.config.performance.reviewer_timeout_ms, 600_000);
+
+        // Out-of-range values are rejected with a typed error.
+        for bad in ["59999", "3600001"] {
+            let path = write_config(
+                dir.path(),
+                &format!("[performance]\nreviewer_timeout_ms = {bad}\n"),
+            );
+            let err = load_config(Some(&path), None).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("performance.reviewer_timeout_ms must be between"),
+                "{bad}: {err}"
+            );
+        }
+
+        // The default matches the compiled constant.
+        assert_eq!(
+            NisseConfig::default().performance.reviewer_timeout_ms,
+            DEFAULT_REVIEWER_TIMEOUT_MS
+        );
     }
 
     #[test]

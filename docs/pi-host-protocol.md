@@ -1,6 +1,6 @@
 # Pi Review Host Protocol
 
-The protocol spoken between Nisse Core (Rust) and the Pi review host (`runtime/pi-host`, TypeScript). Frozen by [PLAN.md](../PLAN.md) sections 20 and 21; protocol version **1**.
+The protocol spoken between Nisse Core (Rust) and the Pi review host (`runtime/pi-host`, TypeScript). Frozen by [PLAN.md](../PLAN.md) sections 20 and 21 plus the version-2 extension below; protocol version **2**. Version 2 added exactly one exchange: every `host_config` is answered by `model_capabilities` (the host's resolution of each configured profile against the local Pi model catalog, reporting the model's supported thinking levels). Everything else is unchanged from version 1.
 
 ## Transport
 
@@ -18,7 +18,7 @@ Every message (both directions) is a single-line JSON object:
 {"protocol_version":1,"id":"<unique>","type":"<message type>", ...payload}
 ```
 
-- `protocol_version` — must be exactly `1`; mismatches are typed errors / `host_error{code="unsupported_protocol_version"}`.
+- `protocol_version` — must be exactly `2`; mismatches are typed errors / `host_error{code="unsupported_protocol_version"}`.
 - `id` — unique per sender. The `tool_request` envelope `id` is the `request_id` echoed by `tool_response`.
 - `type` — one of the frozen vocabulary names below.
 - Payload fields are flattened into the same object.
@@ -45,6 +45,7 @@ Host → Nisse Core:
 | type | status |
 | --- | --- |
 | `host_ready` | active |
+| `model_capabilities` | active (version 2) |
 | `reviewer_started` | active |
 | `reviewer_completed` | active |
 | `reviewer_failed` | active |
@@ -76,6 +77,16 @@ Resolved model profiles the host may use for reviewer sessions, mapped from trus
 ```
 
 Sent once at startup, before any other message. `runtime` is `fake` or `pi`.
+
+### `model_capabilities` (host → core, version 2)
+
+```json
+{"host_config_id":"cfg-1","profiles":{"standard":{"model":"zai/glm-5.3","supported_thinking_levels":["low","high","max"]}},"unresolved":{"fast":"model `x/y` is not registered in the local model catalog"}}
+```
+
+Sent exactly once for every `host_config` the host processes (including re-sent tables), echoing the triggering message's `id` in `host_config_id` so replies always correlate to their config. `profiles` maps each configured profile to its resolved `provider/model-id` and the thinking levels its Pi catalog entry supports, derived with pi's own `getSupportedThinkingLevels` semantics from the model's `thinkingLevelMap` (a non-reasoning model reports `["off"]`; `xhigh`/`max` require an explicit mapping; omitted keys pass through). Profiles whose model cannot be resolved are listed in `unresolved` with a reason — the host never guesses. The Nisse core routes every session level through this report (clamping unsupported levels with a diagnostic), so an invalid (model, thinking level) pair can never be constructed.
+
+The deterministic test doubles (`--runtime fake`, scripted sessions via `NISSE_PI_SESSION_SCRIPT`) never resolve real models: they report every configured profile as supporting all seven levels. The test-only `NISSE_PI_HOST_CAPABILITIES` environment variable (a JSON object of profile name to non-empty level array) overrides the reported map in exactly those modes; the real Pi runtime ignores it entirely, and a malformed value in an active mode fails loudly (`host_error` + exit) rather than silently weakening tests.
 
 ### `start_review` (core → host)
 

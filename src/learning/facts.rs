@@ -489,6 +489,7 @@ pub fn process_fact_candidates(
     existing_records: &[StoredRecord],
     contributor_id: Option<&str>,
     options: &FactProcessingOptions,
+    thinking: &crate::jury::thinking::ThinkingPolicy,
 ) -> FactProcessingSummary {
     let store = RecordStore::new(&ctx.worktree_root);
     let mut known = active_fact_keys(existing_records);
@@ -560,15 +561,35 @@ pub fn process_fact_candidates(
             }
 
             // Step 2: independent verification (a separate session from
-            // the proposing reviewer).
-            let payload = FactVerificationPayload {
-                verification_id: new_ulid(),
-                timeout_ms: options.verification_timeout_ms,
-                model_profile: options.model_profile.clone(),
-                thinking_level: options.thinking_level,
-                claim: validated.claim.clone(),
-                evidence: validated.evidence.clone(),
+            // the proposing reviewer). The session level is routed
+            // through the thinking policy; an unusable profile is
+            // forced `insufficient` — the same fail-safe as a session
+            // failure — and the candidate stays pending.
+            let verification_level = crate::jury::thinking::ThinkingPolicy::resolve_job_level(
+                Some(thinking),
+                &options.model_profile,
+                options.thinking_level,
+            );
+            let payload = match verification_level {
+                Ok(thinking_level) => Some(FactVerificationPayload {
+                    verification_id: new_ulid(),
+                    timeout_ms: options.verification_timeout_ms,
+                    model_profile: options.model_profile.clone(),
+                    thinking_level,
+                    claim: validated.claim.clone(),
+                    evidence: validated.evidence.clone(),
+                }),
+                Err(reason) => {
+                    summary.diagnostics.push(format!(
+                        "fact candidate from `{reviewer_id}` could not be verified: {reason}"
+                    ));
+                    summary
+                        .outcomes
+                        .push((reviewer_id.clone(), CandidateOutcome::Pending(reason)));
+                    continue;
+                }
             };
+            let payload = payload.expect("verification payload exists after level resolution");
             let verification = match host.start_fact_verification(&payload).and_then(|()| {
                 host.complete_fact_verification(
                     &payload.verification_id,

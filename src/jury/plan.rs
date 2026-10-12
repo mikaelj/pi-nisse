@@ -128,7 +128,9 @@ pub fn build_jury_plan(
 /// Build the frozen INVESTIGATION jury plan (PLAN_INVESTIGATION.md and
 /// the section 17 amendment):
 ///
-///     quality + claim-skeptic + coverage-auditor + one domain reviewer
+/// ```text
+/// quality + claim-skeptic + coverage-auditor + one domain reviewer
+/// ```
 ///
 /// The domain seat takes the best-scoring specialist from the routing
 /// decision (exactly one), or the dynamic fallback when no specialist

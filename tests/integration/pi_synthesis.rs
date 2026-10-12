@@ -118,6 +118,7 @@ fn fake_same_verdict_merges_and_invents_nothing() {
         ReviewKind::Code,
         &cross_reviewer_pair(),
         &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     )
     .expect("consolidation failed");
 
@@ -168,6 +169,7 @@ fn fake_different_uncertain_and_failure_never_merge() {
         ReviewKind::Code,
         &cross_reviewer_pair(),
         &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     )
     .expect("consolidation failed");
     assert_eq!(result.findings.len(), 2);
@@ -183,6 +185,7 @@ fn fake_different_uncertain_and_failure_never_merge() {
         ReviewKind::Code,
         &cross_reviewer_pair(),
         &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     )
     .expect("consolidation failed");
     assert_eq!(result.findings.len(), 2);
@@ -207,6 +210,7 @@ fn fake_different_uncertain_and_failure_never_merge() {
         ReviewKind::Code,
         &cross_reviewer_pair(),
         &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     )
     .expect("consolidation failed");
     assert_eq!(result.findings.len(), 2);
@@ -237,8 +241,14 @@ fn identical_claims_group_without_equivalence_checks() {
         validated("quality", "q-1", "queue drops the last item"),
         validated("security", "s-1", "Queue drops the last  item"),
     ];
-    let result =
-        consolidate(&mut host, ReviewKind::Plan, &findings, &options()).expect("consolidation");
+    let result = consolidate(
+        &mut host,
+        ReviewKind::Plan,
+        &findings,
+        &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
+    )
+    .expect("consolidation");
     assert_eq!(result.findings.len(), 1);
     assert!(result.findings[0].cross_validated);
 
@@ -262,7 +272,14 @@ fn empty_findings_skip_the_synthesis_session_entirely() {
     .expect("spawn failed");
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
 
-    let result = consolidate(&mut host, ReviewKind::Code, &[], &options()).expect("consolidation");
+    let result = consolidate(
+        &mut host,
+        ReviewKind::Code,
+        &[],
+        &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
+    )
+    .expect("consolidation");
     assert!(result.findings.is_empty());
     assert!(result.diagnostics.is_empty());
     assert_eq!(result.summary, "No validated findings.");
@@ -335,8 +352,14 @@ fn scripted_pi_synthesis_applies_valid_wording() {
     host.send_host_config(&host_config())
         .expect("host_config failed");
 
-    let result = consolidate(&mut host, ReviewKind::Code, &findings, &options())
-        .expect("consolidation failed");
+    let result = consolidate(
+        &mut host,
+        ReviewKind::Code,
+        &findings,
+        &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
+    )
+    .expect("consolidation failed");
 
     assert_eq!(result.findings.len(), 1, "{:?}", result.diagnostics);
     let final_finding = &result.findings[0];
@@ -393,8 +416,14 @@ fn scripted_pi_synthesis_invention_and_raise_are_rejected() {
     host.send_host_config(&host_config())
         .expect("host_config failed");
 
-    let result = consolidate(&mut host, ReviewKind::Code, &findings, &options())
-        .expect("consolidation failed");
+    let result = consolidate(
+        &mut host,
+        ReviewKind::Code,
+        &findings,
+        &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
+    )
+    .expect("consolidation failed");
 
     // The different verdict kept both findings separate.
     assert_eq!(result.findings.len(), 2);
@@ -484,7 +513,7 @@ fn equivalence_check_messages_flow_over_the_boundary() {
 
     // A malformed equivalence payload is a protocol-level host error.
     host.send_raw_line(
-        r#"{"protocol_version":1,"id":"m-bad","type":"start_finding_equivalence_check","check_id":""}"#,
+        r#"{"protocol_version":2,"id":"m-bad","type":"start_finding_equivalence_check","check_id":""}"#,
     )
     .expect("send malformed");
     match host
@@ -523,8 +552,14 @@ fn synthesis_session_failure_falls_back_deterministically() {
     host.wait_ready(READY_TIMEOUT).expect("host_ready expected");
 
     let findings = vec![validated("quality", "q-1", "single finding")];
-    let result = consolidate(&mut host, ReviewKind::Code, &findings, &options())
-        .expect("consolidation failed");
+    let result = consolidate(
+        &mut host,
+        ReviewKind::Code,
+        &findings,
+        &options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
+    )
+    .expect("consolidation failed");
 
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].title, "Title q-1");

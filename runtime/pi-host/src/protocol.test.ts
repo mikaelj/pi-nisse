@@ -24,8 +24,8 @@ import {
   ValidationError,
 } from "./structured.ts";
 
-test("protocol version is frozen at 1", () => {
-  assert.equal(PROTOCOL_VERSION, 1);
+test("protocol version is frozen at 2", () => {
+  assert.equal(PROTOCOL_VERSION, 2);
 });
 
 test("vocabularies match the frozen plan section 21", () => {
@@ -42,6 +42,7 @@ test("vocabularies match the frozen plan section 21", () => {
   ]);
   assert.deepEqual(HOST_TO_RUST_TYPES, [
     "host_ready",
+    "model_capabilities",
     "reviewer_started",
     "reviewer_completed",
     "reviewer_failed",
@@ -57,7 +58,7 @@ test("vocabularies match the frozen plan section 21", () => {
 
 test("decode accepts a well-formed envelope and separates payload fields", () => {
   const message = decodeIncomingMessage(
-    '{"protocol_version":1,"id":"m-1","type":"cancel","review_id":"01J8Z"}',
+    '{"protocol_version":2,"id":"m-1","type":"cancel","review_id":"01J8Z"}',
   );
   assert.equal(message.id, "m-1");
   assert.equal(message.type, "cancel");
@@ -70,12 +71,12 @@ test("decode rejects malformed lines with stable codes", () => {
     ["not json", ERROR_CODES.malformedMessage],
     ["[1,2]", ERROR_CODES.malformedMessage],
     [
-      '{"protocol_version":2,"id":"m-1","type":"cancel"}',
+      '{"protocol_version":3,"id":"m-1","type":"cancel"}',
       ERROR_CODES.unsupportedProtocolVersion,
     ],
-    ['{"protocol_version":1,"type":"cancel"}', ERROR_CODES.malformedMessage],
-    ['{"protocol_version":1,"id":"","type":"cancel"}', ERROR_CODES.malformedMessage],
-    ['{"protocol_version":1,"id":"m-1","type":"banana"}', ERROR_CODES.unknownMessage],
+    ['{"protocol_version":2,"type":"cancel"}', ERROR_CODES.malformedMessage],
+    ['{"protocol_version":2,"id":"","type":"cancel"}', ERROR_CODES.malformedMessage],
+    ['{"protocol_version":2,"id":"m-1","type":"banana"}', ERROR_CODES.unknownMessage],
   ];
   for (const [line, code] of cases) {
     assert.throws(() => decodeIncomingMessage(line), (err: unknown) => {
@@ -90,7 +91,7 @@ test("encode produces single-line envelopes with the frozen fields", () => {
   const line = encodeMessage("host_ready", "h-1", { runtime: "fake" });
   assert.ok(!line.includes("\n"));
   const value = JSON.parse(line) as Record<string, unknown>;
-  assert.equal(value["protocol_version"], 1);
+  assert.equal(value["protocol_version"], 2);
   assert.equal(value["id"], "h-1");
   assert.equal(value["type"], "host_ready");
   assert.equal(value["runtime"], "fake");

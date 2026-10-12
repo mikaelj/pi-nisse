@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::write_user_config;
+
 use super::run_nisse_in_with_env;
 use tempfile::TempDir;
 
@@ -448,4 +450,71 @@ fn plan_review_outside_a_repository_fails_with_a_typed_error() {
             .contains("not inside a Git repository"),
         "stderr must require repository context"
     );
+}
+
+#[test]
+fn reviewer_levels_are_clamped_to_the_reported_model_capabilities() {
+    let (_dir, repo, home) = rust_repo("plan-clamp");
+    // Both profiles configured, with an override on `standard` that the
+    // restricted capabilities will clamp (max -> low).
+    write_user_config(
+        home.path(),
+        "[model_profiles.standard]
+model = \"zai/glm-5.3\"
+thinking_level = \"max\"
+
+[model_profiles.strong]
+model = \"zai/glm-5.3\"
+
+[performance]
+reviewer_timeout_ms = 120000
+",
+    );
+    // The fake host reports both profiles as supporting only `low`, so
+    // every reviewer default (medium/high) and the `max` override clamp
+    // down to `low` with visible diagnostics.
+    let (ok, _stdout, stderr) = review_plan_file(
+        &repo,
+        &home,
+        QUEUE_PLAN,
+        &[(
+            "NISSE_PI_HOST_CAPABILITIES",
+            r#"{"standard":["low"],"strong":["low"]}"#,
+        )],
+    );
+    assert!(ok, "review failed: {stderr}");
+    // The clamp notes are recorded in the persisted review event (text
+    // output does not render diagnostics).
+    let event = review_event_payload(&repo);
+    let diagnostics: Vec<String> = event["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|value| value.as_str().expect("diagnostic text").to_string())
+        .collect();
+    // Reviewer defaults (medium or high, depending on the routed jury)
+    // clamp down to the single supported level.
+    assert!(
+        diagnostics.iter().any(
+            |note| note.contains("adjusted to low for model `zai/glm-5.3`")
+                && !note.contains("max adjusted")
+        ),
+        "expected a reviewer-default clamp note; diagnostics: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.iter().any(|note| note.contains(
+            "thinking level max adjusted to low for model `zai/glm-5.3` (profile `standard`)"
+        )),
+        "expected the configured max override to clamp; diagnostics: {diagnostics:?}"
+    );
+    // The specs persisted in the same event carry the effective levels.
+    let specs = event["specs"].as_array().expect("specs array");
+    for spec in specs {
+        assert_eq!(
+            spec["thinking_level"], "low",
+            "every reviewer spec must carry the clamped level: {spec}"
+        );
+        // The configured session budget flows into every spec.
+        assert_eq!(spec["timeout_ms"], 120_000, "spec budget: {spec}");
+    }
 }

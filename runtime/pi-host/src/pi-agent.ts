@@ -55,7 +55,7 @@ function loadSdk(): Promise<SdkModule> {
 }
 
 /** Create the shared model runtime once (trusted local configuration). */
-function loadModelRuntime(): NonNullable<typeof modelRuntimePromise> {
+export function loadModelRuntime(): NonNullable<typeof modelRuntimePromise> {
   modelRuntimePromise ??= loadSdk().then((sdk) =>
     sdk.ModelRuntime.create({ allowModelNetwork: false }),
   );

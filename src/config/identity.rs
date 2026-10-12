@@ -174,7 +174,9 @@ fn prompt_identity(
 ///
 /// When the file already exists it is rewritten through a TOML
 /// value round-trip so other settings survive; comments and formatting
-/// are not preserved. The write is atomic.
+/// are not preserved — except the model-profile hint, which is
+/// re-appended whenever the written config defines no model profiles
+/// (see [`MODEL_PROFILE_HINT`]). The write is atomic.
 pub fn save_identity(path: &Path, id: &str) -> Result<(), IdentityError> {
     save_identity_seeded(path, id, legacy_seed_path().as_deref())
 }
@@ -219,11 +221,44 @@ pub fn save_identity_seeded(
 
     let rendered = toml::to_string(&table)
         .map_err(|err| fail(format!("cannot render the updated config: {err}")))?;
+    let rendered = with_model_profile_hint(rendered);
     ensure_config_dir(path)?;
     atomic_write_replace_private(path, rendered.as_bytes())
         .map_err(|source| fail(format!("atomic write failed: {source}")))?;
     restrict_config_file_permissions(path);
     Ok(())
+}
+
+/// The commented model-profile hint appended to written configs that
+/// define no `[model_profiles.*]` tables, so a fresh `nisse doctor`
+/// setup documents the thinking-level vocabulary where it will be
+/// used. The round-trip strips comments, so the hint is re-appended on
+/// every write while it still applies and never duplicated.
+const MODEL_PROFILE_HINT: &str = "\
+# --- Model profiles (optional) ---------------------------------------
+# thinking_level: one of \"off\", \"minimal\", \"low\", \"medium\", \"high\",
+# \"xhigh\", \"max\". When set it overrides reviewer-catalog defaults for
+# sessions on that profile; unsupported values are clamped to the model's
+# reported capabilities with a diagnostic. Example:
+#
+# [model_profiles.standard]
+# model = \"provider/model-id\"
+# thinking_level = \"high\"
+";
+
+/// Append [`MODEL_PROFILE_HINT`] to a rendered config that defines no
+/// model profiles; a config that defines any passes through unchanged.
+/// Shared by every config writer (identity saves and consent persists).
+pub(crate) fn with_model_profile_hint(rendered: String) -> String {
+    if rendered.contains("[model_profiles") {
+        return rendered;
+    }
+    let mut rendered = rendered;
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push_str(MODEL_PROFILE_HINT);
+    rendered
 }
 
 /// The legacy config used to seed a brand-new dotfile, when one exists.
@@ -703,6 +738,50 @@ mod tests {
         assert_eq!(
             suggest_identity(&[alice, "bob".to_string()], Some("Mikael J")),
             Some("Mikael-J".to_string())
+        );
+    }
+
+    #[test]
+    fn fresh_writes_carry_the_model_profile_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        save_identity_seeded(&path, "alice", None).expect("save");
+        let contents = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            contents.contains("thinking_level: one of \"off\", \"minimal\", \"low\","),
+            "the hint documents the seven-level vocabulary: {contents}"
+        );
+        assert!(contents.contains("# [model_profiles.standard]"));
+
+        // Re-saving keeps exactly one hint (the round-trip strips the
+        // old one and re-appends it).
+        save_identity_seeded(&path, "bob", None).expect("re-save");
+        let contents = std::fs::read_to_string(&path).expect("re-read");
+        assert_eq!(
+            contents.matches("Model profiles (optional)").count(),
+            1,
+            "the hint is never duplicated"
+        );
+    }
+
+    #[test]
+    fn configs_with_model_profiles_get_no_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[model_profiles.standard]\nmodel = \"zai/glm-5.3\"\nthinking_level = \"max\"\n",
+        )
+        .expect("seed");
+        save_identity_seeded(&path, "alice", None).expect("save");
+        let contents = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !contents.contains("Model profiles (optional)"),
+            "a real model_profiles config gets no appended hint: {contents}"
+        );
+        assert!(
+            contents.contains("thinking_level = \"max\""),
+            "settings survive"
         );
     }
 }

@@ -1,0 +1,93 @@
+{
+  "_comment": "Shared golden fixture for the thinking-level vocabulary, per-model supported-level derivation, and clamp semantics. Consumed by the Rust suite (src/domain/model.rs, src/jury/thinking.rs) and the pi-host TypeScript suite (runtime/pi-host/src). Cases encode pi SDK 0.85.1 behavior (EXTENDED_THINKING_LEVELS order, clampThinkingLevel's at-or-above-then-below scan, getSupportedThinkingLevels' xhigh/max key-presence rule); re-derive from the SDK source at every pin bump.",
+  "order": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  "cases": [
+    {
+      "name": "zai-glm-5.3",
+      "reasoning": true,
+      "thinking_level_map": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": null,
+        "high": "high",
+        "xhigh": null,
+        "max": "max"
+      },
+      "expected_supported": ["low", "high", "max"],
+      "clamps": [
+        ["off", "low"],
+        ["minimal", "low"],
+        ["low", "low"],
+        ["medium", "high"],
+        ["high", "high"],
+        ["xhigh", "max"],
+        ["max", "max"]
+      ]
+    },
+    {
+      "name": "reasoning-no-map-passthrough",
+      "reasoning": true,
+      "thinking_level_map": {},
+      "expected_supported": ["off", "minimal", "low", "medium", "high"],
+      "clamps": [
+        ["off", "off"],
+        ["medium", "medium"],
+        ["high", "high"],
+        ["xhigh", "high"],
+        ["max", "high"]
+      ]
+    },
+    {
+      "name": "anthropic-like-xhigh",
+      "reasoning": true,
+      "thinking_level_map": {
+        "off": null,
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": null
+      },
+      "expected_supported": ["low", "medium", "high", "xhigh"],
+      "clamps": [
+        ["off", "low"],
+        ["minimal", "low"],
+        ["medium", "medium"],
+        ["max", "xhigh"]
+      ]
+    },
+    {
+      "name": "reasoning-lows-only",
+      "reasoning": true,
+      "thinking_level_map": {
+        "off": "none",
+        "low": "low",
+        "medium": null,
+        "high": null,
+        "xhigh": null,
+        "max": null
+      },
+      "expected_supported": ["off", "minimal", "low"],
+      "clamps": [
+        ["medium", "low"],
+        ["high", "low"],
+        ["max", "low"]
+      ]
+    },
+    {
+      "name": "non-reasoning",
+      "reasoning": false,
+      "thinking_level_map": {},
+      "expected_supported": ["off"],
+      "clamps": [
+        ["off", "off"],
+        ["low", "off"],
+        ["medium", "off"],
+        ["high", "off"],
+        ["max", "off"]
+      ]
+    }
+  ]
+}

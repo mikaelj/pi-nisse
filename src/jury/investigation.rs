@@ -74,6 +74,10 @@ pub struct InvestigationReviewOptions {
     pub contributor_id: Option<String>,
     /// Reviewer-concurrency bound (plan milestone 29).
     pub max_concurrent_reviewers: u32,
+    /// Whole-session budget of one reviewer session (all turns; the
+    /// single retry uses the same budget). Defaults to
+    /// [`crate::config::DEFAULT_REVIEWER_TIMEOUT_MS`].
+    pub reviewer_timeout_ms: u64,
 }
 
 /// One reviewer report's validated assessments (ids assigned by Rust).
@@ -98,6 +102,8 @@ pub enum InvestigationReviewError {
     Retrieval(#[from] crate::retrieval::RetrievalError),
     #[error("host: {0}")]
     Host(#[from] crate::jury::host::HostError),
+    #[error("thinking policy: {0}")]
+    ThinkingPolicy(String),
     #[error("no valid investigation reports: {failures:?}")]
     TooFewValidReports { failures: Vec<String> },
     #[error("routing: {0}")]
@@ -489,15 +495,43 @@ pub fn run_investigation_review(
         .with_max_concurrent_reviewers(options.max_concurrent_reviewers);
     host.send_host_config(&host_config)?;
 
-    // 12. Dynamic-domain description for the fallback seat.
+    // 11b. Thinking policy (protocol version 2): every session level
+    // below is routed through the host-reported capabilities, so an
+    // invalid (model, level) pair can never be constructed.
+    let capabilities = host.wait_model_capabilities(crate::jury::review::HOST_READY_TIMEOUT)?;
+    let thinking =
+        crate::jury::thinking::ThinkingPolicy::build(&capabilities, &options.model_profiles);
+    diagnostics.extend(thinking.warnings().iter().cloned());
+
+    // 12. Dynamic-domain description for the fallback seat. The
+    // session level is routed through the thinking policy; an unusable
+    // profile skips the session and falls back to the static template.
     let mut domain_description: Option<crate::domain::reviewer::DynamicDomainDescription> = None;
-    if jury.uses_dynamic_fallback() {
+    let dynamic_level = if jury.uses_dynamic_fallback() {
+        let expert = catalog.dynamic_domain_expert();
+        match crate::jury::thinking::ThinkingPolicy::resolve_job_level(
+            Some(&thinking),
+            &expert.default_model_profile,
+            expert.default_thinking_level,
+        ) {
+            Ok(level) => Some(level),
+            Err(reason) => {
+                diagnostics.push(format!(
+                    "dynamic domain description fell back to the static template: {reason}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(thinking_level) = dynamic_level {
         let expert = catalog.dynamic_domain_expert();
         let payload = crate::jury::protocol::DomainDescriptionPayload {
             description_id: new_ulid(),
             timeout_ms: 120_000,
             model_profile: expert.default_model_profile.clone(),
-            thinking_level: expert.default_thinking_level,
+            thinking_level,
             descriptors: descriptors.clone(),
             changed_paths: Vec::new(),
             languages: routing_input.languages.clone(),
@@ -516,34 +550,48 @@ pub fn run_investigation_review(
     // coverage-auditor task-first; both get both inputs.
     let task_entry = input_entry(TaskOrResult::Task, &inputs.task);
     let result_entry = input_entry(TaskOrResult::Result, &inputs.result);
-    let specs: Vec<crate::domain::reviewer::ReviewerExecutionSpec> = jury
-        .seats
-        .iter()
-        .map(|seat| {
-            let profile = catalog
-                .profile(&seat.reviewer_id)
-                .expect("jury construction validated every seat against the catalog");
-            let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
-                domain_description.as_ref()
-            } else {
-                None
-            };
-            let framing = investigation_instructions(&seat.reviewer_id, &profile.base_instructions);
-            let seat = seat_plan(profile, framing, description);
-            let primary = match seat.reviewer.as_str() {
-                "coverage-auditor" => &task_entry,
-                _ => &result_entry,
-            };
-            let context = initial_context(
-                &[primary.clone(), task_entry.clone(), result_entry.clone()],
-                &shared_context,
-                &catalog,
-                &seat.practice_tags,
-                &crate::jury::review::INITIAL_CONTEXT_BUDGET,
-            );
-            execution_spec(profile, seat, context)
-        })
-        .collect();
+    let mut specs: Vec<crate::domain::reviewer::ReviewerExecutionSpec> =
+        Vec::with_capacity(jury.seats.len());
+    for seat in &jury.seats {
+        let profile = catalog
+            .profile(&seat.reviewer_id)
+            .expect("jury construction validated every seat against the catalog");
+        let description = if seat.reviewer_id == DYNAMIC_DOMAIN_EXPERT_ID {
+            domain_description.as_ref()
+        } else {
+            None
+        };
+        let framing = investigation_instructions(&seat.reviewer_id, &profile.base_instructions);
+        let seat = seat_plan(profile, framing, description);
+        let primary = match seat.reviewer.as_str() {
+            "coverage-auditor" => &task_entry,
+            _ => &result_entry,
+        };
+        let context = initial_context(
+            &[primary.clone(), task_entry.clone(), result_entry.clone()],
+            &shared_context,
+            &catalog,
+            &seat.practice_tags,
+            &crate::jury::review::INITIAL_CONTEXT_BUDGET,
+        );
+        let (level, note) = thinking
+            .resolve(
+                &profile.default_model_profile,
+                None,
+                profile.default_thinking_level,
+            )
+            .map_err(InvestigationReviewError::ThinkingPolicy)?;
+        if let Some(note) = note {
+            diagnostics.push(note);
+        }
+        specs.push(execution_spec(
+            profile,
+            seat,
+            context,
+            level,
+            options.reviewer_timeout_ms,
+        ));
+    }
 
     // 13. Execute reviewers independently (one-retry policy).
     let review_id = new_ulid();
@@ -558,8 +606,12 @@ pub fn run_investigation_review(
         ReviewerToolServer::new(review_id.clone(), &specs, retriever, tool_reader);
     let mut serve =
         |request: &ToolRequestPayload| -> ToolResponsePayload { tool_server.handle("", request) };
-    let outcomes =
-        execute_investigation(&mut host, &payload, &mut serve, INVESTIGATION_ROUND_TIMEOUT)?;
+    let outcomes = execute_investigation(
+        &mut host,
+        &payload,
+        &mut serve,
+        crate::jury::review::review_round_timeout(options.reviewer_timeout_ms),
+    )?;
 
     // 14. At least two valid independent reports.
     let mut reports: Vec<(String, InvestigationReport)> = Vec::new();
@@ -771,6 +823,7 @@ pub fn run_investigation_review(
         &records,
         options.contributor_id.as_deref(),
         &crate::learning::facts::FactProcessingOptions::default(),
+        &thinking,
     );
     diagnostics.extend(fact_summary.diagnostics);
 

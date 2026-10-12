@@ -427,6 +427,7 @@ pub struct RevalidationOutcome {
 ///
 /// Durable updates require a contributor identity (plan section 44);
 /// without one the attempt stays pending local state.
+#[allow(clippy::too_many_arguments)]
 pub fn revalidate_fact(
     host: &mut HostProcess,
     ctx: &RepoContext,
@@ -435,6 +436,7 @@ pub fn revalidate_fact(
     fact: &FactRecord,
     contributor: Option<&str>,
     options: &RevalidationOptions,
+    thinking: &crate::jury::thinking::ThinkingPolicy,
 ) -> RevalidationOutcome {
     let refreshed = refresh_evidence(validation.reader, validation.object_format, fact);
     let has_current_source = refreshed
@@ -465,11 +467,30 @@ pub fn revalidate_fact(
     // semantics). A session failure is forced `insufficient` — the
     // same fail-safe as candidate verification — and never fails the
     // caller.
+    // The session level is routed through the thinking policy; an
+    // unusable profile is forced `insufficient` — the same fail-safe
+    // as a session failure.
+    let thinking_level = match crate::jury::thinking::ThinkingPolicy::resolve_job_level(
+        Some(thinking),
+        &options.model_profile,
+        options.thinking_level,
+    ) {
+        Ok(level) => level,
+        Err(reason) => {
+            return RevalidationOutcome {
+                fact_id: fact.id.clone(),
+                verdict: FactVerificationVerdict::Insufficient,
+                new_record_id: None,
+                failure: Some(reason),
+                reason: None,
+            };
+        }
+    };
     let payload = FactVerificationPayload {
         verification_id: new_ulid(),
         timeout_ms: options.timeout_ms,
         model_profile: options.model_profile.clone(),
-        thinking_level: options.thinking_level,
+        thinking_level,
         claim: fact.text.clone(),
         evidence: refreshed.evidence.clone(),
     };

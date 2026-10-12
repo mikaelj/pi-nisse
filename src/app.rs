@@ -202,6 +202,7 @@ impl App {
         options.routing_provider = environment.routing_provider;
         options.embedding_provider = environment.embedding_provider;
         options.max_concurrent_reviewers = environment.max_concurrent_reviewers;
+        options.reviewer_timeout_ms = environment.reviewer_timeout_ms;
 
         let outcome = run_plan_review(&ctx, &resolved, &paths, &plan, &options)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review plan failed: {err}")))?;
@@ -235,6 +236,7 @@ impl App {
         options.routing_provider = environment.routing_provider;
         options.embedding_provider = environment.embedding_provider;
         options.max_concurrent_reviewers = environment.max_concurrent_reviewers;
+        options.reviewer_timeout_ms = environment.reviewer_timeout_ms;
 
         let outcome = run_code_review(&ctx, &resolved, &paths, &options)
             .map_err(|err| AppError::Other(anyhow::anyhow!("review code failed: {err}")))?;
@@ -276,6 +278,7 @@ impl App {
             routing_provider: providers.routing,
             embedding_provider: providers.embeddings,
             max_concurrent_reviewers: loaded.config.performance.max_concurrent_reviewers as u32,
+            reviewer_timeout_ms: loaded.config.performance.reviewer_timeout_ms,
         })
     }
 
@@ -528,6 +531,7 @@ impl App {
             embedding_provider: environment.embedding_provider,
             contributor_id: environment.contributor_id,
             max_concurrent_reviewers: environment.max_concurrent_reviewers,
+            reviewer_timeout_ms: environment.reviewer_timeout_ms,
         };
         pipeline::run_investigation_review(
             &ctx,
@@ -777,6 +781,16 @@ impl App {
             );
             host.send_host_config(&host_config)
                 .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+            // Thinking policy (protocol version 2): every session
+            // level of the consolidation jobs is routed through the
+            // host-reported per-model capabilities.
+            let capabilities = host
+                .wait_model_capabilities(crate::jury::review::HOST_READY_TIMEOUT)
+                .map_err(|err| AppError::Other(anyhow::anyhow!("records compact failed: {err}")))?;
+            let thinking = crate::jury::thinking::ThinkingPolicy::build(
+                &capabilities,
+                &loaded.config.model_profiles,
+            );
             let summary = run_consolidation(
                 Some(&mut host),
                 &ctx,
@@ -785,11 +799,12 @@ impl App {
                 &plan,
                 &author,
                 &options,
+                Some(&thinking),
             );
             let _ = host.shutdown(std::time::Duration::from_secs(5));
             summary
         } else {
-            run_consolidation(None, &ctx, &reader, format, &plan, &author, &options)
+            run_consolidation(None, &ctx, &reader, format, &plan, &author, &options, None)
         };
 
         print_to_stdout(&consolidation::render_compact_report(&summary));
@@ -1028,6 +1043,7 @@ struct ReviewEnvironment {
     /// Bound on concurrently running reviewer sessions (plan milestone
     /// 29: reviewer concurrency obeys config).
     max_concurrent_reviewers: u32,
+    reviewer_timeout_ms: u64,
 }
 
 /// The result of the shared query operation: everything the text and

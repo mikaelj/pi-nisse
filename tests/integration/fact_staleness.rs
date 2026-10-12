@@ -315,6 +315,7 @@ fn supported_revalidation_supersedes_with_fresh_provenance() {
         &fact,
         Some("alice"),
         &fast_options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     );
     host.shutdown(Duration::from_secs(5)).ok();
 
@@ -391,6 +392,7 @@ fn contradicted_revalidation_records_an_unresolved_conflict() {
         &fact,
         Some("alice"),
         &fast_options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     );
     host.shutdown(Duration::from_secs(5)).ok();
 
@@ -441,6 +443,7 @@ fn insufficient_revalidation_changes_nothing_and_stays_pending() {
         &fact,
         Some("alice"),
         &fast_options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     );
     host.shutdown(Duration::from_secs(5)).ok();
 
@@ -493,6 +496,7 @@ fn verifier_failure_is_forced_insufficient() {
         &fact,
         Some("alice"),
         &fast_options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     );
     host.shutdown(Duration::from_secs(5)).ok();
 
@@ -534,6 +538,7 @@ fn deleted_support_is_deterministically_insufficient_without_a_session() {
         &fact,
         Some("alice"),
         &fast_options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     );
     host.shutdown(Duration::from_secs(5)).ok();
 
@@ -574,6 +579,7 @@ fn revalidation_without_identity_stays_pending() {
         &fact,
         None,
         &fast_options(),
+        &nisse::jury::thinking::ThinkingPolicy::permissive(&["standard"]),
     );
     host.shutdown(Duration::from_secs(5)).ok();
 
