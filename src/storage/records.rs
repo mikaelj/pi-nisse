@@ -1267,6 +1267,8 @@ mod tests {
         let people = dir.path().join(".nisse").join("people").join("alice");
         let outside = dir.path().join("outside.json");
         std::fs::write(&outside, b"{}").unwrap();
+        #[cfg(not(unix))]
+        let _ = &people; // the symlink target below is unix-only
         #[cfg(unix)]
         std::os::unix::fs::symlink(
             &outside,
@@ -1361,6 +1363,8 @@ mod tests {
         // Case 1: the contributor directory is a symlink out of the tree.
         let people = dir.path().join(".nisse").join("people");
         std::fs::create_dir_all(&people).unwrap();
+        #[cfg(not(unix))]
+        let _ = (&people, &outside); // the symlink targets below are unix-only
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside.path(), people.join("alice")).unwrap();
         #[cfg(unix)]
@@ -1378,6 +1382,8 @@ mod tests {
         // Case 2: the `.nisse` root itself is a symlink.
         let dir2 = tempfile::tempdir().unwrap();
         let outside2 = tempfile::tempdir().unwrap();
+        #[cfg(not(unix))]
+        let _ = (&dir2, &outside2); // the symlink target below is unix-only
         #[cfg(unix)]
         std::os::unix::fs::symlink(outside2.path(), dir2.path().join(".nisse")).unwrap();
         #[cfg(unix)]

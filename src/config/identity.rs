@@ -371,6 +371,7 @@ pub(crate) fn base_config_table_for_consent(config: &Path) -> std::io::Result<to
 /// contributor identity and, later, directory-consent allowlists). A
 /// failure to tighten permissions is not fatal: the write already
 /// succeeded atomically.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn restrict_config_file_permissions(config_file: &Path) {
     #[cfg(unix)]
     {

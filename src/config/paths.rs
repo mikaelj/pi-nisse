@@ -149,9 +149,11 @@ mod tests {
 
         let expected = dirs::home_dir().map(|home| home.join(".nisse").join("config.toml"));
         assert_eq!(path, expected);
-        assert!(path.is_some_and(|path| path.is_absolute()));
+        assert!(path.as_ref().is_some_and(|path| path.is_absolute()));
         assert!(
-            !path.is_some_and(|path| path.starts_with("Z:\\nisse-sentinel-home")),
+            !path
+                .as_ref()
+                .is_some_and(|path| path.starts_with("Z:\\nisse-sentinel-home")),
             "$HOME must not win on Windows: {path:?}"
         );
     }

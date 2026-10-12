@@ -520,16 +520,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn canonical_path_through_a_symlinked_root_matches() {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("link");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(dir.path(), &link).unwrap();
-        #[cfg(not(unix))]
-        {
-            // No symlink test on platforms without them.
-            return;
-        }
         let through_link = link.join("records");
         let direct = dir.path().join("records");
         assert_eq!(
