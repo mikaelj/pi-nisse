@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "doc-implementation-mismatch",
+  "created_at": "2026-09-28T15:19:35.952Z",
+  "finding_id": "01M3M9DKPHRH3ZKH3MPJ85YR1D",
+  "id": "01M3M9K6RGR3727KDBNNKJMVQC",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/domain/ids.rs"
+  ],
+  "review_id": "01M3M975515GAT11053CSTXZ8S",
+  "reviewer_id": "persistence",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "68c0dda381580e8f3e6201d91f93f736b060d69c",
+    "base_tree": "c71538e405269cb2cb7b283fb4dcd608b1d4f298",
+    "head_commit": "70bc9b07d5de51b89b48e0867ebe94a50410641a",
+    "head_tree": "25095e0bd9e44a1130de51fa6f9972c2ca6ac9d5",
+    "mode": "range"
+  },
+  "tags": [
+    "maintainability",
+    "doc-implementation-mismatch"
+  ]
+}

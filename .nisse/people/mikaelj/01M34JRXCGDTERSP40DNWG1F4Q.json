@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "isolation",
+  "created_at": "2026-09-22T12:52:09.232Z",
+  "finding_id": "01M34JF187QG66Z6QB9F089S12",
+  "id": "01M34JRXCGDTERSP40DNWG1F4Q",
+  "impact_class": "test_gap",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "dismissed",
+  "paths": [
+    "src/config/consent.rs"
+  ],
+  "review_id": "01M34J4EEBQ3X2PCXE330P5GPT",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "92b0a42191b8a323d40034b2fb18b5592c75e70c",
+    "base_tree": "1499241d17bc0d7c018d180fbc393d524d0204af",
+    "head_commit": "60754c1d8783b2338fc367cd59f55003a7056f18",
+    "head_tree": "313cad3c26b3be74d1c8b1d47c54819dbc0d2bfa",
+    "mode": "commit"
+  },
+  "tags": [
+    "test_gap",
+    "isolation"
+  ]
+}

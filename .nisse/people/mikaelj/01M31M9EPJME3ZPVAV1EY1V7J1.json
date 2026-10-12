@@ -1,0 +1,42 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-09-21T09:20:56.530Z",
+  "evidence": [
+    {
+      "content_key": "git:e77f63366673192beff67c5a1dca6b323385c663",
+      "excerpt": "tree-sitter-python = \"0.25\"\ntree-sitter-bash = \"0.25\"\ntree-sitter-lua = \"0.5\"\ntree-sitter-html = \"0.23\"",
+      "kind": "source",
+      "line_end": 47,
+      "line_start": 40,
+      "path": "Cargo.toml",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": null
+    },
+    {
+      "content_key": null,
+      "excerpt": "Nisse 1.0 languages: C, C++, C#, Dart, Rust, JavaScript, TypeScript",
+      "kind": "plan",
+      "line_end": null,
+      "line_start": null,
+      "path": null,
+      "plan_section": "27",
+      "record_id": null,
+      "symbol": null
+    }
+  ],
+  "id": "01M31M9EPJME3ZPVAV1EY1V7J1",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M31KQABB0B9068KCNX1E11QB",
+  "state": "supported",
+  "subject": "tree-sitter dependency set",
+  "supersedes": [],
+  "tags": [
+    "dependencies",
+    "indexing",
+    "plan-fidelity"
+  ],
+  "text": "Cargo.toml declares tree-sitter grammars for python, bash, lua, and html in addition to the seven languages the plan freezes for Nisse 1.0; whether these extra grammars are wired into the index was not verified."
+}

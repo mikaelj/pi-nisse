@@ -1,0 +1,33 @@
+{
+  "author": "mikaelj",
+  "category": "unbounded blob read",
+  "created_at": "2026-10-01T18:26:51.320Z",
+  "finding_id": "01M3WBAMRBDKHY1ZFQKM55224J",
+  "id": "01M3WBG7SRZ3EGJY1MWBXD4DFT",
+  "impact_class": "performance",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/git/repo.rs",
+    "src/git/reader.rs",
+    "src/index/refresh.rs"
+  ],
+  "review_id": "01M3WB4WZ83QT08F4MKQFZFFH3",
+  "reviewer_id": "persistence",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "a6f40dc4fd478a737b14efa6f1cbfdc19ccf52fe",
+    "base_tree": "fe3e374c14c1bcbefc889780653ac1d8f2c97354",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "performance",
+    "unbounded blob read"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "error-handling",
+  "created_at": "2026-09-22T12:30:50.914Z",
+  "finding_id": "01M34H6MS9247S3MT81AM2EXD9",
+  "id": "01M34HHX12334M8Y755TES7EDB",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "accepted",
+  "paths": [
+    "src/app.rs"
+  ],
+  "review_id": "01M34GHYE6VEM6TCZRTS6E9B1R",
+  "reviewer_id": "persistence",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "5f8b551462b5cc2edbba7b8eec1d4522942d9872",
+    "base_tree": "34eeede82e89a7278e49e04adadbb9687d4f3462",
+    "head_commit": "3d448be4917e39b43638b5c176df9eabdea6856d",
+    "head_tree": "5a763a0e611b3d5e7f3e7ddf5c408ed1d74591d3",
+    "mode": "range"
+  },
+  "tags": [
+    "correctness",
+    "error-handling"
+  ]
+}

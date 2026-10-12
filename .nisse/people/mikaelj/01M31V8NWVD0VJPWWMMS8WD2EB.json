@@ -1,0 +1,30 @@
+{
+  "author": "mikaelj",
+  "category": "ci-toolchain",
+  "created_at": "2026-09-21T11:22:51.163Z",
+  "finding_id": "01M31PEE5WR6SDNQD9FBJ7RWPD",
+  "id": "01M31V8NWVD0VJPWWMMS8WD2EB",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    ".github/workflows/ci.yml",
+    "rust-toolchain.toml"
+  ],
+  "review_id": "01M31P4W8WG7Y846V31GDQAWV0",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "7091bd40f9cb3ebdfb3dee04e011951e9f3a53ef",
+    "base_tree": "49928ac77a625638f34b7ef558bc920504f0583f",
+    "head_commit": "f3c834d38258b3c166949c49bc14ec349200e069",
+    "head_tree": "9f10a38ed14436dfb3817fd19ff44a6b68813bb4",
+    "mode": "range"
+  },
+  "tags": [
+    "maintainability",
+    "ci-toolchain"
+  ]
+}

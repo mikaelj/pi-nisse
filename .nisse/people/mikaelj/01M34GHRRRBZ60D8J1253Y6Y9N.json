@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "guard-scan-brittle",
+  "created_at": "2026-09-22T12:13:17.976Z",
+  "finding_id": "01M34G0R3PTHQZVN024NQ4QGVF",
+  "id": "01M34GHRRRBZ60D8J1253Y6Y9N",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "accepted",
+  "paths": [
+    "tests/integration/dir_creation_guard.rs"
+  ],
+  "review_id": "01M34FD1YY5NQPZJPB6DPMS8J1",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "5f8b551462b5cc2edbba7b8eec1d4522942d9872",
+    "base_tree": "34eeede82e89a7278e49e04adadbb9687d4f3462",
+    "head_commit": "3cf0c3a481da15c55e3cd60e7c0b621879207503",
+    "head_tree": "24d550cbb07150c11153ede5394cb4db8dabe71c",
+    "mode": "range"
+  },
+  "tags": [
+    "maintainability",
+    "guard-scan-brittle"
+  ]
+}

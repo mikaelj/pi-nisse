@@ -1,0 +1,34 @@
+{
+  "author": "mikaelj",
+  "category": "test-coverage-sites",
+  "created_at": "2026-10-12T12:43:24.936Z",
+  "finding_id": "01M4R1WGKK2H7GCSAHY2RHG21Y",
+  "id": "01M4R279C8RT3FP0PTS5HC0272",
+  "impact_class": "test_gap",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "accepted",
+  "paths": [
+    "tests/integration/plan_review.rs",
+    "tests/integration/code_review.rs",
+    "src/app.rs",
+    "PLAN_THINKING.md"
+  ],
+  "review_id": "01M4R1K1ZZ54JAYA6Y30EEE1YY",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "a6f40dc4fd478a737b14efa6f1cbfdc19ccf52fe",
+    "base_tree": "fe3e374c14c1bcbefc889780653ac1d8f2c97354",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "test_gap",
+    "test-coverage-sites"
+  ]
+}

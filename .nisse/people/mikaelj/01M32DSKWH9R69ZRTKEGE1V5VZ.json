@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "test-hermeticity",
+  "created_at": "2026-09-21T16:46:40.528Z",
+  "finding_id": "01M32DM4HCJJS1FK5341P6BMHY",
+  "id": "01M32DSKWH9R69ZRTKEGE1V5VZ",
+  "impact_class": "test_gap",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/config/identity.rs",
+    "src/config/paths.rs"
+  ],
+  "review_id": "01M32DB1XCA3JTWWYMX9EWYPRX",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "2b9c3f6c403bdcf79fa80ee42c705366a1c69c95",
+    "base_tree": "db430e39ed4d0c548012a48f07b09d2b2b141e52",
+    "head_commit": "d9fe73a2399950a4991110b108fab13501bfcf36",
+    "head_tree": "c008c82353e955919e95c99c79c7dbc786800daa",
+    "mode": "range"
+  },
+  "tags": [
+    "test_gap",
+    "test-hermeticity"
+  ]
+}

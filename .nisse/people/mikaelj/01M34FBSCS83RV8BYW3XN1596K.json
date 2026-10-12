@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "corruption-recovery",
+  "created_at": "2026-09-22T11:52:33.433Z",
+  "finding_id": "01M34F0NRKQ3NSYZ5RKER7BKA3",
+  "id": "01M34FBSCS83RV8BYW3XN1596K",
+  "impact_class": "data_loss",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/learning/feedback.rs",
+    "src/storage/db.rs"
+  ],
+  "review_id": "01M34EB7TBRDZ9M32XXTCJ715G",
+  "reviewer_id": "persistence",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "5f8b551462b5cc2edbba7b8eec1d4522942d9872",
+    "base_tree": "34eeede82e89a7278e49e04adadbb9687d4f3462",
+    "head_commit": "30838c9a1c105c5893eb0db75cb8cbd949ec5448",
+    "head_tree": "9cea3eade711b69694e18129e10df8ffb35230d1",
+    "mode": "commit"
+  },
+  "tags": [
+    "data_loss",
+    "corruption-recovery"
+  ]
+}

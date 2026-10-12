@@ -1,0 +1,33 @@
+{
+  "author": "mikaelj",
+  "category": "instruction-validator-mismatch",
+  "created_at": "2026-09-28T13:31:18.744Z",
+  "finding_id": "01M3KYB1N4DFKA368ZD4GT98SE",
+  "id": "01M3M3CXTRDQCGZHWCCBD212W7",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "typescript"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "assets/reviewers/claim-skeptic.json",
+    "runtime/pi-host/src/structured.ts",
+    "runtime/pi-host/src/investigation.test.ts"
+  ],
+  "review_id": "01M3KXQ5V91HBF8SGS2SDJCHJ3",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "7e2b841d0ded09e949f42a368baa839683d9e4b6",
+    "base_tree": "26b5096baaab6ff21c258d40fc3bd986a7543fc2",
+    "head_commit": "0adc01e9d4786e0060fc9383d0c16f986a1ba8fb",
+    "head_tree": "8478250a05873150d0b73d38da33b90e0e8ea387",
+    "mode": "range"
+  },
+  "tags": [
+    "correctness",
+    "instruction-validator-mismatch"
+  ]
+}

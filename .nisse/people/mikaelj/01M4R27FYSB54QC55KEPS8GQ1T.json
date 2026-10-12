@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "test-determinism",
+  "created_at": "2026-10-12T12:43:31.673Z",
+  "finding_id": "01M4R1WGKKPYCSBKZ0ZJ7JZ5ZY",
+  "id": "01M4R27FYSB54QC55KEPS8GQ1T",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "typescript"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "accepted",
+  "paths": [
+    "runtime/pi-host/src/capabilities.test.ts",
+    "runtime/pi-host/fixtures/thinking-levels.golden.json"
+  ],
+  "review_id": "01M4R1K1ZZ54JAYA6Y30EEE1YY",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "a6f40dc4fd478a737b14efa6f1cbfdc19ccf52fe",
+    "base_tree": "fe3e374c14c1bcbefc889780653ac1d8f2c97354",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "maintainability",
+    "test-determinism"
+  ]
+}

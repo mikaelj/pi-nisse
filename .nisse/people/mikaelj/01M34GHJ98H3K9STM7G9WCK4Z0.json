@@ -1,0 +1,33 @@
+{
+  "author": "mikaelj",
+  "category": "interactive-consent-untested-e2e",
+  "created_at": "2026-09-22T12:13:11.336Z",
+  "finding_id": "01M34G0R3PFH45SYQ5BNAVWXVB",
+  "id": "01M34GHJ98H3K9STM7G9WCK4Z0",
+  "impact_class": "test_gap",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "tests/integration/consent_binary.rs",
+    "src/main.rs",
+    "src/config/consent.rs"
+  ],
+  "review_id": "01M34FD1YY5NQPZJPB6DPMS8J1",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "5f8b551462b5cc2edbba7b8eec1d4522942d9872",
+    "base_tree": "34eeede82e89a7278e49e04adadbb9687d4f3462",
+    "head_commit": "3cf0c3a481da15c55e3cd60e7c0b621879207503",
+    "head_tree": "24d550cbb07150c11153ede5394cb4db8dabe71c",
+    "mode": "range"
+  },
+  "tags": [
+    "test_gap",
+    "interactive-consent-untested-e2e"
+  ]
+}

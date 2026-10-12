@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "durability-fsync",
+  "created_at": "2026-09-21T16:17:25.439Z",
+  "finding_id": "01M32BYS5CT31FNBAFV20NRJCC",
+  "id": "01M32C41XZY192R2CS17WC8CRS",
+  "impact_class": "data_loss",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/storage/fsutil.rs",
+    "src/config/identity.rs"
+  ],
+  "review_id": "01M32BKX4GBDWSG9GEG65D655S",
+  "reviewer_id": "persistence",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "2b9c3f6c403bdcf79fa80ee42c705366a1c69c95",
+    "base_tree": "db430e39ed4d0c548012a48f07b09d2b2b141e52",
+    "head_commit": "3b6e5569ba514896b67c4169b0f22402597eb3c5",
+    "head_tree": "aac3b520262666675d74f7ddb78f2eb237facaea",
+    "mode": "commit"
+  },
+  "tags": [
+    "data_loss",
+    "durability-fsync"
+  ]
+}

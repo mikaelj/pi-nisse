@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "resource-leak",
+  "created_at": "2026-09-21T11:34:26.860Z",
+  "finding_id": "01M31VMF41BE4NMQQK4AEZWN3B",
+  "id": "01M31VXX9CFNQ0E8ZB1B52YQ5R",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "accepted",
+  "paths": [
+    "src/jury/host.rs"
+  ],
+  "review_id": "01M31V91BYAGZ96C993V3TWJ8Z",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "f3c834d38258b3c166949c49bc14ec349200e069",
+    "base_tree": "9f10a38ed14436dfb3817fd19ff44a6b68813bb4",
+    "head_commit": "1b2a47b980f9c98b3567e4ad4e502fe96e806a18",
+    "head_tree": "2e1b8117a7cb46e2bd551534f1f97f18463affbd",
+    "mode": "range"
+  },
+  "tags": [
+    "correctness",
+    "resource-leak"
+  ]
+}

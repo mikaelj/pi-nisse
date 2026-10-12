@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "docs-consistency",
+  "created_at": "2026-09-21T16:17:25.439Z",
+  "finding_id": "01M32BYS5CZXP5JG129KTP3W58",
+  "id": "01M32C41XZCF5E2RY6GP4C6YYJ",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/config/identity.rs",
+    "README.md"
+  ],
+  "review_id": "01M32BKX4GBDWSG9GEG65D655S",
+  "reviewer_id": "persistence",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "2b9c3f6c403bdcf79fa80ee42c705366a1c69c95",
+    "base_tree": "db430e39ed4d0c548012a48f07b09d2b2b141e52",
+    "head_commit": "3b6e5569ba514896b67c4169b0f22402597eb3c5",
+    "head_tree": "aac3b520262666675d74f7ddb78f2eb237facaea",
+    "mode": "commit"
+  },
+  "tags": [
+    "maintainability",
+    "docs-consistency"
+  ]
+}

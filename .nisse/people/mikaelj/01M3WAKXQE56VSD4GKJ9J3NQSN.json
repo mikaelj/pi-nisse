@@ -1,0 +1,42 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-10-01T18:11:23.502Z",
+  "evidence": [
+    {
+      "content_key": "git:0da9a8a4c061452b750135b5b807dd2941409ef7",
+      "excerpt": "let output = self.run(&[\"cat-file\", \"blob\", oid])?; Ok(output.stdout.into_bytes())",
+      "kind": "source",
+      "line_end": 431,
+      "line_start": 427,
+      "path": "src/git/repo.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "read_blob"
+    },
+    {
+      "content_key": "git:7d4d3baa41c72a40eac80cf8fb7d6927b4670fb7",
+      "excerpt": "decode_output(&stdout_bytes) .ok_or_else(|| GitError::InvalidUtf8 {",
+      "kind": "source",
+      "line_end": 166,
+      "line_start": 152,
+      "path": "src/git/runner.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "run_unchecked"
+    }
+  ],
+  "id": "01M3WAKXQE56VSD4GKJ9J3NQSN",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M3WADX0JAPXBAGZHP5XD8XN4",
+  "state": "supported",
+  "subject": "src/git read_blob encoding path",
+  "supersedes": [],
+  "tags": [
+    "git",
+    "encoding",
+    "index"
+  ],
+  "text": "RepoContext::read_blob returns Vec<u8> but obtains its bytes through GitRunner's strict-UTF-8 decode path, so any non-UTF-8 blob yields GitError::InvalidUtf8 rather than raw bytes."
+}

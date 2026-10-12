@@ -1,0 +1,30 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-10-01T18:12:46.811Z",
+  "evidence": [
+    {
+      "content_key": "git:9b61044ebecf944daf8d2750adc0f1090da43cca",
+      "excerpt": "let Ok(text) = std::str::from_utf8(&bytes) else { // Non-text content is not indexable; it never enters the manifest, so later refreshes reconsider it. return Ok(()); };",
+      "kind": "source",
+      "line_end": 172,
+      "line_start": 163,
+      "path": "src/index/refresh.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "classify_working"
+    }
+  ],
+  "id": "01M3WAPF2VC4Y0ZZXEX57D9GWF",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M3WADX0JAPXBAGZHP5XD8XN4",
+  "state": "supported",
+  "subject": "src/index/refresh.rs::classify_working",
+  "supersedes": [],
+  "tags": [
+    "error-handling",
+    "snapshot deserialization"
+  ],
+  "text": "Working-tree index refresh handles non-UTF-8 content gracefully: when from_utf8 on the exact bytes fails, the file is skipped from the manifest with Ok(()) rather than failing the refresh."
+}

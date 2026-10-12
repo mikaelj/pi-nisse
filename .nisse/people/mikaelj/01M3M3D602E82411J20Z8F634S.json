@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "vacuous-assertion",
+  "created_at": "2026-09-28T13:31:27.106Z",
+  "finding_id": "01M3KYB1N4AAFG10Z97YGDHWQW",
+  "id": "01M3M3D602E82411J20Z8F634S",
+  "impact_class": "test_gap",
+  "kind": "observation",
+  "languages": [
+    "typescript"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "integrations/pi/test/investigation_args.test.ts",
+    "integrations/pi/extensions/nisse.ts"
+  ],
+  "review_id": "01M3KXQ5V91HBF8SGS2SDJCHJ3",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "7e2b841d0ded09e949f42a368baa839683d9e4b6",
+    "base_tree": "26b5096baaab6ff21c258d40fc3bd986a7543fc2",
+    "head_commit": "0adc01e9d4786e0060fc9383d0c16f986a1ba8fb",
+    "head_tree": "8478250a05873150d0b73d38da33b90e0e8ea387",
+    "mode": "range"
+  },
+  "tags": [
+    "test_gap",
+    "vacuous-assertion"
+  ]
+}

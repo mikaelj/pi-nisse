@@ -1,0 +1,42 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-10-01T18:12:27.114Z",
+  "evidence": [
+    {
+      "content_key": "git:0da9a8a4c061452b750135b5b807dd2941409ef7",
+      "excerpt": "pub fn read_blob(&self, oid: &str) -> Result<Vec<u8>, GitError> { Self::validate_oid(oid)?; let output = self.run(&[\"cat-file\", \"blob\", oid])?; Ok(output.stdout.into_bytes())",
+      "kind": "source",
+      "line_end": 431,
+      "line_start": 427,
+      "path": "src/git/repo.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "RepoContext::read_blob"
+    },
+    {
+      "content_key": "git:7d4d3baa41c72a40eac80cf8fb7d6927b4670fb7",
+      "excerpt": "let stdout = decode_output(&stdout_bytes) .ok_or_else(|| GitError::InvalidUtf8 { ... })? .to_owned();",
+      "kind": "source",
+      "line_end": 163,
+      "line_start": 151,
+      "path": "src/git/runner.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "run"
+    }
+  ],
+  "id": "01M3WANVVAVHZ2BAC3MKK5J5TJ",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M3WADX0JAPXBAGZHP5XD8XN4",
+  "state": "supported",
+  "subject": "src/git/repo.rs::RepoContext::read_blob",
+  "supersedes": [],
+  "tags": [
+    "git object reads",
+    "byte vs string typing",
+    "error-handling"
+  ],
+  "text": "read_blob returns Vec<u8> but obtains blob content through GitRunner::run, which strictly UTF-8-decodes stdout/stderr and returns GitError::InvalidUtf8 on invalid sequences; therefore reading any non-UTF-8 blob fails with a typed encoding error despite the byte-typed return."
+}

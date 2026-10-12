@@ -1,0 +1,32 @@
+{
+  "author": "mikaelj",
+  "category": "coverage",
+  "created_at": "2026-09-21T16:38:39.378Z",
+  "finding_id": "01M32D2A4XQFGC4SAG4YX1P85F",
+  "id": "01M32DAY0JFM1TVDCF2FKBH2BA",
+  "impact_class": "test_gap",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/config/paths.rs",
+    "tests/integration/doctor_binary.rs"
+  ],
+  "review_id": "01M32CS9M98XGF4WFQ25GKNVYS",
+  "reviewer_id": "testing",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "2b9c3f6c403bdcf79fa80ee42c705366a1c69c95",
+    "base_tree": "db430e39ed4d0c548012a48f07b09d2b2b141e52",
+    "head_commit": "43f1539583dec1e3c1fa4cc60117630f9af20851",
+    "head_tree": "22281835bfc9f2f28c5bc38909dfca6dd4305796",
+    "mode": "range"
+  },
+  "tags": [
+    "test_gap",
+    "coverage"
+  ]
+}

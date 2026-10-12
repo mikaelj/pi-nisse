@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-09-21T12:14:36.437Z",
+  "evidence": [
+    {
+      "content_key": "git:fa5a6a59ca4f5c5612ea34f3151b019c64a8df63",
+      "excerpt": "dirs::config_dir().map(|dir| dir.join(\"nisse\").join(\"config.toml\"))",
+      "kind": "source",
+      "line_end": 17,
+      "line_start": 15,
+      "path": "src/config/paths.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "user_config_path"
+    }
+  ],
+  "id": "01M31Y7ECN28AHMB8Y3MFENR4X",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M31XT06TH6J53N6W2J1HGWKE",
+  "state": "supported",
+  "subject": "user_config_path",
+  "supersedes": [],
+  "tags": [
+    "config",
+    "paths",
+    "user-configuration"
+  ],
+  "text": "The user config file path is currently resolved platform-natively as dirs::config_dir()/nisse/config.toml (on macOS ~/Library/Application Support/nisse/config.toml), returning None only when no config dir is resolvable."
+}

@@ -1,0 +1,36 @@
+{
+  "author": "mikaelj",
+  "category": "build break",
+  "created_at": "2026-09-21T11:43:04.915Z",
+  "finding_id": "01M31W911G4M2HN96T4KHSQ5YG",
+  "id": "01M31WDQ6KQTJ1PFS1KG0E99FJ",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "dismissed",
+  "paths": [
+    "Cargo.toml",
+    "tests/integration/mcp_binary.rs",
+    "tests/integration/windows_compat.rs",
+    "tests/integration/eval_binary.rs",
+    "tests/integration/needle_binary.rs",
+    ".github/workflows/ci.yml"
+  ],
+  "review_id": "01M31VY80JE75T2RQVD4PPW1E1",
+  "reviewer_id": "concurrency",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "f3c834d38258b3c166949c49bc14ec349200e069",
+    "base_tree": "9f10a38ed14436dfb3817fd19ff44a6b68813bb4",
+    "head_commit": "17ce1fb1f9d046e22888b826d3b53a9bc3bf28be",
+    "head_tree": "9af5325f13c6ccfd5b9ff3b964b042c814506928",
+    "mode": "range"
+  },
+  "tags": [
+    "correctness",
+    "build break"
+  ]
+}

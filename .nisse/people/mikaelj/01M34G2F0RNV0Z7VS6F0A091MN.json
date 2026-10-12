@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-09-22T12:04:56.472Z",
+  "evidence": [
+    {
+      "content_key": "git:0fe469c0995040ef03379f193ec95343a8119192",
+      "excerpt": ".env(\"NISSE_ALLOW_DIR_CREATION\", \"1\"); for (key, value) in extra_env { if *value == \"\\u{0}remove\" { command.env_remove(key); } else { command.env(key, value); } }",
+      "kind": "source",
+      "line_end": 82,
+      "line_start": 55,
+      "path": "tests/integration/main.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "run_nisse_in_with_env"
+    }
+  ],
+  "id": "01M34G2F0RNV0Z7VS6F0A091MN",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M34FD1YY5NQPZJPB6DPMS8J1",
+  "state": "supported",
+  "subject": "integration test harness consent defaults",
+  "supersedes": [],
+  "tags": [
+    "testing",
+    "consent",
+    "harness"
+  ],
+  "text": "tests/integration/main.rs grants blanket directory-creation consent (NISSE_ALLOW_DIR_CREATION=1) to every spawned nisse binary by default; consent tests opt out by passing the sentinel value \"\\u{0}remove\" which the harness translates to Command::env_remove."
+}

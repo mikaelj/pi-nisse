@@ -1,0 +1,30 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-09-22T12:47:11.161Z",
+  "evidence": [
+    {
+      "content_key": "git:dec18a9590da4384235a22ab067fd20f0f7273c7",
+      "excerpt": "// Default blanket consent for directory creation: the existing suite exercises behavior, not the consent gate. Consent tests opt out with the ... sentinel value. .env(\"NISSE_ALLOW_DIR_CREATION\", \"1\"); ... if sentinel { command.env_remove(key); } else { command.env(key, value); }",
+      "kind": "source",
+      "line_end": 77,
+      "line_start": 64,
+      "path": "tests/integration/main.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": null
+    }
+  ],
+  "id": "01M34JFT9SFM9AR6GMPXHTKX8E",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M34J4EEBQ3X2PCXE330P5GPT",
+  "state": "supported",
+  "subject": "Integration test harness consent default",
+  "supersedes": [],
+  "tags": [
+    "testing",
+    "consent"
+  ],
+  "text": "tests/integration/main.rs spawns the nisse binary with NISSE_ALLOW_DIR_CREATION=1 by default and treats one sentinel value in extra_env as an instruction to remove that environment variable, which consent-focused tests use to opt out of blanket consent."
+}

@@ -1,0 +1,42 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-09-21T09:20:24.464Z",
+  "evidence": [
+    {
+      "content_key": "git:99a4452edff610aceecf49c1bcf21782be16edde",
+      "excerpt": "\"@earendil-works/pi-coding-agent\": \"^0.85.1\"",
+      "kind": "source",
+      "line_end": 18,
+      "line_start": 14,
+      "path": "runtime/pi-host/package.json",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": null
+    },
+    {
+      "content_key": "git:a84ba6eaf5b68131d9104e69519a1f5bfbd5d7dd",
+      "excerpt": "\"@earendil-works/pi-coding-agent\": \"^0.86.1\"",
+      "kind": "source",
+      "line_end": 29,
+      "line_start": 24,
+      "path": "integrations/pi/package.json",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": null
+    }
+  ],
+  "id": "01M31M8FCGC3NPQ5Z0P3NRTCFY",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M31KQABB0B9068KCNX1E11QB",
+  "state": "supported",
+  "subject": "TypeScript packages' Pi SDK versions",
+  "supersedes": [],
+  "tags": [
+    "dependencies",
+    "polyglot",
+    "tooling"
+  ],
+  "text": "runtime/pi-host pins @earendil-works/pi-coding-agent ^0.85.1 while integrations/pi pins ^0.86.1 (plus @earendil-works/pi-ai ^0.86.1), i.e. the two TS components currently validate against different minors of the shared SDK."
+}

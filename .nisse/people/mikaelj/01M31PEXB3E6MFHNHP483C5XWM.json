@@ -1,0 +1,42 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-09-21T09:58:52.515Z",
+  "evidence": [
+    {
+      "content_key": "git:075062e5e6b648bab97af61a9cb8b47b534e8c66",
+      "excerpt": "[toolchain]\nchannel = \"1.93.0\"",
+      "kind": "source",
+      "line_end": 2,
+      "line_start": 1,
+      "path": "rust-toolchain.toml",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": null
+    },
+    {
+      "content_key": null,
+      "excerpt": "# Installs the exact toolchain pinned in rust-toolchain.toml.\n      - uses: dtolnay/rust-toolchain@stable",
+      "kind": "diff",
+      "line_end": 38,
+      "line_start": 37,
+      "path": ".github/workflows/ci.yml",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": null
+    }
+  ],
+  "id": "01M31PEXB3E6MFHNHP483C5XWM",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M31P4W8WG7Y846V31GDQAWV0",
+  "state": "supported",
+  "subject": "rust-toolchain.toml",
+  "supersedes": [],
+  "tags": [
+    "ci",
+    "toolchain",
+    "rust"
+  ],
+  "text": "The repository pins toolchain channel 1.93.0 in rust-toolchain.toml, but .github/workflows/ci.yml installs the toolchain via dtolnay/rust-toolchain@stable under a comment claiming it installs the exact pin."
+}
