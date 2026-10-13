@@ -1296,7 +1296,15 @@ mod tests {
         assert!(debug.contains("main.ts"));
         assert!(debug.contains("--runtime"));
         assert!(debug.contains("fake"));
-        assert!(debug.contains("NISSE_PI_HOST_FAULT"));
+        // Command's Debug output is platform-dependent (the Windows
+        // implementation does not render environment entries), so the
+        // environment is asserted on the launch itself.
+        assert!(
+            launch
+                .extra_env
+                .iter()
+                .any(|(key, value)| { key == "NISSE_PI_HOST_FAULT" && value == "stderr-noise" })
+        );
     }
 
     #[test]

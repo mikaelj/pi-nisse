@@ -23,11 +23,22 @@ impl Fixture {
         let dir = tempdir(label);
         git_in(dir.path(), &["init", "--quiet", "repo"]);
 
-        let root = dir.path().join("repo").canonicalize().unwrap();
+        // Canonicalize resolves symlinks, but on Windows it also yields
+        // verbatim `\\?\` device paths that git rejects as arguments
+        // (for example `git worktree add`); strip the prefix so every
+        // spawned git command receives a plain path.
+        let root = crate::config::consent::normalize_verbatim(
+            dir.path().join("repo").canonicalize().unwrap(),
+        );
         git_in(&root, &["config", "user.email", "nisse@test.invalid"]);
         git_in(&root, &["config", "user.name", "Nisse Test"]);
         git_in(&root, &["config", "commit.gpgsign", "false"]);
         git_in(&root, &["config", "tag.gpgsign", "false"]);
+        // Content-addressed artifact reuse assumes working-tree bytes
+        // match the committed blobs; machine-global autocrlf (on by
+        // default on Windows runners) would rewrite line endings and
+        // break reuse.
+        git_in(&root, &["config", "core.autocrlf", "false"]);
         // Insulate fixtures from machine-global hook configuration by
         // pointing back at the repository's (sample-only) hooks directory.
         git_in(&root, &["config", "core.hooksPath", ".git/hooks"]);

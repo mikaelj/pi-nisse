@@ -69,6 +69,7 @@ fn dirty_rust_repo(label: &str) -> (TempDir, PathBuf, TempDir) {
     std::fs::write(repo.join("src").join("queue.rs"), QUEUE_RS).expect("write source");
     git(&repo, &["init", "--quiet", "-b", "main"]);
     git(&repo, &["config", "user.email", "t@t"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
     git(&repo, &["config", "user.name", "T"]);
     git(&repo, &["add", "--all"]);
     commit(&repo, "one");

@@ -1019,10 +1019,9 @@ mod tests {
         assert_eq!(stored[0].author, "alice");
         assert!(records_of(&fixture).iter().any(|stored| {
             stored.id() == created.record_id
-                && stored
-                    .path
-                    .to_string_lossy()
-                    .contains(".nisse/people/alice/")
+                && stored.path.parent().is_some_and(|parent| {
+                    parent.ends_with(std::path::Path::new(".nisse").join("people").join("alice"))
+                })
         }));
 
         // A second pass with unchanged observations creates nothing.

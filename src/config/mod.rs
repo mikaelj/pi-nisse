@@ -703,15 +703,22 @@ mod tests {
     fn relative_allow_paths_entries_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let user_config = dir.path().join("config.toml");
+        // `is_absolute` is drive-relative on Windows: use a genuinely
+        // absolute platform path for the surviving entry.
+        let absolute = if cfg!(windows) {
+            "C:\\abs\\ok"
+        } else {
+            "/abs/ok"
+        };
         std::fs::write(
             &user_config,
-            "[directories]\nallow_paths = [\"relative/path\", \"/abs/ok\"]\n",
+            format!("[directories]\nallow_paths = [\"relative/path\", \"{absolute}\"]\n"),
         )
         .unwrap();
         let loaded = load_config(Some(&user_config), None).unwrap();
         assert_eq!(
             loaded.config.directories.allow_paths,
-            vec![std::path::PathBuf::from("/abs/ok")]
+            vec![std::path::PathBuf::from(absolute)]
         );
     }
 

@@ -167,7 +167,7 @@ pub fn canonical_path(path: &Path) -> Option<PathBuf> {
 
 /// Strip the Windows verbatim device-path prefix (`\\?\C:\...`, including
 /// the UNC form) so canonical paths stay hand-editable in allow_paths.
-fn normalize_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn normalize_verbatim(path: PathBuf) -> PathBuf {
     let text = path.as_os_str().to_string_lossy().into_owned();
     #[cfg(windows)]
     {
@@ -491,7 +491,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("a").join("b");
         let canonical = canonical_path(&target).unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = normalize_verbatim(std::fs::canonicalize(dir.path()).unwrap());
         assert_eq!(canonical, base.join("a").join("b"));
     }
 
@@ -500,12 +500,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("a").join("..").join("b");
         let canonical = canonical_path(&target).unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = normalize_verbatim(std::fs::canonicalize(dir.path()).unwrap());
         assert_eq!(canonical, base.join("b"));
 
         // Escaping the canonical root via ".." is rejected.
         let escape = dir.path().join("..").join("elsewhere");
-        let base_parent = std::fs::canonicalize(dir.path().join("..")).unwrap();
+        let base_parent = normalize_verbatim(std::fs::canonicalize(dir.path().join("..")).unwrap());
         // Only an escape BELOW the deepest existing ancestor is fatal;
         // here the ancestor exists, so the result simply points there —
         // the relative-input and true-escape cases are what must fail:
