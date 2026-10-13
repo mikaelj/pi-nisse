@@ -576,3 +576,80 @@ model = \"zai/glm-5.3\"
         );
     }
 }
+
+#[test]
+fn large_file_diffs_are_chunked_with_coverage_notes_and_scaled_lookups() {
+    let (_dir, repo, home) = rust_repo("code-chunk");
+    commit_all(&repo, "base");
+    // One large new file (45 KiB): the diff (= whole file) chunks into
+    // parts but completes inside the budget — no omissions, no scaled
+    // lookup budget.
+    let medium: String = (0..2200)
+        .map(|i| format!("fn helper_{i}() {{ /* {i} */ }}\n"))
+        .collect();
+    std::fs::write(repo.join("src").join("medium.gs"), &medium).expect("write medium");
+
+    let (ok, _stdout, stderr) = review_code(&repo, &home, &["review", "code", "--working"], &[]);
+    assert!(ok, "review failed: {stderr}");
+    let event = review_event(&repo);
+    let specs = event["specs"].as_array().expect("specs array");
+    let titles: Vec<String> = specs[0]["context_titles"]
+        .as_array()
+        .expect("context titles")
+        .iter()
+        .filter_map(|title| title.as_str())
+        .map(str::to_string)
+        .collect();
+    let medium_parts: Vec<&String> = titles
+        .iter()
+        .filter(|title| title.contains("src/medium.gs") && title.contains("part "))
+        .collect();
+    assert!(
+        medium_parts.len() >= 2,
+        "large diff chunks into parts: {titles:?}"
+    );
+    assert!(
+        !titles.iter().any(|t| t.contains("coverage note")),
+        "no omissions for a completing diff: {titles:?}"
+    );
+    for spec in specs {
+        assert_eq!(spec["max_lookup_calls"], 8, "no scaling without omissions");
+    }
+
+    // One huge new file (beyond the 128 KiB materialization cap): the
+    // tail is omitted with an explicit note, a coverage note summarizes
+    // the omission, and the lookup budget scales.
+    let (_dir2, repo2, home2) = rust_repo("code-chunk-huge");
+    commit_all(&repo2, "base");
+    let huge: String = (0..6500)
+        .map(|i| format!("function hugeHelper_{i}() {{ return {i}; }}\n"))
+        .collect();
+    std::fs::write(repo2.join("src").join("huge.gs"), &huge).expect("write huge");
+    let (ok, _stdout, stderr) = review_code(&repo2, &home2, &["review", "code", "--working"], &[]);
+    assert!(ok, "review failed: {stderr}");
+    let event = review_event(&repo2);
+    let specs = event["specs"].as_array().expect("specs array");
+    let titles: Vec<String> = specs[0]["context_titles"]
+        .as_array()
+        .expect("context titles")
+        .iter()
+        .filter_map(|title| title.as_str())
+        .map(str::to_string)
+        .collect();
+    assert!(
+        titles
+            .iter()
+            .any(|t| t.contains("src/huge.gs") && t.contains("part ")),
+        "huge diff still shows its first parts: {titles:?}"
+    );
+    assert!(
+        titles.iter().any(|t| t.contains("coverage note")),
+        "omissions are summarized: {titles:?}"
+    );
+    for spec in specs {
+        assert_eq!(
+            spec["max_lookup_calls"], 10,
+            "one omitted tail scales the budget by two"
+        );
+    }
+}

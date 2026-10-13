@@ -590,6 +590,7 @@ pub fn run_investigation_review(
             context,
             level,
             options.reviewer_timeout_ms,
+            crate::jury::review::REVIEWER_MAX_LOOKUP_CALLS,
         ));
     }
 

@@ -132,9 +132,9 @@ pub const REVIEWER_TIMEOUT_MS: u64 = 300_000;
 /// Budget of the initial reviewer context (plan section 23: strong
 /// initial context within budget).
 pub const INITIAL_CONTEXT_BUDGET: ContextBudget = ContextBudget {
-    max_entries: 64,
+    max_entries: 96,
     max_entry_text_bytes: PLAN_CONTEXT_MAX_BYTES,
-    max_total_text_bytes: 96 * 1024,
+    max_total_text_bytes: 192 * 1024,
 };
 
 /// Maximum number of practice statements bundled per reviewer from the
@@ -412,6 +412,7 @@ pub fn run_plan_review(
     // unusable profile skips the session and falls back to the static
     // template.
     let mut domain_description: Option<DynamicDomainDescription> = None;
+    let lookup_budget = REVIEWER_MAX_LOOKUP_CALLS;
     let dynamic_level = if jury.uses_dynamic_fallback() {
         let expert = catalog.dynamic_domain_expert();
         match super::thinking::ThinkingPolicy::resolve_job_level(
@@ -504,6 +505,7 @@ pub fn run_plan_review(
             context,
             level,
             options.reviewer_timeout_ms,
+            lookup_budget,
         ));
     }
 
@@ -867,6 +869,7 @@ pub(crate) fn execution_spec(
     initial_context: ContextBundle,
     thinking_level: crate::domain::model::ThinkingLevel,
     timeout_ms: u64,
+    max_lookup_calls: u32,
 ) -> ReviewerExecutionSpec {
     ReviewerExecutionSpec {
         reviewer_id: profile.id.clone(),
@@ -877,7 +880,7 @@ pub(crate) fn execution_spec(
         thinking_level,
         initial_context: initial_context.entries,
         allowed_capabilities: profile.allowed_capabilities.clone(),
-        max_lookup_calls: REVIEWER_MAX_LOOKUP_CALLS,
+        max_lookup_calls,
         max_returned_context_bytes: REVIEWER_MAX_CONTEXT_BYTES,
         timeout_ms,
     }
@@ -965,11 +968,35 @@ pub const MAX_CODE_DESCRIPTORS: usize = 32;
 /// Maximum changed paths whose unified diff enters reviewer context.
 pub const MAX_DIFF_FILES_IN_CONTEXT: usize = 32;
 
-/// Per-file byte budget of one unified diff in reviewer context.
-pub const DIFF_ENTRY_MAX_BYTES: usize = 16 * 1024;
+/// Per-file byte budget of one unified diff in reviewer context: the
+/// largest patch the review layer will materialize and chunk. A file
+/// whose diff exceeds it is cut with an explicit retrieval hint.
+pub const DIFF_ENTRY_MAX_BYTES: usize = 128 * 1024;
 
 /// Aggregate byte budget of the diff portion of reviewer context.
-pub const DIFF_TOTAL_MAX_BYTES: usize = 64 * 1024;
+pub const DIFF_TOTAL_MAX_BYTES: usize = 160 * 1024;
+
+/// Byte headroom reserved for the trailing coverage note inside
+/// [`DIFF_TOTAL_MAX_BYTES`], and the number of omissions listed in it
+/// before abbreviating.
+pub const DIFF_COVERAGE_NOTE_RESERVE: usize = 2048;
+pub const DIFF_COVERAGE_NOTE_LISTED: usize = 12;
+
+/// Smallest per-file share of [`DIFF_TOTAL_MAX_BYTES`] when many files
+/// changed: every changed file keeps at least this much diff context
+/// before any file gets a second chunk.
+pub const DIFF_TOTAL_MIN_SHARE: usize = 16 * 1024;
+
+/// Ceiling of the reviewer lookup budget after omission scaling
+/// ([`REVIEWER_MAX_LOOKUP_CALLS`] plus two per omitted diff tail).
+pub const REVIEWER_MAX_LOOKUP_CALLS_CAP: u32 = 24;
+
+/// The reviewer lookup budget for a change with `omissions` omitted
+/// diff tails: the base budget plus two retrieval calls per omission,
+/// clamped by [`REVIEWER_MAX_LOOKUP_CALLS_CAP`].
+pub(crate) fn lookup_budget_for_omissions(omissions: usize) -> u32 {
+    (REVIEWER_MAX_LOOKUP_CALLS + 2 * omissions as u32).min(REVIEWER_MAX_LOOKUP_CALLS_CAP)
+}
 
 /// Code review failures.
 #[derive(Debug, Error)]
@@ -1272,7 +1299,15 @@ pub fn run_code_review(
         MAX_DIFF_FILES_IN_CONTEXT,
         DIFF_ENTRY_MAX_BYTES,
     )?;
-    let diff_context = diff_context_entries(&patches);
+    // Changed files beyond the context file cap are named in the
+    // coverage note instead of vanishing silently.
+    let overflow_paths: Vec<String> = diff
+        .iter()
+        .skip(MAX_DIFF_FILES_IN_CONTEXT)
+        .map(|entry| entry.path.clone())
+        .collect();
+    let diff_context = diff_context_entries(&patches, &overflow_paths);
+    let lookup_budget = lookup_budget_for_omissions(diff_context.omitted.len());
     let mut specs: Vec<ReviewerExecutionSpec> = Vec::with_capacity(jury.seats.len());
     for seat in &jury.seats {
         let profile = catalog
@@ -1289,7 +1324,7 @@ pub fn run_code_review(
             description,
         );
         let context = code_initial_context(
-            &diff_context,
+            &diff_context.bundle,
             &shared_context,
             &catalog,
             &seat.practice_tags,
@@ -1310,6 +1345,7 @@ pub fn run_code_review(
             context,
             level,
             options.reviewer_timeout_ms,
+            lookup_budget,
         ));
     }
 
@@ -1623,45 +1659,353 @@ fn changed_symbols(
 /// bounded [`ContextKind::Diff`] entry per changed path, path order,
 /// within the aggregate diff budget. The diff is direct review input;
 /// it can never be crowded out by retrieved context.
-fn diff_context_entries(patches: &[SnapshotPatch]) -> ContextBundle {
-    let mut entries: Vec<ContextEntry> = Vec::new();
-    let mut total = 0usize;
-    let mut truncated = false;
-    for patch in patches {
-        if total >= DIFF_TOTAL_MAX_BYTES {
-            truncated = true;
+/// One chunk of a file's unified diff: the repeated file header block
+/// plus whole hunks (or a line-aligned slice of one oversized hunk),
+/// with the new-file line the chunk starts at.
+struct DiffChunk {
+    text: String,
+    /// New-file line this chunk starts at (1-based), when derivable.
+    start_line: Option<u32>,
+}
+
+/// Split a unified diff into chunks of at most `cap` bytes, hunk-aligned
+/// whenever possible. Every chunk repeats the `diff --git` / `---` / `+++`
+/// header block so later parts stay self-contained; a single hunk larger
+/// than the cap is split on line boundaries with a synthetic header line
+/// carrying the continuation's new-file start.
+fn chunk_patch(patch: &str, cap: usize) -> Vec<DiffChunk> {
+    if patch.len() <= cap {
+        return vec![DiffChunk {
+            text: patch.to_owned(),
+            start_line: first_hunk_start(patch),
+        }];
+    }
+    let mut lines = patch.split_inclusive('\n').peekable();
+    let mut header = String::new();
+    // The file header block: everything before the first hunk header.
+    while let Some(line) = lines.peek() {
+        if line.starts_with("@@") {
             break;
         }
-        let remaining = DIFF_TOTAL_MAX_BYTES - total;
-        let body = if patch.binary {
-            "binary content changed; no textual diff available".to_string()
+        header.push_str(line);
+        lines.next();
+    }
+    if lines.peek().is_none() && !header.is_empty() {
+        // No hunk structure at all (header-only or synthesized text
+        // without hunks): fall back to line-aligned byte chunks.
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        for line in header.split_inclusive('\n') {
+            if !current.is_empty() && current.len() + line.len() > cap {
+                chunks.push(DiffChunk {
+                    text: std::mem::take(&mut current),
+                    start_line: None,
+                });
+            }
+            current.push_str(line);
+        }
+        if !current.is_empty() {
+            chunks.push(DiffChunk {
+                text: current,
+                start_line: None,
+            });
+        }
+        return chunks;
+    }
+    // Group the remaining lines into hunks.
+    let mut hunks: Vec<(String, Option<u32>, Vec<String>)> = Vec::new(); // (header, start, body)
+    for line in lines {
+        if line.starts_with("@@") {
+            hunks.push((line.to_owned(), hunk_new_start(line), Vec::new()));
+        } else if let Some(last) = hunks.last_mut() {
+            last.2.push(line.to_owned());
+        }
+    }
+    let header_len = header.len();
+    let mut chunks: Vec<DiffChunk> = Vec::new();
+    let mut current = String::new();
+    let mut current_start: Option<u32> = None;
+    let flush = |current: &mut String, current_start: Option<u32>, chunks: &mut Vec<DiffChunk>| {
+        if current.is_empty() {
+            return;
+        }
+        chunks.push(DiffChunk {
+            text: std::mem::take(current),
+            start_line: current_start,
+        });
+    };
+    for (hunk_header, hunk_start, body) in hunks {
+        let hunk_len = hunk_header.len() + body.iter().map(String::len).sum::<usize>();
+        // A hunk joins the current chunk only if the result fits the
+        // cap; the first hunk of a chunk must fit together with the
+        // repeated file header block.
+        let fits_whole = if current.is_empty() {
+            header_len + hunk_len <= cap
+        } else {
+            current.len() + hunk_len <= cap
+        };
+        if fits_whole {
+            if current.is_empty() {
+                current.push_str(&header);
+                current_start = hunk_start;
+            }
+            current.push_str(&hunk_header);
+            current.extend(body.iter().cloned());
+            continue;
+        }
+        // Flush what we have, then place this hunk (splitting it when
+        // it alone exceeds the cap).
+        flush(&mut current, current_start, &mut chunks);
+        current_start = hunk_start;
+        if header_len + hunk_len <= cap {
+            current.push_str(&header);
+            current.push_str(&hunk_header);
+            current.extend(body.iter().cloned());
+            continue;
+        }
+        // Oversized single hunk: line-aligned slices, each under its
+        // own synthetic header naming the continuation's start line.
+        let mut slice = String::new();
+        let mut slice_start = hunk_start;
+        let mut new_line = hunk_start.unwrap_or(1);
+        for line in body {
+            let line_new_len = if line.starts_with('+') || line.starts_with(' ') {
+                1
+            } else {
+                0
+            };
+            let synthetic_len = header_len
+                + synthetic_hunk_header(Some(new_line)).len()
+                + 1 // separator newline
+                + slice.len()
+                + line.len();
+            if !slice.is_empty() && synthetic_len > cap {
+                let text = format!(
+                    "{header}{}\n{synthetic}",
+                    synthetic_hunk_header(slice_start),
+                    synthetic = std::mem::take(&mut slice)
+                );
+                chunks.push(DiffChunk {
+                    text,
+                    start_line: slice_start,
+                });
+                slice_start = Some(new_line);
+            }
+            if line_new_len == 1 {
+                new_line += 1;
+            }
+            if line.len() > cap.saturating_sub(header_len + 64) {
+                // A single line longer than a whole chunk (for example
+                // a minified file): split it on char boundaries with an
+                // explicit marker instead of overflowing the cap.
+                let budget = cap.saturating_sub(header_len + 128);
+                let mut rest = line.as_str();
+                while !rest.is_empty() {
+                    let mut end = budget.min(rest.len());
+                    while end > 0 && !rest.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    end = end.max(1);
+                    let (head, tail) = rest.split_at(end);
+                    chunks.push(DiffChunk {
+                        text: format!(
+                            "{header}{}\n{head}\n[long diff line split across chunks]",
+                            synthetic_hunk_header(slice_start)
+                        ),
+                        start_line: slice_start,
+                    });
+                    slice_start = None;
+                    rest = tail;
+                }
+                continue;
+            }
+            slice.push_str(&line);
+        }
+        if !slice.is_empty() {
+            let text = format!(
+                "{header}{}\n{synthetic}",
+                synthetic_hunk_header(slice_start),
+                synthetic = slice
+            );
+            chunks.push(DiffChunk {
+                text,
+                start_line: slice_start,
+            });
+        }
+        current_start = None;
+    }
+    flush(&mut current, current_start, &mut chunks);
+    chunks
+}
+
+/// The `+start` new-file line of a `@@ -a,b +c,d @@` header line.
+fn hunk_new_start(header: &str) -> Option<u32> {
+    let plus = header.split_once('+')?.1;
+    let start = plus.split([',', ' ']).next()?.parse::<u32>().ok()?;
+    Some(start.max(1))
+}
+
+/// The new-file start of the first hunk of a patch, when parseable.
+fn first_hunk_start(patch: &str) -> Option<u32> {
+    patch
+        .split('\n')
+        .find(|line| line.starts_with("@@"))
+        .and_then(hunk_new_start)
+}
+
+/// Synthetic header for a mid-hunk continuation chunk.
+fn synthetic_hunk_header(start: Option<u32>) -> String {
+    match start {
+        Some(start) => format!("@@ +{start},? @@ (continued from the previous part)"),
+        None => "@@ +?,? @@ (continued from the previous part)".to_string(),
+    }
+}
+
+/// The diff portion of reviewer context plus the omissions the reviewer
+/// must be told about: every changed file whose diff is partially or
+/// entirely absent, with a retrieval pointer.
+pub(crate) struct DiffContext {
+    /// The assembled diff context bundle (entries in display order,
+    /// coverage note last when omissions exist).
+    pub bundle: ContextBundle,
+    /// One descriptor per changed file with an absent diff tail:
+    /// `path (from line N)` or `path (entirely omitted)`.
+    pub omitted: Vec<String>,
+}
+
+/// Assemble the diff entries of reviewer context: every changed file's
+/// diff, chunked to fair per-file shares of the total budget, with
+/// hunk-aligned parts that never silently cut — every omission ends
+/// with an explicit note, all omissions are summarized once, and files
+/// beyond the context file cap are named instead of vanishing.
+fn diff_context_entries(patches: &[SnapshotPatch], overflow_paths: &[String]) -> DiffContext {
+    let changed_files = patches.len() + overflow_paths.len();
+    let share = if changed_files == 0 {
+        DIFF_TOTAL_MAX_BYTES
+    } else {
+        (DIFF_TOTAL_MAX_BYTES / changed_files).clamp(DIFF_TOTAL_MIN_SHARE, DIFF_ENTRY_MAX_BYTES)
+    };
+    // A chunk never exceeds the single-entry text bound, with headroom
+    // for an appended omission note (the bundle assembler truncates
+    // per entry at PLAN_CONTEXT_MAX_BYTES).
+    let chunk_cap = share.min(PLAN_CONTEXT_MAX_BYTES.saturating_sub(512));
+
+    let mut entries: Vec<ContextEntry> = Vec::new();
+    let mut total = 0usize;
+    let mut omitted: Vec<String> = Vec::new();
+
+    for patch in patches {
+        let status = diff_status_label(patch.status);
+        let body: Option<String> = if patch.binary {
+            Some("binary content changed; no textual diff available".to_string())
         } else if let Some(text) = patch.patch.as_deref() {
             if text.is_empty() {
                 // Headers only (for example a mode-only change).
-                "changed with no textual diff (mode change only)".to_string()
+                Some("changed with no textual diff (mode change only)".to_string())
             } else {
-                text.to_owned()
+                Some(text.to_owned())
             }
         } else {
-            "changed; no textual diff available".to_string()
+            Some("changed; no textual diff available".to_string())
         };
-        let text = if body.len() > remaining {
-            truncated = true;
-            if remaining <= 64 {
+        let Some(body) = body else {
+            continue;
+        };
+
+        let chunks = chunk_patch(&body, chunk_cap);
+        let n_parts = chunks.len();
+        let mut placed_any = false;
+        // Deletions have no new-file lines to point at; their omission
+        // descriptors say so instead of fabricating anchors.
+        let deleted = patch.status == DiffStatus::Deleted;
+        let tail_descriptor = |from_line: Option<u32>| -> String {
+            if deleted {
+                format!("{} (old-file tail omitted; file deleted)", patch.path)
+            } else {
+                match from_line {
+                    Some(line) => format!("{} (from line {line})", patch.path),
+                    None => format!("{} (beyond this point)", patch.path),
+                }
+            }
+        };
+        for (index, chunk) in chunks.iter().enumerate() {
+            let remaining = DIFF_TOTAL_MAX_BYTES
+                .saturating_sub(total)
+                .saturating_sub(DIFF_COVERAGE_NOTE_RESERVE);
+            if chunk.text.len() > remaining {
+                // The budget is exhausted mid-file: name exactly where
+                // the visible diff stops. A starved file (nothing
+                // placed) gets exactly one descriptor below.
+                if placed_any {
+                    omitted.push(tail_descriptor(chunk.start_line));
+                }
                 break;
             }
-            format!(
-                "{}\n\u{2026} [diff truncated]",
-                truncate_text(&body, remaining - 24)
-            )
-        } else {
-            body
-        };
+            let text = chunk.text.clone();
+            total += text.len();
+            let title = if n_parts == 1 {
+                format!("diff: {} ({})", patch.path, status)
+            } else {
+                format!(
+                    "diff: {} ({}, part {}/{})",
+                    patch.path,
+                    status,
+                    index + 1,
+                    n_parts
+                )
+            };
+            entries.push(ContextEntry {
+                kind: ContextKind::Diff,
+                title,
+                path: Some(patch.path.clone()),
+                symbol: None,
+                line_start: chunk.start_line,
+                line_end: None,
+                record_id: None,
+                practice_id: None,
+                text,
+                score: 1.0,
+            });
+            placed_any = true;
+        }
+        if !placed_any && n_parts > 0 {
+            omitted.push(format!("{} (entirely omitted)", patch.path));
+        } else if placed_any && patch.truncated {
+            // Every chunk fits, yet the git layer cut the patch at its
+            // materialization cap (its marker rides in the final
+            // chunk): record the tail so the coverage note and lookup
+            // budget account for it.
+            omitted.push(tail_descriptor(
+                chunks.last().and_then(|chunk| chunk.start_line),
+            ));
+        }
+    }
+
+    for path in overflow_paths {
+        omitted.push(format!(
+            "{path} (entirely omitted; beyond the diff file cap)"
+        ));
+    }
+
+    if !omitted.is_empty() {
+        let mut text = String::from(
+            "Diff coverage note: regions of the following changed files are omitted from this context: ",
+        );
+        let listed = omitted.len().min(DIFF_COVERAGE_NOTE_LISTED);
+        text.push_str(&omitted[..listed].join(", "));
+        if omitted.len() > listed {
+            text.push_str(&format!(", +{} more", omitted.len() - listed));
+        }
+        text.push_str(
+            ". Before reporting an issue about an omitted region, verify it with the \
+             source_lookup tool (path=<path>, line_start=<line>); absence from the \
+             visible diff is not evidence of absence in the file.",
+        );
         total += text.len();
         entries.push(ContextEntry {
             kind: ContextKind::Diff,
-            title: format!("diff: {} ({})", patch.path, diff_status_label(patch.status)),
-            path: Some(patch.path.clone()),
+            title: "coverage note: diff context omissions".to_string(),
+            path: None,
             symbol: None,
             line_start: None,
             line_end: None,
@@ -1671,10 +2015,14 @@ fn diff_context_entries(patches: &[SnapshotPatch]) -> ContextBundle {
             score: 1.0,
         });
     }
-    ContextBundle {
-        entries,
-        truncated,
-        text_bytes: total,
+
+    DiffContext {
+        bundle: ContextBundle {
+            entries,
+            truncated: !omitted.is_empty(),
+            text_bytes: total,
+        },
+        omitted,
     }
 }
 
@@ -1798,6 +2146,21 @@ fn persist_review_event(paths: &StoragePaths, event: &ReviewEvent<'_>) -> Result
             .specs
             .iter()
             .map(|spec| {
+                let context_titles: serde_json::Value = {
+                    let titles: Vec<&str> = spec
+                        .initial_context
+                        .iter()
+                        .map(|entry| entry.title.as_str())
+                        .collect();
+                    let cap = 32;
+                    if titles.len() <= cap {
+                        json!(titles)
+                    } else {
+                        let mut shown: Vec<String> = titles[..cap].iter().map(|t| t.to_string()).collect();
+                        shown.push(format!("+{} more", titles.len() - cap));
+                        json!(shown)
+                    }
+                };
                 json!({
                     "reviewer_id": spec.reviewer_id,
                     "specialization": spec.specialization,
@@ -1805,6 +2168,7 @@ fn persist_review_event(paths: &StoragePaths, event: &ReviewEvent<'_>) -> Result
                     "thinking_level": spec.thinking_level,
                     "checklist_items": spec.checklist.len(),
                     "context_entries": spec.initial_context.len(),
+                    "context_titles": context_titles,
                     "capabilities": spec
                         .allowed_capabilities
                         .iter()
@@ -2214,7 +2578,7 @@ mod tests {
             patch("assets/blob.bin", DiffStatus::Modified, None, true),
             patch("mode.sh", DiffStatus::Modified, Some(""), false),
         ];
-        let bundle = diff_context_entries(&patches);
+        let bundle = diff_context_entries(&patches, &[]).bundle;
         assert_eq!(bundle.entries.len(), 3);
         assert!(!bundle.truncated);
         let first = &bundle.entries[0];
@@ -2235,52 +2599,185 @@ mod tests {
     }
 
     #[test]
-    fn diff_context_entries_honor_the_aggregate_budget() {
-        // Uneven sizes force the last admitted entry to overflow the
-        // aggregate budget and be truncated to fit.
-        let filler = "x".repeat(15_000);
-        let patches: Vec<SnapshotPatch> = (0..8)
-            .map(|index| {
-                patch(
-                    &format!("src/file{index:02}.rs"),
-                    DiffStatus::Modified,
-                    Some(&filler),
-                    false,
-                )
-            })
+    fn diff_context_entries_chunk_large_diffs_hunk_aligned() {
+        // A multi-hunk patch larger than one chunk splits on hunk
+        // boundaries; every part repeats the file header and carries
+        // its new-file start line.
+        let hunk = |start: u32| {
+            format!("@@ -{start},3 +{start},3 @@\n context\n-old{start}\n+new{start}\n")
+        };
+        let mut big = String::from("diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n");
+        for start in 1..800 {
+            big.push_str(&hunk(start * 10));
+        }
+        assert!(big.len() > DIFF_TOTAL_MIN_SHARE);
+        let patches = vec![patch("src/big.rs", DiffStatus::Modified, Some(&big), false)];
+        let context = diff_context_entries(&patches, &[]);
+        assert!(context.omitted.is_empty(), "{:?}", context.omitted);
+        let titles: Vec<&str> = context
+            .bundle
+            .entries
+            .iter()
+            .map(|entry| entry.title.as_str())
             .collect();
-        let bundle = diff_context_entries(&patches);
-        assert!(bundle.text_bytes <= DIFF_TOTAL_MAX_BYTES);
-        assert!(bundle.truncated, "entries beyond the budget are dropped");
-        assert_eq!(
-            bundle.entries.len(),
-            5,
-            "four full entries plus one truncated"
-        );
-        // The last admitted entry is truncated to fit exactly.
-        let last = bundle.entries.last().unwrap();
+        assert!(titles.len() >= 2, "large patch splits: {titles:?}");
         assert!(
-            last.text.contains("[diff truncated]"),
-            "{}",
-            last.text.len()
+            titles
+                .iter()
+                .all(|title| title.starts_with("diff: src/big.rs (modified, part ")),
+            "{titles:?}"
         );
+        // Every part is header-complete and hunk-anchored.
+        for entry in &context.bundle.entries {
+            assert!(entry.text.starts_with("diff --git a/big.rs b/big.rs"));
+            assert!(entry.text.contains("@@"));
+            assert!(entry.text.len() <= PLAN_CONTEXT_MAX_BYTES);
+        }
+        // Parts cover strictly increasing new-file lines.
+        let starts: Vec<u32> = context
+            .bundle
+            .entries
+            .iter()
+            .map(|entry| entry.line_start.unwrap_or(0))
+            .collect();
+        let mut sorted = starts.clone();
+        sorted.sort();
+        assert_eq!(starts, sorted, "{starts:?}");
+    }
 
-        // Exact fits do not count as truncation.
-        let exact = "x".repeat(DIFF_ENTRY_MAX_BYTES);
-        let patches: Vec<SnapshotPatch> = (0..4)
-            .map(|index| {
+    #[test]
+    fn diff_context_entries_split_oversized_single_hunks_with_synthetic_headers() {
+        // One hunk far larger than the chunk cap: continuations get
+        // synthetic headers naming the continuation's start line.
+        let mut body = String::new();
+        for line in 0..6_000 {
+            body.push_str(&format!("+line {line}\n"));
+        }
+        let huge = format!(
+            "diff --git a/huge.gs b/huge.gs\n--- /dev/null\n+++ b/huge.gs\n@@ -0,0 +1,6000 @@\n{body}"
+        );
+        let patches = vec![patch("src/huge.gs", DiffStatus::Added, Some(&huge), false)];
+        let context = diff_context_entries(&patches, &[]);
+        assert!(context.omitted.is_empty(), "{:?}", context.omitted);
+        assert!(
+            context.bundle.entries.len() >= 2,
+            "oversized hunk splits: {:?}",
+            context.bundle.entries.len()
+        );
+        for entry in &context.bundle.entries {
+            assert!(entry.text.len() <= PLAN_CONTEXT_MAX_BYTES);
+            assert!(entry.text.contains("@@"), "synthetic header present");
+        }
+        // Continuation chunks state their start line.
+        assert!(
+            context.bundle.entries[1]
+                .text
+                .contains("(continued from the previous part)")
+        );
+    }
+
+    #[test]
+    fn diff_context_entries_name_omissions_and_summarize_once() {
+        // More data than the total budget: every cut is named with a
+        // line anchor, files beyond the budget are named entirely, and
+        // exactly one coverage note is appended.
+        let patches: Vec<SnapshotPatch> = (0..9)
+            .map(|i| {
+                let mut p =
+                    format!("diff --git a/f{i}.rs b/f{i}.rs\n--- a/f{i}.rs\n+++ b/f{i}.rs\n");
+                for h in 0..600 {
+                    p.push_str(&format!("@@ +{} @@\n+{}\n", h * 10 + 1, "x".repeat(40)));
+                }
                 patch(
-                    &format!("src/fit{index}.rs"),
+                    &format!("src/f{i}.rs"),
                     DiffStatus::Modified,
-                    Some(&exact),
+                    Some(&p),
                     false,
                 )
             })
             .collect();
-        let bundle = diff_context_entries(&patches);
-        assert_eq!(bundle.entries.len(), 4);
-        assert!(!bundle.truncated);
-        assert_eq!(bundle.text_bytes, DIFF_TOTAL_MAX_BYTES);
+        let overflow = vec!["src/overflow.rs".to_string()];
+        let context = diff_context_entries(&patches, &overflow);
+        assert!(!context.omitted.is_empty());
+        assert!(context.bundle.truncated);
+        assert!(context.bundle.text_bytes <= DIFF_TOTAL_MAX_BYTES);
+        // Exactly one coverage note, listing omissions and the overflow.
+        let notes: Vec<&ContextEntry> = context
+            .bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.title.contains("coverage note"))
+            .collect();
+        assert_eq!(notes.len(), 1, "one summary note");
+        let note = notes[0];
+        assert!(
+            note.text
+                .contains("src/overflow.rs (entirely omitted; beyond the diff file cap)")
+        );
+        assert!(note.text.contains("verify"));
+        assert!(note.text.contains("source_lookup"));
+        // Omitted tails carry line anchors.
+        assert!(
+            context
+                .omitted
+                .iter()
+                .any(|omission| omission.contains("from line ")),
+            "{:?}",
+            context.omitted
+        );
+        // The mid-file cut leaves a retrieval hint on the last placed
+        // part only when the git layer cut it; budget cuts are named in
+        // the note. Either way nothing disappears silently.
+        for omission in &context.omitted {
+            assert!(
+                omission.contains("from line ") || omission.contains("entirely omitted"),
+                "{omission}"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_context_entries_exact_fit_is_not_truncated() {
+        // A single file whose patch exactly fills the total budget:
+        // chunked, complete, no omissions.
+        let mut p = String::from("diff --git a/fit.rs b/fit.rs\n--- a/fit.rs\n+++ b/fit.rs\n");
+        let mut line = 1;
+        // Headroom for the per-part repeated file headers.
+        while p.len() < DIFF_TOTAL_MAX_BYTES - 4096 {
+            p.push_str(&format!("@@ +{} @@\n+{}\n", line, "y".repeat(30)));
+            line += 1;
+        }
+        let patches = vec![patch("src/fit.rs", DiffStatus::Modified, Some(&p), false)];
+        let context = diff_context_entries(&patches, &[]);
+        assert!(context.omitted.is_empty(), "{:?}", context.omitted);
+        assert!(!context.bundle.truncated);
+        assert!(context.bundle.text_bytes <= DIFF_TOTAL_MAX_BYTES);
+        for entry in &context.bundle.entries {
+            assert!(entry.text.len() <= PLAN_CONTEXT_MAX_BYTES);
+        }
+    }
+
+    #[test]
+    fn diff_context_entries_small_diffs_stay_single_entries() {
+        let patches = vec![
+            patch(
+                "src/a.rs",
+                DiffStatus::Modified,
+                Some("--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,2 @@\n-a\n+b"),
+                false,
+            ),
+            patch(
+                "src/b.rs",
+                DiffStatus::Added,
+                Some("--- /dev/null\n+++ b/src/b.rs\n@@ -0,0 +1 @@\n+new"),
+                false,
+            ),
+        ];
+        let context = diff_context_entries(&patches, &[]);
+        assert_eq!(context.bundle.entries.len(), 2);
+        assert!(context.omitted.is_empty());
+        assert!(!context.bundle.truncated);
+        assert_eq!(context.bundle.entries[0].title, "diff: src/a.rs (modified)");
     }
 
     #[test]
@@ -2344,5 +2841,155 @@ mod tests {
         assert!(instructions.starts_with("Base instructions."));
         assert!(instructions.contains("## Review kind: code"));
         assert!(instructions.contains("unified diff entries"));
+    }
+
+    #[test]
+    fn lookup_budget_for_omissions_clamps_at_the_cap() {
+        assert_eq!(lookup_budget_for_omissions(0), REVIEWER_MAX_LOOKUP_CALLS);
+        assert_eq!(
+            lookup_budget_for_omissions(1),
+            REVIEWER_MAX_LOOKUP_CALLS + 2
+        );
+        assert_eq!(
+            lookup_budget_for_omissions(8),
+            REVIEWER_MAX_LOOKUP_CALLS_CAP
+        );
+        assert_eq!(
+            lookup_budget_for_omissions(50),
+            REVIEWER_MAX_LOOKUP_CALLS_CAP
+        );
+    }
+
+    #[test]
+    fn budget_starved_files_get_exactly_one_omission_descriptor() {
+        // Enough files to exhaust the total budget: the starved file
+        // must not appear twice in the omission list.
+        let patches: Vec<SnapshotPatch> = (0..12)
+            .map(|i| {
+                let mut p =
+                    format!("diff --git a/s{i}.rs b/s{i}.rs\n--- a/s{i}.rs\n+++ b/s{i}.rs\n");
+                for h in 0..900 {
+                    p.push_str(&format!("@@ +{} @@\n+{}\n", h * 10 + 1, "x".repeat(30)));
+                }
+                patch(
+                    &format!("src/s{i}.rs"),
+                    DiffStatus::Modified,
+                    Some(&p),
+                    false,
+                )
+            })
+            .collect();
+        let context = diff_context_entries(&patches, &[]);
+        assert!(!context.omitted.is_empty());
+        let mut paths: Vec<&str> = context
+            .omitted
+            .iter()
+            .map(|omission| omission.split(" (").next().unwrap())
+            .collect();
+        paths.sort_unstable();
+        let duplicates = paths.windows(2).any(|pair| pair[0] == pair[1]);
+        assert!(!duplicates, "{:?}", context.omitted);
+        // The note stays inside its reserve: the total respects the
+        // aggregate budget even with the appended note.
+        assert!(context.bundle.text_bytes <= DIFF_TOTAL_MAX_BYTES);
+        let note_count = context
+            .bundle
+            .entries
+            .iter()
+            .filter(|entry| entry.title.contains("coverage note"))
+            .count();
+        assert_eq!(note_count, 1);
+    }
+
+    #[test]
+    fn materialization_capped_patches_report_their_tail_when_fully_placed() {
+        // A single file whose patch was cut at the git-layer
+        // materialization cap (128 KiB) fits the total budget (160 KiB):
+        // every chunk is placed and the tail is still recorded.
+        let mut p = String::from("diff --git a/cap.rs b/cap.rs\n--- a/cap.rs\n+++ b/cap.rs\n");
+        let mut line = 1;
+        while p.len() < DIFF_ENTRY_MAX_BYTES + 4096 {
+            p.push_str(&format!("@@ +{} @@\n+{}\n", line, "z".repeat(40)));
+            line += 1;
+        }
+        // Emulate the git layer: cut at the cap with the marker and the
+        // truncated flag (the real marker text rides in the last chunk).
+        let (cut, _) = {
+            let mut text = p[..p.len().saturating_sub(120)].to_string();
+            text.push_str(&format!(
+                "\n\u{2026} [diff truncated after {DIFF_ENTRY_MAX_BYTES} bytes; verify the omitted region via source_lookup (path=src/cap.rs)]"
+            ));
+            (text, ())
+        };
+        let patches = vec![SnapshotPatch {
+            path: "src/cap.rs".to_string(),
+            status: DiffStatus::Modified,
+            binary: false,
+            patch: Some(cut),
+            truncated: true,
+        }];
+        let context = diff_context_entries(&patches, &[]);
+        assert!(
+            context.omitted.len() == 1,
+            "the materialization cap tail is recorded: {:?}",
+            context.omitted
+        );
+        assert!(context.omitted[0].contains("from line "));
+        assert!(context.bundle.text_bytes <= DIFF_TOTAL_MAX_BYTES);
+    }
+
+    #[test]
+    fn chunk_patch_fallbacks_split_headerless_and_malformed_bodies() {
+        // A large body with no hunk headers: line-aligned byte chunks.
+        let body = "diff --git a/plain.txt b/plain.txt\n+++ b/plain.txt\n".to_string();
+        let headerless = format!("{body}{}", "raw content line\n".repeat(4_000));
+        let chunks = chunk_patch(&headerless, 2048);
+        assert!(chunks.len() >= 2, "{}", chunks.len());
+        for chunk in &chunks {
+            assert!(chunk.text.len() <= 2048, "{}", chunk.text.len());
+        }
+        // A hunk whose start cannot be parsed: continuations still
+        // carry a synthetic (line-less) header.
+        let malformed = format!("{body}@@ garbage @@\n{}", "+minified data\n".repeat(4_000));
+        let chunks = chunk_patch(&malformed, 2048);
+        assert!(chunks.len() >= 2);
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("(continued from the previous part)"))
+        );
+        // A single line longer than a chunk splits on char boundaries
+        // with an explicit marker.
+        let minified = format!("{body}@@ +1 @@\n+{}\n", "m".repeat(9_000));
+        let chunks = chunk_patch(&minified, 2048);
+        assert!(chunks.len() >= 3, "{}", chunks.len());
+        for chunk in &chunks {
+            assert!(chunk.text.len() <= 2048 + 256, "{}", chunk.text.len());
+        }
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("[long diff line split across chunks]"))
+        );
+    }
+
+    #[test]
+    fn deleted_file_omissions_do_not_fabricate_line_anchors() {
+        let mut p = String::from("diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n");
+        let mut line = 1;
+        while p.len() < DIFF_TOTAL_MAX_BYTES {
+            p.push_str(&format!("@@ -{} +0,0 @@\n-gone {line}\n", line));
+            line += 1;
+        }
+        let patches = vec![patch("src/gone.rs", DiffStatus::Deleted, Some(&p), false)];
+        let context = diff_context_entries(&patches, &[]);
+        assert!(
+            context
+                .omitted
+                .iter()
+                .all(|omission| omission.contains("file deleted")),
+            "{:?}",
+            context.omitted
+        );
     }
 }

@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "logic",
+  "created_at": "2026-10-13T14:25:41.499Z",
+  "finding_id": "01M4TSW4H1WB9147VY7NNRDY0R",
+  "id": "01M4TTF93V5Y1PXDCSXF70HABZ",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/jury/review.rs"
+  ],
+  "review_id": "01M4TSJ4WZVDWS2WN2X08RWGFB",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "1b65f2fe2fcdf3bb25762635807a890dd96e0876",
+    "base_tree": "727bd6b94fbe646f7d2a0e4e0e207083bb0b3c54",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "correctness",
+    "logic"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "test_hygiene",
+  "created_at": "2026-10-13T14:25:55.934Z",
+  "finding_id": "01M4TSW4H1SNQYH9HKVKFW4NKB",
+  "id": "01M4TTFQ6YJSBDVA7GE4HCCW27",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "tests/integration/code_review.rs"
+  ],
+  "review_id": "01M4TSJ4WZVDWS2WN2X08RWGFB",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "1b65f2fe2fcdf3bb25762635807a890dd96e0876",
+    "base_tree": "727bd6b94fbe646f7d2a0e4e0e207083bb0b3c54",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "maintainability",
+    "test_hygiene"
+  ]
+}

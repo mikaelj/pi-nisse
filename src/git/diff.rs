@@ -185,7 +185,7 @@ pub fn snapshot_patches(
             args.push(old_path);
         }
         let output = ctx.runner().run(&ctx.worktree_root, &args)?;
-        let (patch, truncated) = truncate_patch(&output.stdout, per_file_budget);
+        let (patch, truncated) = truncate_patch(&output.stdout, &entry.path, per_file_budget);
         patches.push(SnapshotPatch {
             path: entry.path.clone(),
             status: entry.status,
@@ -219,8 +219,9 @@ fn patch_args(ctx: &RepoContext, resolved: &ResolvedSnapshot) -> Vec<String> {
 }
 
 /// Truncate patch text to a byte budget on a char boundary, marking the
-/// truncation deterministically.
-fn truncate_patch(text: &str, max_bytes: usize) -> (String, bool) {
+/// truncation deterministically and pointing the reviewer at the tool
+/// that can verify the omitted region.
+fn truncate_patch(text: &str, path: &str, max_bytes: usize) -> (String, bool) {
     if text.len() <= max_bytes {
         return (text.to_owned(), false);
     }
@@ -230,7 +231,7 @@ fn truncate_patch(text: &str, max_bytes: usize) -> (String, bool) {
     }
     let mut truncated = text[..end].to_owned();
     truncated.push_str(&format!(
-        "\n\u{2026} [diff truncated after {max_bytes} bytes]"
+        "\n\u{2026} [diff truncated after {max_bytes} bytes; verify the omitted region via source_lookup (path={path})]"
     ));
     (truncated, true)
 }
@@ -248,7 +249,7 @@ fn synthesize_added_patch(
     let mut patch = format!("diff --git a/{path} b/{path}\n--- /dev/null\n+++ b/{path}\n");
     if text.is_empty() {
         // An empty file has no hunks.
-        return Some(truncate_patch(&patch, per_file_budget));
+        return Some(truncate_patch(&patch, path, per_file_budget));
     }
     let has_final_newline = text.ends_with('\n');
     let body = text.strip_suffix('\n').unwrap_or(text);
@@ -268,7 +269,7 @@ fn synthesize_added_patch(
             patch.push_str("\\ No newline at end of file\n");
         }
     }
-    Some(truncate_patch(&patch, per_file_budget))
+    Some(truncate_patch(&patch, path, per_file_budget))
 }
 
 /// Compute the diff between the base and target sides of a resolved
@@ -1550,8 +1551,13 @@ second",
         let big = patch_of(&patches, "big.txt");
         assert!(big.truncated);
         let text = big.patch.as_deref().expect("textual patch");
-        assert!(text.len() < 600, "{}", text.len());
+        // The marker grew: it now names the file and the retrieval tool.
+        assert!(text.len() < 700, "{}", text.len());
         assert!(text.contains("diff truncated after 512 bytes"), "{text}");
+        assert!(
+            text.contains("verify the omitted region via source_lookup (path=big.txt)"),
+            "{text}"
+        );
 
         // The entry cap bounds how many paths are patched.
         let resolved = resolve_snapshot(&ctx, &SnapshotSpec::Working).unwrap();

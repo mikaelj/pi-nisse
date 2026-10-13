@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "chunk-boundaries-split-hunks",
+  "created_at": "2026-10-13T13:49:27.524Z",
+  "finding_id": "01M4TR5WWDQBB78WH12V1Y42TY",
+  "id": "01M4TRCY34FMPCFJ6SWTMS5MBP",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/git/diff.rs"
+  ],
+  "review_id": "01M4TQX454XKXMWB2W767C4CA7",
+  "reviewer_id": "dynamic-domain-expert",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "1b65f2fe2fcdf3bb25762635807a890dd96e0876",
+    "base_tree": "727bd6b94fbe646f7d2a0e4e0e207083bb0b3c54",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "correctness",
+    "chunk-boundaries-split-hunks"
+  ]
+}

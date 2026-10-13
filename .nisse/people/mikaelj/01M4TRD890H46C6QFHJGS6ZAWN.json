@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "truncation-flag-propagation",
+  "created_at": "2026-10-13T13:49:37.952Z",
+  "finding_id": "01M4TR5WWD7FDAFW1NT19XTM5V",
+  "id": "01M4TRD890H46C6QFHJGS6ZAWN",
+  "impact_class": "maintainability",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/git/diff.rs"
+  ],
+  "review_id": "01M4TQX454XKXMWB2W767C4CA7",
+  "reviewer_id": "dynamic-domain-expert",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "1b65f2fe2fcdf3bb25762635807a890dd96e0876",
+    "base_tree": "727bd6b94fbe646f7d2a0e4e0e207083bb0b3c54",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "maintainability",
+    "truncation-flag-propagation"
+  ]
+}
