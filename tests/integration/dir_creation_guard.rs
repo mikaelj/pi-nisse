@@ -46,7 +46,7 @@ fn directory_creation_sites_are_only_the_gated_helpers() {
                 .strip_prefix(&manifest)
                 .expect("path below manifest")
                 .to_string_lossy()
-                .into_owned();
+                .replace('\\', "/");
             if !relative.ends_with(".rs") {
                 continue;
             }

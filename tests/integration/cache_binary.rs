@@ -86,10 +86,20 @@ fn status_in_fresh_repository_reports_not_created_without_creating() {
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(stderr, "", "a healthy status run must not write to stderr");
     assert!(stdout.starts_with("nisse cache status\n"));
-    assert!(stdout.contains(&format!(
+    let shared_text = format!(
         "shared cache: {}",
-        repo_root.join(".git").join("nisse").join("cache.sqlite").display()
-    )));
+        repo_root
+            .join(".git")
+            .join("nisse")
+            .join("cache.sqlite")
+            .display()
+    );
+    assert!(
+        stdout
+            .replace('\\', "/")
+            .contains(&shared_text.replace('\\', "/")),
+        "expected `{shared_text}` in stdout:\n{stdout}"
+    );
     assert!(stdout.contains(&format!(
         "worktree cache: {}",
         repo_root
@@ -271,7 +281,13 @@ fn linked_worktrees_share_the_cache_and_keep_private_worktree_databases() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}");
     let shared_path = repo_root.join(".git").join("nisse").join("cache.sqlite");
-    assert!(stdout.contains(&format!("shared cache: {}", shared_path.display())));
+    let shared_text = format!("shared cache: {}", shared_path.display());
+    assert!(
+        stdout
+            .replace('\\', "/")
+            .contains(&shared_text.replace('\\', "/")),
+        "expected `{shared_text}` in stdout:\n{stdout}"
+    );
     assert!(stdout.contains(&format!(
         "worktree cache: {}",
         repo_root

@@ -212,7 +212,13 @@ fn allow_paths_grant_exactly_the_named_paths() {
     let out = run_nisse_in_with_env(&repo, &["query", "version"], home.path(), NO_CONSENT);
     let stdout = String::from_utf8(out.stdout).unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    let doctor = run_nisse_in_with_env(&repo, &["doctor"], home.path(), NO_CONSENT);
+    let doctor_out = String::from_utf8_lossy(&doctor.stdout);
+    let doctor_err = String::from_utf8_lossy(&doctor.stderr);
+    assert!(
+        out.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{stderr}\ndoctor:\n{doctor_out}\n{doctor_err}"
+    );
     assert!(
         cache_dir.exists(),
         "the allowed cache dir should be created"

@@ -96,7 +96,7 @@ impl Repo {
             .tempdir()
             .expect("tempdir");
         git(dir.path(), &["init", "--quiet", "repo"]);
-        let root = dir.path().join("repo").canonicalize().unwrap();
+        let root = crate::plain_canonical(&dir.path().join("repo"));
         for (key, value) in [
             ("user.email", "nisse@test.invalid"),
             ("user.name", "Nisse Test"),
@@ -900,7 +900,7 @@ fn linked_worktrees_with_equal_paths_stay_isolated() {
             "feature",
         ],
     );
-    let wt_root = wt_path.canonicalize().unwrap();
+    let wt_root = crate::plain_canonical(&wt_path);
 
     // Both worktrees share one common dir (and therefore one shared
     // cache database).
@@ -913,6 +913,10 @@ fn linked_worktrees_with_equal_paths_stay_isolated() {
             root.join(path)
         }
         .canonicalize()
+        .map(|path| {
+            let text = path.to_string_lossy().into_owned();
+            std::path::PathBuf::from(text.trim_start_matches(r"\\?\").to_string())
+        })
         .expect("common dir exists")
     }
     assert_eq!(common_dir(&repo.root), common_dir(&wt_root));

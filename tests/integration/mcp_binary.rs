@@ -69,6 +69,7 @@ impl McpSession {
             .arg("mcp")
             .current_dir(repo)
             .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
             .env("XDG_CONFIG_HOME", home.path().join("xdg"))
             .env("APPDATA", home.path().join("appdata"))
             .env("RUST_LOG", "off")

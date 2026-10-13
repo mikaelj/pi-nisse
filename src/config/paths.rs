@@ -49,6 +49,16 @@ pub fn user_config_path() -> Option<PathBuf> {
 /// (`<platform config dir>/nisse/config.toml`), read as a fallback for
 /// one release after the config moved to `$HOME/.nisse`.
 pub fn legacy_user_config_path() -> Option<PathBuf> {
+    if cfg!(windows) {
+        // Same rationale as `usable_home`: honor a redirected
+        // %APPDATA% before the registry-resolved Roaming profile.
+        if let Some(appdata) = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .filter(|appdata| appdata.is_absolute())
+        {
+            return Some(appdata.join("nisse").join("config.toml"));
+        }
+    }
     dirs::config_dir().map(|dir| dir.join("nisse").join("config.toml"))
 }
 

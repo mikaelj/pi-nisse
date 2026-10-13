@@ -88,7 +88,7 @@ fn repo(label: &str) -> (tempfile::TempDir, PathBuf) {
             "one",
         ],
     );
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::plain_canonical(dir.path());
     (dir, root)
 }
 
@@ -147,7 +147,13 @@ fn records_list_in_fresh_repository_reports_zero_records() {
     assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(stderr, "", "an empty listing must not write to stderr");
     assert!(stdout.starts_with("nisse records — 0 records in "));
-    assert!(stdout.contains(&format!("in {}\n", repo_root.join(".nisse").display())));
+    let records_text = format!("in {}\n", repo_root.join(".nisse").display());
+    assert!(
+        stdout
+            .replace('\\', "/")
+            .contains(&records_text.replace('\\', "/")),
+        "expected `{records_text}` in stdout:\n{stdout}"
+    );
     assert!(stdout.contains("facts (0)"));
     assert!(stdout.contains("lessons (0)"));
     assert!(stdout.contains("observations (0)"));
