@@ -113,7 +113,10 @@ fn legacy_config_is_loaded_with_a_migration_notice() {
         1,
         "stderr: {stderr}"
     );
-    assert!(stderr.contains(".nisse/config.toml"));
+    assert!(
+        stderr.replace('\\', "/").contains(".nisse/config.toml"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

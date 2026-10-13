@@ -146,7 +146,13 @@ fn interactive_always_prompts_persists_and_is_honored_next_run() {
         .iter()
         .filter_map(toml::Value::as_str)
         .collect();
-    let canonical_cache = std::fs::canonicalize(&cache_dir).unwrap();
+    // Production persists the canonical form WITHOUT the Windows
+    // verbatim prefix; a raw canonicalize() here yields `\\?\...`.
+    let canonical_cache = {
+        let raw = std::fs::canonicalize(&cache_dir).unwrap();
+        let text = raw.to_string_lossy().into_owned();
+        std::path::PathBuf::from(text.trim_start_matches(r"\\?\").to_string())
+    };
     assert!(
         allowed.contains(&canonical_cache.to_string_lossy().as_ref()),
         "allowed={allowed:?}, canonical={}",
@@ -203,9 +209,21 @@ fn allow_paths_grant_exactly_the_named_paths() {
     let (_dir, repo, home) = init_repo("consent-allow");
     let git = git_dir(&repo);
     let cache_dir = git.join("nisse");
+    // Seed the entry in the canonical long-name form production
+    // canonicalizes both sides to (the raw git output may carry the
+    // 8.3 short form or forward slashes). The cache directory itself
+    // does not exist yet — consent gates its creation — so the
+    // existing `.git` parent carries the canonical form.
+    let canonical_entry = {
+        let raw = std::fs::canonicalize(cache_dir.parent().expect(".git parent"))
+            .unwrap()
+            .join("nisse");
+        let text = raw.to_string_lossy().replace('\\', "/");
+        std::path::PathBuf::from(text)
+    };
     let config = format!(
         "[contributor]\nid = \"alice\"\n\n[directories]\nallow_paths = [\"{}\"]\n",
-        cache_dir.display()
+        canonical_entry.display()
     );
     write_user_config(home.path(), &config);
 

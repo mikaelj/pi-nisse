@@ -100,14 +100,20 @@ fn status_in_fresh_repository_reports_not_created_without_creating() {
             .contains(&shared_text.replace('\\', "/")),
         "expected `{shared_text}` in stdout:\n{stdout}"
     );
-    assert!(stdout.contains(&format!(
+    let worktree_text = format!(
         "worktree cache: {}",
         repo_root
             .join(".git")
             .join("nisse")
             .join("worktree.sqlite")
             .display()
-    )));
+    );
+    assert!(
+        stdout
+            .replace('\\', "/")
+            .contains(&worktree_text.replace('\\', "/")),
+        "expected `{worktree_text}` in stdout:\n{stdout}"
+    );
     assert_eq!(
         stdout.matches("status: not created").count(),
         2,
@@ -288,7 +294,7 @@ fn linked_worktrees_share_the_cache_and_keep_private_worktree_databases() {
             .contains(&shared_text.replace('\\', "/")),
         "expected `{shared_text}` in stdout:\n{stdout}"
     );
-    assert!(stdout.contains(&format!(
+    let wt_cache_text = format!(
         "worktree cache: {}",
         repo_root
             .join(".git")
@@ -297,7 +303,13 @@ fn linked_worktrees_share_the_cache_and_keep_private_worktree_databases() {
             .join("nisse")
             .join("worktree.sqlite")
             .display()
-    )));
+    );
+    assert!(
+        stdout
+            .replace('\\', "/")
+            .contains(&wt_cache_text.replace('\\', "/")),
+        "expected `{wt_cache_text}` in stdout:\n{stdout}"
+    );
     // The shared cache is healthy (created by the main worktree) while
     // the private worktree cache does not exist yet.
     assert!(stdout.contains("status: ok"));
