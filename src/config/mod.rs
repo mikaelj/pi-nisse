@@ -705,8 +705,9 @@ mod tests {
         let user_config = dir.path().join("config.toml");
         // `is_absolute` is drive-relative on Windows: use a genuinely
         // absolute platform path for the surviving entry.
+        // Forward slashes are TOML-safe and absolute on Windows too.
         let absolute = if cfg!(windows) {
-            "C:\\abs\\ok"
+            "C:/abs/ok"
         } else {
             "/abs/ok"
         };
