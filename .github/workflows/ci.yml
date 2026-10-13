@@ -62,7 +62,7 @@ jobs:
           # Windows runners are materially slower than the frozen perf
           # bounds' reference machine; the perf suite exists to catch
           # regressions, not machine-speed differences.
-          NISSE_PERF_SCALE: ${{ matrix.os == 'windows-latest' && '4' || '1' }}
+          NISSE_PERF_SCALE: ${{ matrix.os == 'ubuntu-latest' && '1' || matrix.os == 'macos-latest' && '2' || '4' }}
 
   # TypeScript gates (plan section 0.4): the Pi review host and the
   # Pi integration package are shipped product surfaces, so their

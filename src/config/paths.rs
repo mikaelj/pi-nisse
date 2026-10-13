@@ -18,9 +18,12 @@ use std::path::{Path, PathBuf};
 ///
 /// - non-Windows: `$HOME` when it is non-empty and absolute, else
 ///   `dirs::home_dir()` under the same usability filters;
-/// - Windows: `dirs::home_dir()` (USERPROFILE) — `$HOME` is nonstandard
-///   there (Git Bash/MSYS set it) and could otherwise split the config
-///   across two files depending on the shell.
+/// - Windows: `%USERPROFILE%` when it is non-empty and absolute, else
+///   `dirs::home_dir()` — `$HOME` is nonstandard there (Git Bash/MSYS
+///   set it) and could otherwise split the config across two files
+///   depending on the shell. (The environment variable deliberately
+///   wins: `dirs` 6 resolves the profile through the registry only,
+///   which ignores a redirected USERPROFILE.)
 ///
 /// Empty or relative candidates count as unset. Returns `None` only when
 /// no usable home directory is resolvable at all.
@@ -30,7 +33,8 @@ fn usable_home() -> Option<PathBuf> {
             .filter(|home| home.is_absolute())
     }
     if cfg!(windows) {
-        usable(dirs::home_dir())
+        usable(std::env::var_os("USERPROFILE").map(PathBuf::from))
+            .or_else(|| usable(dirs::home_dir()))
     } else {
         usable(std::env::var_os("HOME").map(PathBuf::from)).or_else(|| usable(dirs::home_dir()))
     }

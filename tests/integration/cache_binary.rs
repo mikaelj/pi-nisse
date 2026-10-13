@@ -30,7 +30,7 @@ fn repo(label: &str) -> (tempfile::TempDir, PathBuf) {
             "one",
         ],
     );
-    let root = dir.path().canonicalize().unwrap();
+    let root = crate::plain_canonical(dir.path());
     (dir, root)
 }
 
@@ -266,7 +266,7 @@ fn linked_worktrees_share_the_cache_and_keep_private_worktree_databases() {
 
     // The linked worktree sees the same shared cache file but its own
     // private worktree database.
-    let wt_root = wt_path.canonicalize().unwrap();
+    let wt_root = crate::plain_canonical(&wt_path);
     let out = run_nisse_in(&wt_root, &["cache", "status"], home.path());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "stdout:\n{stdout}");

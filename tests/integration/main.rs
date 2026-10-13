@@ -82,6 +82,15 @@ pub(crate) fn run_nisse_in_with_env(
     command.output().expect("failed to spawn nisse binary")
 }
 
+/// Canonicalize and strip the Windows verbatim (`\\?\`) device-path
+/// prefix: nisse prints plain canonical paths, and raw `canonicalize()`
+/// yields verbatim paths on Windows.
+pub(crate) fn plain_canonical(path: &std::path::Path) -> std::path::PathBuf {
+    let canonical = path.canonicalize().expect("canonicalize fixture path");
+    let text = canonical.to_string_lossy().into_owned();
+    std::path::PathBuf::from(text.trim_start_matches(r"\\?\").to_string())
+}
+
 /// Write the same user config into every platform-native location the
 /// `dirs` crate may consult (macOS, Linux/XDG, Windows).
 pub(crate) fn write_user_config(home: &Path, contents: &str) {
