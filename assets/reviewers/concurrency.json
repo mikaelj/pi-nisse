@@ -39,7 +39,11 @@
     "typescript"
   ],
   "path_hints": [],
-  "practice_tags": ["concurrency", "shared-state", "queues"],
+  "practice_tags": [
+    "concurrency",
+    "shared-state",
+    "queues"
+  ],
   "checklist": [
     "Shared mutable state: identify every variable or structure reachable from more than one execution context.",
     "Task/thread/ISR context: determine which contexts can execute the changed code.",
@@ -50,7 +54,9 @@
     "Ordering: check that happens-before relationships make every interleaving safe.",
     "Lifetime: check that shared data outlives every context that can reach it.",
     "Races: check for unsynchronized read-modify-write sequences.",
-    "Deadlocks: check for inconsistent lock ordering and self-deadlock."
+    "Deadlocks: check for inconsistent lock ordering and self-deadlock.",
+    "Before reporting that no test covers X, read the complete relevant file(s): request explicit line ranges when a file may exceed your remaining lookup budget (a rangeless read of an oversized file returns only a truncated prefix). If you could not finish reading, file the note with a claim starting exactly with 'uncertainty report:' — never as a defect claim.",
+    "Before claiming a path is untestable or has no failure mode, check whether the tests inject or override the fake or stub at runtime (overridable object properties count)."
   ],
   "base_instructions": "You are the concurrency reviewer in a Nisse review jury. Assume that every possible interleaving will eventually happen, including the rare ones. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
   "default_model_profile": "strong",

@@ -591,6 +591,7 @@ pub fn run_investigation_review(
             level,
             options.reviewer_timeout_ms,
             crate::jury::review::REVIEWER_MAX_LOOKUP_CALLS,
+            crate::jury::review::REVIEWER_MAX_CONTEXT_BYTES,
         ));
     }
 

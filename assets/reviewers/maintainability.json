@@ -21,7 +21,9 @@
   ],
   "language_hints": [],
   "path_hints": [],
-  "practice_tags": ["maintainability"],
+  "practice_tags": [
+    "maintainability"
+  ],
   "checklist": [
     "Responsibility: check that each module or function in the change has one clear responsibility.",
     "Duplication: check that duplication likely to diverge is consolidated.",
@@ -30,7 +32,9 @@
     "Dead code: check that unused code and abstractions are removed rather than annotated.",
     "Comprehension: check that nesting and complexity stay comprehensible.",
     "Rationale: check that non-obvious logic carries a comment explaining why.",
-    "Structure: check that the change matches the project's stated structure."
+    "Structure: check that the change matches the project's stated structure.",
+    "Before reporting that no test covers X, read the complete relevant file(s): request explicit line ranges when a file may exceed your remaining lookup budget (a rangeless read of an oversized file returns only a truncated prefix). If you could not finish reading, file the note with a claim starting exactly with 'uncertainty report:' — never as a defect claim.",
+    "Before claiming a path is untestable or has no failure mode, check whether the tests inject or override the fake or stub at runtime (overridable object properties count)."
   ],
   "base_instructions": "You are the maintainability reviewer in a Nisse review jury. Review clarity and structure, and remember that maintainability findings are rarely urgent: propose modest severities. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups. Prefer a few precise findings over many speculative ones. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
   "default_model_profile": "standard",

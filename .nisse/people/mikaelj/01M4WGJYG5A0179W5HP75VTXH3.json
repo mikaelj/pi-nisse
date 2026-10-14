@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "aggregation",
+  "created_at": "2026-10-14T06:11:24.805Z",
+  "finding_id": "01M4WG2RPJ667G7M8KWD35GR7F",
+  "id": "01M4WGJYG5A0179W5HP75VTXH3",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/jury/synthesis.rs"
+  ],
+  "review_id": "01M4WFNVNVNVWF19ZKA4D6EFFV",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "6dac141252fb0069a2108256f90e694e08ff6ca4",
+    "base_tree": "034540bb89ff5a7aaff1266e9684b5313acadbeb",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "correctness",
+    "aggregation"
+  ]
+}

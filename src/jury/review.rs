@@ -506,6 +506,7 @@ pub fn run_plan_review(
             level,
             options.reviewer_timeout_ms,
             lookup_budget,
+            REVIEWER_MAX_CONTEXT_BYTES,
         ));
     }
 
@@ -870,6 +871,7 @@ pub(crate) fn execution_spec(
     thinking_level: crate::domain::model::ThinkingLevel,
     timeout_ms: u64,
     max_lookup_calls: u32,
+    max_returned_context_bytes: u64,
 ) -> ReviewerExecutionSpec {
     ReviewerExecutionSpec {
         reviewer_id: profile.id.clone(),
@@ -881,7 +883,7 @@ pub(crate) fn execution_spec(
         initial_context: initial_context.entries,
         allowed_capabilities: profile.allowed_capabilities.clone(),
         max_lookup_calls,
-        max_returned_context_bytes: REVIEWER_MAX_CONTEXT_BYTES,
+        max_returned_context_bytes,
         timeout_ms,
     }
 }
@@ -982,20 +984,48 @@ pub const DIFF_TOTAL_MAX_BYTES: usize = 160 * 1024;
 pub const DIFF_COVERAGE_NOTE_RESERVE: usize = 2048;
 pub const DIFF_COVERAGE_NOTE_LISTED: usize = 12;
 
+/// Maximum prior-disposition entries in reviewer context, and the byte
+/// bound of each entry's text (a dedicated budget — never charged
+/// against the diff totals).
+pub const DISPOSITION_CONTEXT_MAX: usize = 8;
+pub const DISPOSITION_TEXT_MAX_BYTES: usize = 512;
+
 /// Smallest per-file share of [`DIFF_TOTAL_MAX_BYTES`] when many files
 /// changed: every changed file keeps at least this much diff context
 /// before any file gets a second chunk.
 pub const DIFF_TOTAL_MIN_SHARE: usize = 16 * 1024;
 
-/// Ceiling of the reviewer lookup budget after omission scaling
-/// ([`REVIEWER_MAX_LOOKUP_CALLS`] plus two per omitted diff tail).
-pub const REVIEWER_MAX_LOOKUP_CALLS_CAP: u32 = 24;
+/// Ceiling of the reviewer lookup budget after omission and
+/// changed-line scaling.
+pub const REVIEWER_MAX_LOOKUP_CALLS_CAP: u32 = 40;
 
-/// The reviewer lookup budget for a change with `omissions` omitted
-/// diff tails: the base budget plus two retrieval calls per omission,
-/// clamped by [`REVIEWER_MAX_LOOKUP_CALLS_CAP`].
-pub(crate) fn lookup_budget_for_omissions(omissions: usize) -> u32 {
-    (REVIEWER_MAX_LOOKUP_CALLS + 2 * omissions as u32).min(REVIEWER_MAX_LOOKUP_CALLS_CAP)
+/// Base returned-context budget of one reviewer session.
+pub const REVIEWER_MAX_CONTEXT_BYTES_BASE: u64 = 64 * 1024;
+
+/// Ceiling of the scaled returned-context budget.
+pub const REVIEWER_MAX_CONTEXT_BYTES_CAP: u64 = 512 * 1024;
+
+/// The reviewer lookup budget for a change: the base budget plus two
+/// retrieval calls per omitted diff tail plus one call per 150 changed
+/// lines beyond a 1 000-line allowance, clamped by
+/// [`REVIEWER_MAX_LOOKUP_CALLS_CAP`].
+pub(crate) fn lookup_budget(omissions: usize, changed_lines: usize) -> u32 {
+    let line_calls = changed_lines.saturating_sub(1_000) as u32 / 150;
+    (REVIEWER_MAX_LOOKUP_CALLS + 2 * omissions as u32 + line_calls)
+        .min(REVIEWER_MAX_LOOKUP_CALLS_CAP)
+}
+
+/// The returned-context budget for a change: the base budget grows by
+/// 48 bytes per changed body line beyond a 500-line allowance, never
+/// falls below the largest single changed file plus 32 KiB of headroom
+/// (a reviewer must be able to read any one changed file in full; files
+/// beyond the cap are covered by ranged reads instead), and is clamped
+/// by [`REVIEWER_MAX_CONTEXT_BYTES_CAP`].
+pub(crate) fn returned_context_budget(changed_lines: usize, largest_file_bytes: u64) -> u64 {
+    let scaled = REVIEWER_MAX_CONTEXT_BYTES_BASE + 48 * changed_lines.saturating_sub(500) as u64;
+    scaled
+        .max(largest_file_bytes.saturating_add(32 * 1024))
+        .min(REVIEWER_MAX_CONTEXT_BYTES_CAP)
 }
 
 /// Code review failures.
@@ -1307,7 +1337,73 @@ pub fn run_code_review(
         .map(|entry| entry.path.clone())
         .collect();
     let diff_context = diff_context_entries(&patches, &overflow_paths);
-    let lookup_budget = lookup_budget_for_omissions(diff_context.omitted.len());
+    // Scale both retrieval budgets with the changed content: reviewers
+    // must be able to finish reading the files they are asked about.
+    let changed_lines: usize = patches
+        .iter()
+        .filter_map(|patch| patch.patch.as_deref())
+        .map(|text| {
+            text.lines()
+                // Diff body lines only: added/removed lines, excluding
+                // file (+++/---) and hunk (@@) headers.
+                .filter(|line| {
+                    (line.starts_with('+') && !line.starts_with("+++"))
+                        || (line.starts_with('-') && !line.starts_with("---"))
+                })
+                .count()
+        })
+        .sum();
+    // The floor honors real file sizes (a reviewer must be able to
+    // read any one changed file in full), read from the snapshot side.
+    let size_reader = SnapshotReader::new(ctx, resolved)?;
+    let largest_file_bytes = patches
+        .iter()
+        .filter_map(|patch| size_reader.read(&patch.path).ok().flatten())
+        .map(|file| file.bytes.len() as u64)
+        .max()
+        .unwrap_or(0);
+    let lookup_budget = lookup_budget(diff_context.omitted.len(), changed_lines);
+    let context_budget = returned_context_budget(changed_lines, largest_file_bytes);
+
+    // 12b. Prior dispositions (accepted/dismissed feedback outcomes)
+    // are verifiable context, never verdicts: reviewers confirm
+    // unchanged ones or re-verify when the rationale no longer holds.
+    // Bounded to a dedicated 4 KiB budget so no diff entry is evicted.
+    let disposition_entries: Vec<ContextEntry> =
+        crate::learning::feedback::prior_dispositions(ctx, paths, DISPOSITION_CONTEXT_MAX)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|disposition| ContextEntry {
+                kind: ContextKind::Practice,
+                title: bounded(
+                    &format!(
+                        "prior disposition ({}): {}",
+                        disposition.outcome.as_str(),
+                        disposition.title
+                    ),
+                    crate::jury::findings::MAX_TITLE_BYTES,
+                )
+                .to_string(),
+                path: None,
+                symbol: None,
+                line_start: None,
+                line_end: None,
+                record_id: None,
+                practice_id: None,
+                text: bounded(
+                    &format!(
+                        "outcome {} (review {}): {} — re-verify against the code before \
+                         confirming; never suppress a finding your evidence supports.",
+                        disposition.outcome.as_str(),
+                        &disposition.review_id[..12.min(disposition.review_id.len())],
+                        disposition.claim
+                    ),
+                    DISPOSITION_TEXT_MAX_BYTES,
+                )
+                .to_string(),
+                score: 0.9,
+            })
+            .collect();
     let mut specs: Vec<ReviewerExecutionSpec> = Vec::with_capacity(jury.seats.len());
     for seat in &jury.seats {
         let profile = catalog
@@ -1325,6 +1421,7 @@ pub fn run_code_review(
         );
         let context = code_initial_context(
             &diff_context.bundle,
+            &disposition_entries,
             &shared_context,
             &catalog,
             &seat.practice_tags,
@@ -1346,6 +1443,7 @@ pub fn run_code_review(
             level,
             options.reviewer_timeout_ms,
             lookup_budget,
+            context_budget,
         ));
     }
 
@@ -1408,6 +1506,24 @@ pub fn run_code_review(
         let validation = validate_report(&validation_context, reviewer_id, report);
         validated.extend(validation.accepted);
         rejected.extend(validation.rejected);
+    }
+
+    // 15b. Label exact recurrences of previously dispositioned
+    // findings (never suppress: a dismissed-once real bug must be able
+    // to resurface — the label carries the prior outcome for the
+    // synthesis and the reader).
+    let prior_outcomes =
+        crate::learning::feedback::prior_fingerprint_outcomes(ctx, paths).unwrap_or_default();
+    for finding in &mut validated {
+        let Some(outcome) = prior_outcomes.get(&finding.fingerprint) else {
+            continue;
+        };
+        let prefix = format!("recurrence (previously {}): ", outcome.as_str());
+        if !finding.finding.title.starts_with(&prefix) {
+            let prefixed = format!("{}{}", prefix, finding.finding.title);
+            finding.finding.title =
+                bounded(&prefixed, crate::jury::findings::MAX_TITLE_BYTES).to_string();
+        }
     }
 
     // 16. Consolidation (equivalence checks + synthesis, bounded).
@@ -2044,6 +2160,7 @@ fn diff_status_label(status: DiffStatus) -> &'static str {
 /// budget of the shared initial-context bound.
 fn code_initial_context(
     diff_context: &ContextBundle,
+    dispositions: &[ContextEntry],
     shared: &ContextBundle,
     catalog: &Catalog,
     practice_tags: &[String],
@@ -2059,7 +2176,11 @@ fn code_initial_context(
     };
     let rest = initial_context(&[], shared, catalog, practice_tags, &budget);
     let mut entries = diff_context.entries.clone();
-    let text_bytes = diff_context.text_bytes + rest.text_bytes;
+    let disposition_bytes: usize = dispositions.iter().map(|entry| entry.text.len()).sum();
+    let text_bytes = diff_context.text_bytes + disposition_bytes + rest.text_bytes;
+    // Dispositions sit directly after the diff entries; they are not
+    // charged against the diff budget.
+    entries.extend(dispositions.iter().cloned());
     entries.extend(rest.entries);
     ContextBundle {
         entries,
@@ -2819,6 +2940,7 @@ mod tests {
 
         let bundle = code_initial_context(
             &diff_context,
+            &[],
             &shared,
             &catalog,
             &["concurrency".to_string()],
@@ -2844,19 +2966,38 @@ mod tests {
     }
 
     #[test]
-    fn lookup_budget_for_omissions_clamps_at_the_cap() {
-        assert_eq!(lookup_budget_for_omissions(0), REVIEWER_MAX_LOOKUP_CALLS);
+    fn lookup_budget_scales_with_omissions_and_changed_lines() {
+        assert_eq!(lookup_budget(0, 0), REVIEWER_MAX_LOOKUP_CALLS);
+        assert_eq!(lookup_budget(1, 0), REVIEWER_MAX_LOOKUP_CALLS + 2);
+        // Lines beyond the 1 000-line allowance add one call per 150.
+        assert_eq!(lookup_budget(0, 1_000), REVIEWER_MAX_LOOKUP_CALLS);
+        assert_eq!(lookup_budget(0, 1_150), REVIEWER_MAX_LOOKUP_CALLS + 1);
+        assert_eq!(lookup_budget(0, 3_600), REVIEWER_MAX_LOOKUP_CALLS + 17);
+        // The clamp binds regardless of the inputs.
+        assert_eq!(lookup_budget(20, 100_000), REVIEWER_MAX_LOOKUP_CALLS_CAP);
+    }
+
+    #[test]
+    fn returned_context_budget_covers_the_largest_changed_file() {
+        // Small changes keep the base budget...
         assert_eq!(
-            lookup_budget_for_omissions(1),
-            REVIEWER_MAX_LOOKUP_CALLS + 2
+            returned_context_budget(0, 0),
+            REVIEWER_MAX_CONTEXT_BYTES_BASE
         );
+        // ...scaling 48 bytes per changed line beyond 500...
         assert_eq!(
-            lookup_budget_for_omissions(8),
-            REVIEWER_MAX_LOOKUP_CALLS_CAP
+            returned_context_budget(1_500, 0),
+            REVIEWER_MAX_CONTEXT_BYTES_BASE + 48 * 1_000
         );
+        // ...never below any single changed file plus headroom...
         assert_eq!(
-            lookup_budget_for_omissions(50),
-            REVIEWER_MAX_LOOKUP_CALLS_CAP
+            returned_context_budget(10, 200 * 1024),
+            200 * 1024 + 32 * 1024
+        );
+        // ...and clamped by the ceiling.
+        assert_eq!(
+            returned_context_budget(1_000_000, 4 * 1024 * 1024),
+            REVIEWER_MAX_CONTEXT_BYTES_CAP
         );
     }
 

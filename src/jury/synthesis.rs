@@ -289,6 +289,11 @@ fn synthesizer_spec(
 /// Instructions of the synthesis session. The host appends the strict
 /// output contract automatically; these instructions carry the
 /// synthesis-specific constraints.
+/// The fixed id of the single aggregated uncertainty note (bug report
+/// 2, problem C): self-declared uncertainty reports are coverage, not
+/// defect rows.
+pub const COVERAGE_UNCERTAINTIES_ID: &str = "coverage-uncertainties";
+
 const SYNTHESIZER_INSTRUCTIONS: &str = "\
 You are the Nisse finding synthesizer, a constrained non-juror session.
 You receive validated finding groups produced by independent reviewers
@@ -305,6 +310,12 @@ Hard rules:
   of groups. Only the groups supplied in the context exist.
 - Emit an empty `evidence` array for every finding; Nisse attaches the
   combined source evidence itself.
+- Groups whose members self-describe as uncertainty reports (claims
+  starting with 'uncertainty report:' or stating they are 'not a defect
+  claim') are not defects: never restate them as individual findings.
+  Instead combine ALL such groups into exactly ONE finding with the
+  fixed id 'coverage-uncertainties', severity info, category coverage,
+  and one line per uncertainty (its claim and where to verify it).
 - If you cannot honestly restate a group, omit it; Nisse will fall back
   to the original reviewer wording.";
 
@@ -437,6 +448,23 @@ pub fn validate_synthesis_report(
     };
 
     for finding in &report.findings {
+        if finding.id == COVERAGE_UNCERTAINTIES_ID {
+            // The canonical aggregated uncertainty note: accepted
+            // without a backing group (it merges self-declared
+            // uncertainty groups by instruction). Its severity is
+            // pinned to info: coverage, never a defect row.
+            accepted.insert(
+                finding.id.clone(),
+                SynthesizedGroup {
+                    severity: Severity::Info,
+                    title: finding.title.clone(),
+                    claim: finding.claim.clone(),
+                    explanation: finding.explanation.clone(),
+                    recommendation: finding.recommendation.clone(),
+                },
+            );
+            continue;
+        }
         let Some(group) = group_by_key.get(finding.id.as_str()) else {
             diagnostics.push(SynthesisDiagnostic::new(
                 SynthesisStage::Synthesis,
@@ -533,7 +561,51 @@ fn build_final_findings(
     diagnostics: &mut Vec<SynthesisDiagnostic>,
 ) -> Vec<FinalFinding> {
     let mut final_findings = Vec::with_capacity(groups.len());
+    // Self-declared uncertainty groups (their claims structurally
+    // self-describe as uncertainty, per the reviewer checklist) are
+    // aggregated into ONE coverage row instead of defect findings —
+    // whether or not the synthesis session did it itself.
+    let mut uncertainty_lines: Vec<String> = Vec::new();
+    let mut uncertainty_ids: Vec<String> = Vec::new();
+    let mut uncertainty_reviewers: Vec<String> = Vec::new();
+    let mut uncertainty_evidence: Vec<EvidenceRef> = Vec::new();
     for group in groups {
+        // Only groups whose EVERY member self-declares as uncertainty
+        // aggregate; a mixed group keeps its substantive finding (the
+        // uncertainty member rides along as part of that finding).
+        if group
+            .members
+            .iter()
+            .all(|member| is_self_declared_uncertainty(&member.finding.claim))
+        {
+            for member in &group.members {
+                uncertainty_lines.push(format!(
+                    "- {} (verify via source_lookup: {})",
+                    member.finding.claim,
+                    member
+                        .finding
+                        .evidence
+                        .first()
+                        .and_then(|evidence| evidence.path.clone())
+                        .unwrap_or_else(|| "the changed files".to_string())
+                ));
+            }
+            uncertainty_ids.extend(group.members.iter().map(|m| m.qualified_id()));
+            for reviewer in group.reviewer_ids() {
+                if !uncertainty_reviewers.contains(&reviewer) {
+                    uncertainty_reviewers.push(reviewer);
+                }
+            }
+            for evidence in combine_evidence(group) {
+                if uncertainty_evidence.len() >= MAX_EVIDENCE_PER_FINAL_FINDING {
+                    break;
+                }
+                if !uncertainty_evidence.contains(&evidence) {
+                    uncertainty_evidence.push(evidence);
+                }
+            }
+            continue;
+        }
         let top = group.top_member();
         let entry = synthesized.get(&group.key);
         if entry.is_none() {
@@ -588,7 +660,38 @@ fn build_final_findings(
             cross_validated: group.cross_validated(),
         });
     }
+    if !uncertainty_lines.is_empty() {
+        let reviewers = uncertainty_reviewers.clone();
+        final_findings.push(FinalFinding {
+            id: COVERAGE_UNCERTAINTIES_ID.to_string(),
+            impact_class: crate::domain::review::ImpactClass::Maintainability,
+            severity: Severity::Info,
+            category: "coverage".to_string(),
+            title: "coverage uncertainties (aggregated)".to_string(),
+            claim: format!(
+                "Reviewers could not finish verifying {} item(s); these are uncertainty notes, not defect claims.",
+                uncertainty_lines.len()
+            ),
+            explanation: uncertainty_lines.join("\n"),
+            recommendation: "Verify each line against the code before acting; absence from the reviewed context is not evidence of absence in the file.".to_string(),
+            evidence: uncertainty_evidence,
+            source_finding_ids: uncertainty_ids,
+            reviewer_ids: reviewers,
+            cross_validated: false,
+        });
+    }
     final_findings
+}
+
+/// Structural self-description test (case-insensitive, prefix-anchored):
+/// a claim that starts with the canonical uncertainty markers. A
+/// substantive finding that merely quotes the phrase mid-claim does
+/// not match.
+fn is_self_declared_uncertainty(claim: &str) -> bool {
+    let folded = claim.trim_start().to_lowercase();
+    folded.starts_with("uncertainty report:")
+        || folded.starts_with("not a defect claim")
+        || folded.starts_with("this finding records the uncertainty")
 }
 
 /// Combine and deduplicate the evidence of a group's members, in member
@@ -983,5 +1086,116 @@ mod tests {
             serde_json::to_string(&EquivalenceVerdict::Uncertain).unwrap(),
             "\"uncertain\""
         );
+    }
+
+    #[test]
+    fn self_declared_uncertainty_groups_aggregate_into_one_row() {
+        let groups = vec![
+            group_of(vec![validated(
+                "quality",
+                "u1",
+                Severity::Info,
+                "uncertainty report: could not finish reading test/run-tests.js past line 925",
+            )]),
+            group_of(vec![validated(
+                "quality",
+                "u2",
+                Severity::Info,
+                "This finding records the uncertainty rather than a confirmed gap",
+            )]),
+            group_of(vec![validated(
+                "quality",
+                "u3",
+                Severity::Info,
+                "not a defect claim: the migration idempotency test was not located",
+            )]),
+        ];
+        let synthesized = BTreeMap::new();
+        let mut diagnostics = Vec::new();
+        let findings = build_final_findings(&groups, &synthesized, &mut diagnostics);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let note = &findings[0];
+        assert_eq!(note.id, COVERAGE_UNCERTAINTIES_ID);
+        assert_eq!(note.category, "coverage");
+        assert_eq!(note.severity, Severity::Info);
+        assert!(note.explanation.contains("u1") || note.explanation.contains("925"));
+        assert!(
+            note.explanation.lines().count() == 3,
+            "{}",
+            note.explanation
+        );
+    }
+
+    #[test]
+    fn quoted_uncertainty_phrases_do_not_aggregate_substantive_findings() {
+        let substantive = validated(
+            "quality",
+            "s1",
+            Severity::Medium,
+            "The lock timeout path returns an error whose message quotes 'uncertainty report:' verbatim",
+        );
+        let groups = vec![group_of(vec![substantive])];
+        let synthesized = BTreeMap::new();
+        let mut diagnostics = Vec::new();
+        let findings = build_final_findings(&groups, &synthesized, &mut diagnostics);
+        assert_eq!(findings.len(), 1);
+        assert_ne!(findings[0].id, COVERAGE_UNCERTAINTIES_ID);
+        assert_eq!(
+            findings[0].source_finding_ids,
+            vec!["quality/s1".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_canonical_uncertainty_id_passes_validation_without_a_group() {
+        let report = synthesis_report(
+            vec![ReviewerFinding {
+                id: COVERAGE_UNCERTAINTIES_ID.to_string(),
+                impact_class: ImpactClass::Maintainability,
+                proposed_severity: Severity::Info,
+                category: "coverage".to_string(),
+                title: "coverage uncertainties (aggregated)".to_string(),
+                claim: "Two items could not be fully verified.".to_string(),
+                explanation: "- item a\n- item b".to_string(),
+                recommendation: "Verify before acting.".to_string(),
+                evidence: vec![],
+            }],
+            "aggregated",
+        );
+        let groups: Vec<FindingGroup> = vec![];
+        let mut diagnostics = Vec::new();
+        let (accepted, _) = validate_synthesis_report(&report, &groups, &mut diagnostics);
+        assert!(
+            diagnostics.is_empty(),
+            "the canonical aggregated note needs no backing group: {diagnostics:?}"
+        );
+        assert!(accepted.contains_key(COVERAGE_UNCERTAINTIES_ID));
+    }
+
+    #[test]
+    fn mixed_groups_keep_their_substantive_finding() {
+        // One uncertainty member grouped with one substantive member:
+        // the group emits normally (the substantive finding carries it).
+        let members = vec![
+            validated(
+                "quality",
+                "mixed-u",
+                Severity::Info,
+                "uncertainty report: could not finish reading the test file",
+            ),
+            validated(
+                "quality",
+                "mixed-s",
+                Severity::Medium,
+                "The mutex is dropped while a reader holds a reference",
+            ),
+        ];
+        let groups = vec![group_of(members)];
+        let synthesized = BTreeMap::new();
+        let mut diagnostics = Vec::new();
+        let findings = build_final_findings(&groups, &synthesized, &mut diagnostics);
+        assert_eq!(findings.len(), 1);
+        assert_ne!(findings[0].id, COVERAGE_UNCERTAINTIES_ID);
+        assert_eq!(findings[0].source_finding_ids.len(), 2);
     }
 }

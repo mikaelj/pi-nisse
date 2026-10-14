@@ -274,6 +274,226 @@ pub fn list_review_ids(paths: &StoragePaths) -> Result<Vec<String>, FeedbackErro
         .map_err(|error| FeedbackError::Cache(error.to_string()))
 }
 
+/// Fingerprints of previously dispositioned findings, keyed by the
+/// validated finding fingerprint: lets the next review label exact
+/// recurrences without suppressing them. When a fingerprint carries
+/// several outcomes across reviews, the NEWEST observation wins.
+pub fn prior_fingerprint_outcomes(
+    ctx: &RepoContext,
+    paths: &StoragePaths,
+) -> Result<std::collections::BTreeMap<String, FeedbackOutcome>, FeedbackError> {
+    let store = RecordStore::new(&ctx.worktree_root);
+    let Ok(records) = store.load() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    // Observation records sorted newest first; only outcome records.
+    let mut outcomes: Vec<&crate::domain::records::ObservationRecord> = records
+        .iter()
+        .filter_map(|stored| match &stored.record {
+            ProjectRecord::Observation(observation) => Some(observation),
+            _ => None,
+        })
+        .filter(|observation| observation.observation_type == ObservationType::ReviewOutcome)
+        .collect();
+    outcomes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    if outcomes.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    // (review, final-finding-id) -> outcome, newest first, so the first
+    // entry per final finding below is the freshest disposition.
+    let mut by_finding: std::collections::BTreeMap<(String, String), FeedbackOutcome> =
+        std::collections::BTreeMap::new();
+    for observation in &outcomes {
+        by_finding
+            .entry((
+                observation.review_id.clone(),
+                observation.finding_id.clone(),
+            ))
+            .or_insert(observation.outcome);
+    }
+
+    // Resolve fingerprints with ONE payload read per involved review:
+    // the event's `validated` entries carry reviewer-local finding ids
+    // and fingerprints, while the dispositioned observation stores the
+    // FINAL finding id — the result's source_finding_ids bridge the two
+    // ("reviewer/local-id" form).
+    let mut map = std::collections::BTreeMap::new();
+    let mut payload_cache: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for ((review_id, final_finding_id), outcome) in &by_finding {
+        let payload = match payload_cache.get(review_id) {
+            Some(payload) => payload.clone(),
+            None => match load_event_payload(paths, review_id)? {
+                Some(payload) => {
+                    payload_cache.insert(review_id.clone(), payload.clone());
+                    payload
+                }
+                None => continue,
+            },
+        };
+        let Some(result) = payload.get("result") else {
+            continue;
+        };
+        let Some(findings) = result.get("findings").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let Some(final_finding) = findings
+            .iter()
+            .find(|finding| finding.get("id").and_then(|v| v.as_str()) == Some(final_finding_id))
+        else {
+            continue;
+        };
+        let Some(source_ids) = final_finding
+            .get("source_finding_ids")
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        let local_ids: std::collections::BTreeSet<&str> = source_ids
+            .iter()
+            .filter_map(|id| id.as_str())
+            .map(|qualified| qualified.rsplit('/').next().unwrap_or(qualified))
+            .collect();
+        let Some(validated) = payload.get("validated").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in validated {
+            let Some(finding_id) = entry.get("finding_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !local_ids.contains(finding_id) {
+                continue;
+            }
+            let Some(fingerprint) = entry.get("fingerprint").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // Newest wins: the first insertion per fingerprint sticks.
+            map.entry(fingerprint.to_string()).or_insert(*outcome);
+        }
+    }
+    Ok(map)
+}
+
+/// The raw stored review-event payload, when present.
+fn load_event_payload(
+    paths: &StoragePaths,
+    review_id: &str,
+) -> Result<Option<serde_json::Value>, FeedbackError> {
+    if !paths.shared.is_file() {
+        return Ok(None);
+    }
+    let db = open_or_recover(&paths.shared, DbKind::Shared)
+        .map_err(|error| FeedbackError::Cache(format!("{error}")))?;
+    let payload: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT payload FROM review_event WHERE review_id = ?1",
+            [review_id],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|error| FeedbackError::Cache(error.to_string()))?;
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    serde_json::from_str(&payload)
+        .map(Some)
+        .map_err(|error| FeedbackError::Cache(format!("invalid review event payload: {error}")))
+}
+
+/// One previously recorded outcome of a finding, joined with its
+/// stored wording: the verifiable context the next review of the same
+/// tree receives (never a verdict — reviewers confirm or re-verify).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorDisposition {
+    /// The review the finding belongs to.
+    pub review_id: String,
+    /// The reviewer-local finding id.
+    pub finding_id: String,
+    /// The recorded outcome.
+    pub outcome: FeedbackOutcome,
+    /// The finding's final title.
+    pub title: String,
+    /// The finding's one-sentence claim.
+    pub claim: String,
+}
+
+/// Load the most recent recorded outcomes (newest first, at most
+/// `limit`), joined with the stored findings' wording. Outcomes are
+/// durable observations; the wording comes from the stored review
+/// history. Both sources are optional local state — an absent history
+/// simply yields no dispositions.
+pub fn prior_dispositions(
+    ctx: &RepoContext,
+    paths: &StoragePaths,
+    limit: usize,
+) -> Result<Vec<PriorDisposition>, FeedbackError> {
+    let store = RecordStore::new(&ctx.worktree_root);
+    let Ok(records) = store.load() else {
+        return Ok(Vec::new());
+    };
+    // Newest observations first; the load order is storage order.
+    let mut outcomes: Vec<&crate::domain::records::ObservationRecord> = records
+        .iter()
+        .filter_map(|stored| match &stored.record {
+            ProjectRecord::Observation(observation) => Some(observation),
+            _ => None,
+        })
+        .filter(|observation| observation.observation_type == ObservationType::ReviewOutcome)
+        .collect();
+    outcomes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut dispositions = Vec::new();
+    for observation in outcomes {
+        if dispositions.len() >= limit {
+            break;
+        }
+        if !seen.insert((
+            observation.review_id.clone(),
+            observation.finding_id.clone(),
+        )) {
+            continue;
+        }
+        // Join the stored wording: the finding is identified by its
+        // reviewer-local id inside the stored review result.
+        let Some(result) = load_review_result(paths, &observation.review_id)? else {
+            continue;
+        };
+        let Some(finding) = result
+            .findings
+            .iter()
+            .find(|finding| {
+                finding
+                    .source_finding_ids
+                    .iter()
+                    .any(|id| id == &observation.finding_id)
+            })
+            .or_else(|| {
+                result
+                    .findings
+                    .iter()
+                    .find(|finding| finding.id == observation.finding_id)
+            })
+        else {
+            continue;
+        };
+        dispositions.push(PriorDisposition {
+            review_id: observation.review_id.clone(),
+            finding_id: observation.finding_id.clone(),
+            outcome: observation.outcome,
+            title: finding.title.clone(),
+            claim: finding.claim.clone(),
+        });
+    }
+    Ok(dispositions)
+}
+
 /// Finding titles keyed by `(review_id, finding_id)`, joined from the
 /// stored review payloads. Drives the human records listing: an
 /// observation names the finding it disposed of, not just its category
@@ -1356,5 +1576,88 @@ mod tests {
         );
         assert!(text.contains("already recorded: dismissed"));
         assert!(!text.contains("lessons created"));
+    }
+
+    #[test]
+    fn prior_dispositions_and_fingerprints_join_across_the_id_vocabularies() {
+        let setup = setup("prior-dispositions");
+        // Record a dismissed outcome for the stored finding.
+        let recording = record_feedback(
+            &setup.ctx,
+            &setup.paths,
+            &setup.result.review_id,
+            &setup.result.findings[0].id,
+            FeedbackOutcome::Dismissed,
+            Some("alice"),
+        )
+        .unwrap();
+        assert!(
+            matches!(recording, FeedbackRecording::Recorded { .. }),
+            "{recording:?}"
+        );
+
+        // Disposition context: newest-first, joined wording.
+        let dispositions = prior_dispositions(&setup.ctx, &setup.paths, 8).unwrap();
+        assert_eq!(dispositions.len(), 1);
+        let disposition = &dispositions[0];
+        assert_eq!(disposition.outcome, FeedbackOutcome::Dismissed);
+        assert_eq!(disposition.title, "Queue race");
+        assert_eq!(disposition.finding_id, setup.result.findings[0].id);
+        // The limit binds.
+        assert!(
+            prior_dispositions(&setup.ctx, &setup.paths, 0)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Fingerprint join: the stored event payload must also carry a
+        // `validated` entry bridging the reviewer-local id to a
+        // fingerprint for the map to be non-empty.
+        let fingerprint = "fp-bridge-test".to_string();
+        let payload = serde_json::json!({
+            "result": &setup.result,
+            "validated": [{
+                "reviewer_id": "quality",
+                "finding_id": "fake-1",
+                "fingerprint": fingerprint,
+                "severity": "high",
+            }],
+        });
+        let db = open_db(&setup.paths.shared, DbKind::Shared).unwrap();
+        db.conn
+            .execute(
+                "UPDATE review_event SET payload = ?2 WHERE review_id = ?1",
+                rusqlite::params![
+                    setup.result.review_id,
+                    serde_json::to_string(&payload).unwrap(),
+                ],
+            )
+            .unwrap();
+        drop(db);
+
+        let outcomes = prior_fingerprint_outcomes(&setup.ctx, &setup.paths).unwrap();
+        assert_eq!(
+            outcomes.get(&fingerprint),
+            Some(&FeedbackOutcome::Dismissed),
+            "{outcomes:?}"
+        );
+        // Only the bridged fingerprint is present.
+        assert_eq!(outcomes.len(), 1);
+    }
+
+    #[test]
+    fn prior_dispositions_without_history_or_outcomes_are_empty() {
+        let setup = setup("prior-empty");
+        // No outcomes recorded: both loaders return empty, never fail.
+        assert!(
+            prior_dispositions(&setup.ctx, &setup.paths, 8)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            prior_fingerprint_outcomes(&setup.ctx, &setup.paths)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

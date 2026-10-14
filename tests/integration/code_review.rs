@@ -613,8 +613,17 @@ fn large_file_diffs_are_chunked_with_coverage_notes_and_scaled_lookups() {
         !titles.iter().any(|t| t.contains("coverage note")),
         "no omissions for a completing diff: {titles:?}"
     );
+    // 2 200 changed lines scale the call budget: 8 + (2200-1000)/150 = 16.
     for spec in specs {
-        assert_eq!(spec["max_lookup_calls"], 8, "no scaling without omissions");
+        assert_eq!(spec["max_lookup_calls"], 16, "line-scaled budget");
+        // 64 KiB base + 48 B x (2200-500) body lines, floored by the
+        // ~72 KiB file + 32 KiB headroom -> the line scaling wins.
+        let expected = 64 * 1024 + 48 * (2_200 - 500);
+        assert_eq!(
+            spec["max_returned_context_bytes"].as_u64(),
+            Some(expected),
+            "line-scaled returned-context budget"
+        );
     }
 
     // One huge new file (beyond the 128 KiB materialization cap): the
@@ -647,10 +656,12 @@ fn large_file_diffs_are_chunked_with_coverage_notes_and_scaled_lookups() {
         titles.iter().any(|t| t.contains("coverage note")),
         "omissions are summarized: {titles:?}"
     );
+    // The patch is materialization-capped at 128 KiB (~2 950 lines of
+    // this file): 8 + 2 (one omission) + (2950-1000)/150 = 23 calls.
     for spec in specs {
         assert_eq!(
-            spec["max_lookup_calls"], 10,
-            "one omitted tail scales the budget by two"
+            spec["max_lookup_calls"], 23,
+            "omission + line scaling over the capped patch"
         );
     }
 }

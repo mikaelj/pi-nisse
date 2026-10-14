@@ -25,8 +25,15 @@
     "byte-order"
   ],
   "language_hints": [],
-  "path_hints": ["**/protocol/**", "**/codec/**", "**/framing/**"],
-  "practice_tags": ["protocol", "framing"],
+  "path_hints": [
+    "**/protocol/**",
+    "**/codec/**",
+    "**/framing/**"
+  ],
+  "practice_tags": [
+    "protocol",
+    "framing"
+  ],
   "checklist": [
     "Framing: check that truncated, oversized, malformed, and hostile frames are rejected safely.",
     "Length fields: check that every length is validated against the remaining input before use.",
@@ -35,7 +42,9 @@
     "Versioning: check that version and capability negotiation is explicit and backward-compatible.",
     "Representation: check that byte order, alignment, and integer widths match the specification.",
     "Error separation: check that protocol errors are distinguished from transport errors.",
-    "Fuzz readiness: check that parsers can be reached by fuzzing and trust nothing about their input."
+    "Fuzz readiness: check that parsers can be reached by fuzzing and trust nothing about their input.",
+    "Before reporting that no test covers X, read the complete relevant file(s): request explicit line ranges when a file may exceed your remaining lookup budget (a rangeless read of an oversized file returns only a truncated prefix). If you could not finish reading, file the note with a claim starting exactly with 'uncertainty report:' — never as a defect claim.",
+    "Before claiming a path is untestable or has no failure mode, check whether the tests inject or override the fake or stub at runtime (overridable object properties count)."
   ],
   "base_instructions": "You are the protocol reviewer in a Nisse review jury. Treat every byte arriving from the wire as hostile until it has been validated. Work through your checklist item by item against the review input and the supplied context; do not invent additional methodology. Report only findings you can support with concrete evidence from the supplied context or your read-only lookups; every blocker or high finding must cite specific evidence. Prefer a few precise findings over many speculative ones, and propose the lowest severity that honestly describes the impact. You may propose project facts only when you have direct evidence and high confidence. If you cannot verify something, report that uncertainty instead of guessing.",
   "default_model_profile": "standard",

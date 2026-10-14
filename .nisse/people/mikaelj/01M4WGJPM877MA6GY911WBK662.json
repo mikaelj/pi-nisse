@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "category": "ordering",
+  "created_at": "2026-10-14T06:11:16.744Z",
+  "finding_id": "01M4WG2RPJ3SCA3ECRT5F3VDFM",
+  "id": "01M4WGJPM877MA6GY911WBK662",
+  "impact_class": "correctness",
+  "kind": "observation",
+  "languages": [
+    "rust"
+  ],
+  "observation_type": "review_outcome",
+  "outcome": "fixed",
+  "paths": [
+    "src/learning/feedback.rs"
+  ],
+  "review_id": "01M4WFNVNVNVWF19ZKA4D6EFFV",
+  "reviewer_id": "quality",
+  "schema_version": 1,
+  "snapshot": {
+    "base_commit": "6dac141252fb0069a2108256f90e694e08ff6ca4",
+    "base_tree": "034540bb89ff5a7aaff1266e9684b5313acadbeb",
+    "head_commit": null,
+    "head_tree": null,
+    "mode": "working"
+  },
+  "tags": [
+    "correctness",
+    "ordering"
+  ]
+}
