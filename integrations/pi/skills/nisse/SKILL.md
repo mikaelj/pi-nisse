@@ -16,7 +16,13 @@ Nisse reviews plans and code that **you** (Main Pi) produce. Nisse never writes 
 
 Prerequisites: the `nisse` binary on `PATH` (overridable with the `NISSE_BIN` environment variable). When reviews fail oddly, ask the user to run `nisse doctor`.
 
-**Subprocess timeout:** every tool call is killed after 20 minutes by default. The three review tools accept an optional `timeout_ms` (60000..7200000) — pass a higher value when a large review approaches the ceiling instead of giving up or splitting the review; a timeout surfaces as a typed `nisse timed out after Nms` tool error, and the right response is retrying with a raised `timeout_ms`. A shell `export` cannot change the extension's environment, so this parameter is the only in-session lever.
+**Two timeouts, two different remedies — diagnose which one you hit:**
+
+1. **Subprocess timeout (the wrapper).** Every tool call is killed after 20 minutes by default. The three review tools accept an optional `timeout_ms` (60000..7200000) — pass a higher value when a large review approaches the ceiling instead of giving up or splitting the review. Signature: a typed tool error `nisse timed out after Nms`. Remedy: retry the call with a raised `timeout_ms`. A shell `export` cannot change the extension's environment, so this parameter is the only in-session lever (`NISSE_TIMEOUT_MS` exists but only for the process that launches pi).
+
+2. **Reviewer session budget (inside Nisse).** Each reviewer session runs under its own wall-clock budget — `performance.reviewer_timeout_ms` in `~/.nisse/config.toml` (default 5 minutes) — and the frozen single retry reuses the same budget. Signature: findings or a typed review failure mentioning `session_timeout`, or `only N valid independent reviewer report(s) exist; at least 2 are required`. Remedy: ask the user to raise `reviewer_timeout_ms` (bounds 60000..3600000) — no tool-call parameter reaches it, and a higher `timeout_ms` will not help.
+
+**Sizing rule when raising the internal budget:** keep the wrapper above the worst-case wall clock — `wrapper ≳ 2 × reviewer_timeout_ms + ~5 minutes` (retry plus consolidation and synthesis jobs). A review that needed the internal raise should be called with a matching `timeout_ms`.
 
 ## Substantial vs. trivial work
 
