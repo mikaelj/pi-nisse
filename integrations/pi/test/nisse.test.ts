@@ -25,6 +25,7 @@ import {
 	feedbackArgs,
 	queryArgs,
 	resolveNisseBin,
+	clampTimeoutMs,
 	resolveTimeoutMs,
 	reviewCodeArgs,
 	reviewPlanArgs,
@@ -148,11 +149,14 @@ describe("tool registration", () => {
 });
 
 describe("tool schemas", () => {
-	it("nisse_review_plan takes one required plan string", () => {
+	it("nisse_review_plan takes one required plan string plus an optional timeout", () => {
 		const schema = buildNisseTools({ run: okRunner("{}") }).find(
 			(tool) => tool.name === "nisse_review_plan",
-		)!.parameters as unknown as { properties: Record<string, unknown>; required: string[] };
-		assert.deepEqual(Object.keys(schema.properties), ["plan"]);
+		)!.parameters as unknown as {
+			properties: Record<string, unknown>;
+			required: string[];
+		};
+		assert.deepEqual(Object.keys(schema.properties), ["plan", "timeout_ms"]);
 		assert.deepEqual(schema.required, ["plan"]);
 	});
 
@@ -551,5 +555,41 @@ describe("output bounds", () => {
 	it("advertises bounded capture limits", () => {
 		assert.ok(DEFAULT_TIMEOUT_MS > 0);
 		assert.ok(MAX_OUTPUT_BYTES > 0);
+	});
+
+	it("clampTimeoutMs bounds per-call timeouts", () => {
+		assert.equal(clampTimeoutMs(undefined), undefined);
+		assert.equal(clampTimeoutMs(Number.NaN), undefined);
+		assert.equal(clampTimeoutMs(0), undefined);
+		assert.equal(clampTimeoutMs(-5), undefined);
+		assert.equal(clampTimeoutMs(1), 60_000);
+		assert.equal(clampTimeoutMs(60_000), 60_000);
+		assert.equal(clampTimeoutMs(45_000_000.4), 7_200_000);
+		assert.equal(clampTimeoutMs(3_600_000), 3_600_000);
+	});
+
+	it("the per-call timeout reaches the invocation", async () => {
+		let seen: { timeoutMs?: number | undefined } = {};
+		const tools = buildNisseTools({
+						run: async (invocation) => {
+				seen = { timeoutMs: invocation.timeoutMs };
+				return {
+					args: invocation.args,
+					stdout: "{}",
+					stderr: "",
+					exitCode: 0,
+					killed: false,
+				};
+			},
+		});
+		const plan = tools.find((tool) => tool.name === "nisse_review_plan")!;
+		await plan.execute(
+			"call-1",
+			{ plan: "the plan", timeout_ms: 2_500_000 } as never,
+			undefined as never,
+			undefined as never,
+			{ cwd: process.cwd() } as never,
+		);
+		assert.equal(seen.timeoutMs, 2_500_000);
 	});
 });

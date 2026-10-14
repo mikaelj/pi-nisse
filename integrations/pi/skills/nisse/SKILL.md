@@ -16,6 +16,8 @@ Nisse reviews plans and code that **you** (Main Pi) produce. Nisse never writes 
 
 Prerequisites: the `nisse` binary on `PATH` (overridable with the `NISSE_BIN` environment variable). When reviews fail oddly, ask the user to run `nisse doctor`.
 
+**Subprocess timeout:** every tool call is killed after 20 minutes by default. The three review tools accept an optional `timeout_ms` (60000..7200000) — pass a higher value when a large review approaches the ceiling instead of giving up or splitting the review; a timeout surfaces as a typed `nisse timed out after Nms` tool error, and the right response is retrying with a raised `timeout_ms`. A shell `export` cannot change the extension's environment, so this parameter is the only in-session lever.
+
 ## Substantial vs. trivial work
 
 Use Nisse for tasks involving any of: architecture changes; multiple interacting files/modules; concurrency; realtime behavior; embedded constraints; persistence; database schema; networking/protocols; authentication/security; compatibility; public API changes; migrations; complex bug fixes; substantial refactors; performance-sensitive behavior; important project-specific constraints.

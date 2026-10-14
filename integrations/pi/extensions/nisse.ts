@@ -12,7 +12,11 @@
  * The nisse binary is resolved from the `NISSE_BIN` environment
  * variable (trusted local configuration) and defaults to `nisse` on
  * PATH. The subprocess timeout defaults to 20 minutes and can be
- * overridden with `NISSE_TIMEOUT_MS` (positive integer milliseconds).
+ * overridden per tool call (`timeout_ms` on the review tools — the
+ * level an in-session agent can actually reach, since a shell `export`
+ * cannot change this process's environment) or with
+ * `NISSE_TIMEOUT_MS` (positive integer milliseconds, for the
+ * deployment that launches pi).
  */
 
 import type { AgentToolResult, ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -62,6 +66,8 @@ export interface NisseInvocation {
 	readonly cwd: string;
 	readonly stdin?: string | undefined;
 	readonly signal?: AbortSignal | undefined;
+	/** Per-call subprocess timeout (ms); overrides the env default. */
+	readonly timeoutMs?: number | undefined;
 }
 
 /** Result of one nisse CLI invocation. */
@@ -115,7 +121,8 @@ export function spawnNisse(
 	options: NisseSpawnOptions = {},
 ): Promise<NisseProcessResult> {
 	const bin = options.bin ?? resolveNisseBin(process.env);
-	const timeoutMs = options.timeoutMs ?? resolveTimeoutMs(process.env);
+	const timeoutMs =
+		options.timeoutMs ?? invocation.timeoutMs ?? resolveTimeoutMs(process.env);
 
 	return new Promise<NisseProcessResult>((resolve) => {
 		let child: ReturnType<typeof spawn>;
@@ -403,6 +410,7 @@ interface ExecuteContext {
 	readonly cwd: string;
 	readonly stdin?: string | undefined;
 	readonly signal?: AbortSignal | undefined;
+	readonly timeoutMs?: number | undefined;
 }
 
 /**
@@ -434,6 +442,7 @@ async function executeNisse(
 		cwd: context.cwd,
 		stdin: context.stdin,
 		signal: context.signal,
+		timeoutMs: context.timeoutMs,
 	});
 
 	if (result.error !== undefined) {
@@ -509,11 +518,33 @@ function stderrSuffix(stderr: string): string {
 	return trimmed === "" ? "" : `\n${trimmed}`;
 }
 
+/** Clamp bounds of a per-call timeout: one minute .. two hours. */
+export const TIMEOUT_MS_MIN = 60_000;
+export const TIMEOUT_MS_MAX = 2 * 60 * 60 * 1000;
+
+/** Clamp a requested per-call timeout into the supported range. */
+export function clampTimeoutMs(requested: number | undefined): number | undefined {
+	if (typeof requested !== "number" || !Number.isFinite(requested) || requested <= 0) {
+		return undefined;
+	}
+	return Math.min(TIMEOUT_MS_MAX, Math.max(TIMEOUT_MS_MIN, Math.ceil(requested)));
+}
+
+const TimeoutParam = Type.Optional(
+	Type.Integer({
+		minimum: TIMEOUT_MS_MIN,
+		maximum: TIMEOUT_MS_MAX,
+		description:
+			"Subprocess timeout in milliseconds for this call (60000..7200000). Raise when a large review approaches the default 20-minute ceiling; the call fails with a typed timeout error otherwise.",
+	}),
+);
+
 const ReviewPlanParams = Type.Object({
 	plan: Type.String({
 		description:
 			"Complete text of the implementation plan to review. Nisse reviews it against the current project snapshot.",
 	}),
+	timeout_ms: TimeoutParam,
 });
 
 const ReviewCodeParams = Type.Object({
@@ -532,6 +563,7 @@ const ReviewCodeParams = Type.Object({
 			description: "Base ref for the merge-base comparison (required when scope is `branch`).",
 		}),
 	),
+	timeout_ms: TimeoutParam,
 });
 
 const QueryParams = Type.Object({
@@ -583,7 +615,12 @@ export function buildNisseTools(deps: NisseToolDependencies = {}): NisseToolRegi
 					"nisse_review_plan",
 					reviewPlanArgs,
 					run,
-					{ cwd: ctx.cwd, stdin: params.plan, signal },
+					{
+						cwd: ctx.cwd,
+						stdin: params.plan,
+						signal,
+						timeoutMs: clampTimeoutMs(params.timeout_ms),
+					},
 					true,
 				);
 			},
@@ -600,7 +637,11 @@ export function buildNisseTools(deps: NisseToolDependencies = {}): NisseToolRegi
 					"nisse_review_code",
 					() => reviewCodeArgs(params),
 					run,
-					{ cwd: ctx.cwd, signal },
+					{
+						cwd: ctx.cwd,
+						signal,
+						timeoutMs: clampTimeoutMs(params.timeout_ms),
+					},
 					true,
 				);
 			},
@@ -621,6 +662,7 @@ export function buildNisseTools(deps: NisseToolDependencies = {}): NisseToolRegi
 					description:
 						"The investigation output to review (literal text, or a path — a leading `@` forces file interpretation).",
 				}),
+				timeout_ms: TimeoutParam,
 			}),
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 				return reviewInvestigationArgs(params, ctx.cwd, (args) =>
@@ -628,7 +670,11 @@ export function buildNisseTools(deps: NisseToolDependencies = {}): NisseToolRegi
 						"nisse_review_investigation",
 						() => args,
 						run,
-						{ cwd: ctx.cwd, signal },
+						{
+							cwd: ctx.cwd,
+							signal,
+							timeoutMs: clampTimeoutMs(params.timeout_ms),
+						},
 						true,
 					),
 				);
