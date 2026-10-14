@@ -1,0 +1,31 @@
+{
+  "author": "mikaelj",
+  "created_at": "2026-10-14T10:02:21.455Z",
+  "evidence": [
+    {
+      "content_key": "git:62d69c9986851d2b788f8ec5d470734da98c4f9f",
+      "excerpt": "`entries` must be the output of [`snapshot_diff`] (already sorted and `.nisse`-excluded); at most `max_entries` paths are covered ... for entry in entries.iter().take(max_entries) {",
+      "kind": "source",
+      "line_end": 146,
+      "line_start": 101,
+      "path": "src/git/diff.rs",
+      "plan_section": null,
+      "record_id": null,
+      "symbol": "snapshot_patches"
+    }
+  ],
+  "id": "01M4WXSTCFV6S9V4A3K46MXZ87",
+  "kind": "fact",
+  "schema_version": 1,
+  "source_record_ids": [],
+  "source_review_id": "01M4WXHVHSZRP2WWTGP82SPY53",
+  "state": "supported",
+  "subject": "snapshot_patches",
+  "supersedes": [],
+  "tags": [
+    "diff",
+    "diff-cap",
+    "contract"
+  ],
+  "text": "`snapshot_patches` (src/git/diff.rs L111-L198) covers at most `max_entries` paths by iterating the caller-supplied entries in their given order (`for entry in entries.iter().take(max_entries)`), and its doc contract requires `entries` to be the already-sorted output of `snapshot_diff`."
+}

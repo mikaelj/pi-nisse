@@ -104,6 +104,20 @@ pub fn consolidate(
     options: &ConsolidationOptions,
     thinking: &super::thinking::ThinkingPolicy,
 ) -> Result<SynthesisResult, HostError> {
+    consolidate_with_dispositions(host, kind, findings, options, thinking, &[])
+}
+
+/// [`consolidate`] with prior-disposition context entries the
+/// synthesizer receives (re-confirmations collapse; see
+/// [`DISPOSITION_RECURRENCES_ID`]).
+pub fn consolidate_with_dispositions(
+    host: &mut HostProcess,
+    kind: ReviewKind,
+    findings: &[ValidatedFinding],
+    options: &ConsolidationOptions,
+    thinking: &super::thinking::ThinkingPolicy,
+    dispositions: &[crate::domain::context::ContextEntry],
+) -> Result<SynthesisResult, HostError> {
     let mut diagnostics: Vec<SynthesisDiagnostic> = Vec::new();
 
     // The semantic jobs (equivalence checks and the synthesis session)
@@ -165,7 +179,9 @@ pub fn consolidate(
     let mut session_summary = None;
     if !groups.is_empty() {
         let session = match semantic_level {
-            Some(level) => run_synthesis_session(host, kind, &groups, options, level)?,
+            Some(level) => {
+                run_synthesis_session(host, kind, &groups, options, level, dispositions)?
+            }
             None => None,
         };
         match session {
@@ -239,11 +255,17 @@ fn run_synthesis_session(
     groups: &[FindingGroup],
     options: &ConsolidationOptions,
     thinking_level: ThinkingLevel,
+    dispositions: &[crate::domain::context::ContextEntry],
 ) -> Result<Option<ReviewerReport>, HostError> {
     let payload = StartReviewPayload {
         review_id: format!("synthesis-{}", new_ulid()),
         kind,
-        reviewers: vec![synthesizer_spec(groups, options, thinking_level)],
+        reviewers: vec![synthesizer_spec(
+            groups,
+            options,
+            thinking_level,
+            dispositions,
+        )],
     };
     let mut no_tools = |_request: &ToolRequestPayload| -> ToolResponsePayload {
         ToolResponsePayload::failure(
@@ -265,6 +287,7 @@ fn synthesizer_spec(
     groups: &[FindingGroup],
     options: &ConsolidationOptions,
     thinking_level: ThinkingLevel,
+    dispositions: &[crate::domain::context::ContextEntry],
 ) -> ReviewerExecutionSpec {
     ReviewerExecutionSpec {
         reviewer_id: SYNTHESIZER_ID.to_string(),
@@ -278,7 +301,11 @@ fn synthesizer_spec(
         ],
         model_profile: options.model_profile.clone(),
         thinking_level,
-        initial_context: groups.iter().map(render_group_entry).collect(),
+        initial_context: {
+            let mut entries: Vec<_> = groups.iter().map(render_group_entry).collect();
+            entries.extend(dispositions.iter().cloned());
+            entries
+        },
         allowed_capabilities: Vec::new(),
         max_lookup_calls: 0,
         max_returned_context_bytes: 0,
@@ -293,6 +320,12 @@ fn synthesizer_spec(
 /// 2, problem C): self-declared uncertainty reports are coverage, not
 /// defect rows.
 pub const COVERAGE_UNCERTAINTIES_ID: &str = "coverage-uncertainties";
+
+/// The fixed id of the single disposition-recurrence note (bug report
+/// 3, Dely C): groups that merely re-confirm a listed prior
+/// disposition collapse into one summary row instead of standing as
+/// new findings.
+pub const DISPOSITION_RECURRENCES_ID: &str = "disposition-recurrences";
 
 const SYNTHESIZER_INSTRUCTIONS: &str = "\
 You are the Nisse finding synthesizer, a constrained non-juror session.
@@ -316,6 +349,14 @@ Hard rules:
   Instead combine ALL such groups into exactly ONE finding with the
   fixed id 'coverage-uncertainties', severity info, category coverage,
   and one line per uncertainty (its claim and where to verify it).
+- A group whose members merely RE-CONFIRM one of the supplied prior
+  dispositions (citing it, or restating it without genuinely new
+  evidence) is not a new finding: never restate such groups
+  individually. Combine them into exactly ONE finding with the fixed id
+  'disposition-recurrences', severity info, one line per recurrence
+  (prior outcome, the prior review id when cited, and what re-confirmed
+  it). A recurrence WITH genuinely new evidence stays a standalone
+  finding — the prior disposition never suppresses it.
 - If you cannot honestly restate a group, omit it; Nisse will fall back
   to the original reviewer wording.";
 
@@ -448,6 +489,21 @@ pub fn validate_synthesis_report(
     };
 
     for finding in &report.findings {
+        if finding.id == DISPOSITION_RECURRENCES_ID {
+            // Same pattern as the uncertainty note: the canonical
+            // recurrence summary is accepted without a backing group.
+            accepted.insert(
+                finding.id.clone(),
+                SynthesizedGroup {
+                    severity: Severity::Info,
+                    title: finding.title.clone(),
+                    claim: finding.claim.clone(),
+                    explanation: finding.explanation.clone(),
+                    recommendation: finding.recommendation.clone(),
+                },
+            );
+            continue;
+        }
         if finding.id == COVERAGE_UNCERTAINTIES_ID {
             // The canonical aggregated uncertainty note: accepted
             // without a backing group (it merges self-declared
@@ -1045,7 +1101,7 @@ mod tests {
         let members = vec![validated("quality", "q-1", Severity::Low, "claim")];
         let groups = vec![group_of(members)];
         let options = ConsolidationOptions::default();
-        let spec = synthesizer_spec(&groups, &options, ThinkingLevel::Medium);
+        let spec = synthesizer_spec(&groups, &options, ThinkingLevel::Medium, &[]);
         assert_eq!(spec.reviewer_id, SYNTHESIZER_ID);
         assert!(spec.allowed_capabilities.is_empty());
         assert_eq!(spec.max_lookup_calls, 0);

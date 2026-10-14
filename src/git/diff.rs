@@ -135,8 +135,12 @@ pub fn snapshot_patches(
     };
     let diff_args = patch_args(ctx, resolved);
 
+    // Test files are never the sacrifice of the file cap: test-path
+    // entries are covered first, with reserved non-test slots so a
+    // test-dominated change cannot evict every production diff either.
+    let ordered = prioritize_test_paths(entries, max_entries);
     let mut patches = Vec::new();
-    for entry in entries.iter().take(max_entries) {
+    for entry in ordered {
         if entry.binary {
             patches.push(SnapshotPatch {
                 path: entry.path.clone(),
@@ -216,6 +220,51 @@ fn patch_args(ctx: &RepoContext, resolved: &ResolvedSnapshot) -> Vec<String> {
             vec![base_rev.unwrap_or_else(|_| oid.clone()), oid.clone()]
         }
     }
+}
+
+/// Order changed entries for the diff-context file cap: test-path
+/// entries first (a review must always see the tests that verify the
+/// change), keeping at least `min(RESERVED_NON_TEST, non-test count)`
+/// non-test slots so test-dominated changes cannot evict every
+/// production diff. Each group preserves the caller's order.
+pub(crate) fn prioritize_test_paths(entries: &[DiffEntry], max_entries: usize) -> Vec<&DiffEntry> {
+    const RESERVED_NON_TEST: usize = 8;
+    let (tests, non_tests): (Vec<&DiffEntry>, Vec<&DiffEntry>) =
+        entries.iter().partition(|entry| is_test_path(&entry.path));
+    if tests.is_empty() || non_tests.is_empty() || max_entries == 0 {
+        return entries.iter().take(max_entries).collect();
+    }
+    let reserve = RESERVED_NON_TEST.min(non_tests.len()).min(max_entries);
+    let test_slots = max_entries - reserve;
+    let mut ordered: Vec<&DiffEntry> = Vec::with_capacity(max_entries);
+    ordered.extend(tests.iter().take(test_slots));
+    let remaining = max_entries.saturating_sub(ordered.len());
+    ordered.extend(non_tests.iter().take(remaining));
+    let remaining = max_entries.saturating_sub(ordered.len());
+    ordered.extend(tests.iter().skip(test_slots).take(remaining));
+    ordered
+}
+
+/// Whether a repository path is a test path: a `test`/`tests`/
+/// `__tests__`/`spec`/`specs` directory component, or a file name
+/// following the `test_*`/`*_test.*`/`*.spec.*`/`*_tests.*`
+/// conventions.
+fn is_test_path(path: &str) -> bool {
+    let lowered = path.to_lowercase();
+    if lowered
+        .split('/')
+        .any(|component| matches!(component, "test" | "tests" | "__tests__" | "spec" | "specs"))
+    {
+        return true;
+    }
+    let file = lowered.rsplit('/').next().unwrap_or(lowered.as_str());
+    let stem = file.split('.').next().unwrap_or(file);
+    file.starts_with("test_")
+        || file.contains(".spec.")
+        || file.contains("_test.")
+        || stem.ends_with("_test")
+        || stem.ends_with("_tests")
+        || stem.ends_with("_spec")
 }
 
 /// Truncate patch text to a byte budget on a char boundary, marking the
@@ -1659,5 +1708,40 @@ second",
         let map = parse_numstat_binary("3\t1\tsrc/a.rs\0-\t-\t\0old.rs\0new.rs\0").unwrap();
         assert_eq!(map.get("src/a.rs"), Some(&false));
         assert_eq!(map.get("new.rs"), Some(&true));
+    }
+
+    #[test]
+    fn prioritize_test_paths_keeps_tests_with_a_non_test_floor() {
+        let entry = |path: &str| DiffEntry {
+            path: path.to_string(),
+            old_path: None,
+            old_oid: None,
+            new_oid: None,
+            status: DiffStatus::Modified,
+            binary: false,
+        };
+        // 37 non-test paths + 3 test paths, cap 32: all 3 tests kept.
+        let mut entries: Vec<DiffEntry> =
+            (0..37).map(|i| entry(&format!("src/f{i:02}.gs"))).collect();
+        entries.push(entry("test/run-tests.js"));
+        entries.push(entry("test/fake-sheet.js"));
+        entries.push(entry("tests/unit.spec.js"));
+        let ordered = prioritize_test_paths(&entries, 32);
+        assert_eq!(ordered.len(), 32);
+        let tests_in = ordered.iter().filter(|e| is_test_path(&e.path)).count();
+        assert_eq!(tests_in, 3, "all test paths kept");
+
+        // Test-dominated change: 35 test paths + 10 production, cap 32:
+        // the non-test floor reserves 8 production slots.
+        let mut entries: Vec<DiffEntry> = (0..35)
+            .map(|i| entry(&format!("tests/t{i:02}.js")))
+            .collect();
+        entries.extend((0..10).map(|i| entry(&format!("src/p{i}.gs"))));
+        let ordered = prioritize_test_paths(&entries, 32);
+        assert_eq!(ordered.len(), 32);
+        let production_in = ordered.iter().filter(|e| !is_test_path(&e.path)).count();
+        assert!(production_in >= 8, "non-test floor: {production_in}");
+        let tests_in = ordered.iter().filter(|e| is_test_path(&e.path)).count();
+        assert_eq!(tests_in + production_in, 32);
     }
 }

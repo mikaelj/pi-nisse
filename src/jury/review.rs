@@ -96,7 +96,7 @@ use super::protocol::{
     DomainDescriptionPayload, HostConfigPayload, HostRuntime, StartReviewPayload,
     ToolRequestPayload, ToolResponsePayload,
 };
-use super::synthesis::{ConsolidationOptions, consolidate};
+use super::synthesis::{ConsolidationOptions, consolidate, consolidate_with_dispositions};
 use super::tools::ReviewerToolServer;
 
 /// Maximum accepted plan input size.
@@ -1005,6 +1005,31 @@ pub const REVIEWER_MAX_CONTEXT_BYTES_BASE: u64 = 64 * 1024;
 /// Ceiling of the scaled returned-context budget.
 pub const REVIEWER_MAX_CONTEXT_BYTES_CAP: u64 = 512 * 1024;
 
+/// Scale the configured reviewer-session budget for thinking level and
+/// change size: `xhigh`/`max` sessions on large changes multiply the
+/// configured budget by `clamp(changed_lines / 1_000, 1, 3)` (integer
+/// thresholds: 999 lines 1x, 1 000-1 999 1x..2x at 2_000, capped at 3x
+/// from 3 000 lines). The configured value is clamped to
+/// [`MAX_REVIEWER_TIMEOUT_MS`] uniformly for every level. Levels
+/// `off`..`high` keep the configured value.
+pub(crate) fn effective_session_timeout(
+    configured_ms: u64,
+    level: crate::domain::model::ThinkingLevel,
+    changed_lines: usize,
+) -> u64 {
+    let configured = configured_ms.min(crate::config::MAX_REVIEWER_TIMEOUT_MS);
+    use crate::domain::model::ThinkingLevel;
+    match level {
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => {
+            let factor = (changed_lines / 1_000).clamp(1, 3) as u64;
+            configured
+                .saturating_mul(factor)
+                .min(crate::config::MAX_REVIEWER_TIMEOUT_MS)
+        }
+        _ => configured,
+    }
+}
+
 /// The reviewer lookup budget for a change: the base budget plus two
 /// retrieval calls per omitted diff tail plus one call per 150 changed
 /// lines beyond a 1 000-line allowance, clamped by
@@ -1405,6 +1430,7 @@ pub fn run_code_review(
             })
             .collect();
     let mut specs: Vec<ReviewerExecutionSpec> = Vec::with_capacity(jury.seats.len());
+    let mut seat_timeouts: Vec<u64> = Vec::with_capacity(jury.seats.len());
     for seat in &jury.seats {
         let profile = catalog
             .profile(&seat.reviewer_id)
@@ -1436,12 +1462,17 @@ pub fn run_code_review(
         if let Some(note) = note {
             diagnostics.push(note);
         }
+        // Per-seat session budget: xhigh/max thinking on large changes
+        // scales the configured budget (see effective_session_timeout).
+        let seat_timeout =
+            effective_session_timeout(options.reviewer_timeout_ms, level, changed_lines);
+        seat_timeouts.push(seat_timeout);
         specs.push(execution_spec(
             profile,
             seat,
             context,
             level,
-            options.reviewer_timeout_ms,
+            seat_timeout,
             lookup_budget,
             context_budget,
         ));
@@ -1465,7 +1496,13 @@ pub fn run_code_review(
         &mut host,
         &payload,
         &mut serve,
-        review_round_timeout(options.reviewer_timeout_ms),
+        review_round_timeout(
+            seat_timeouts
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(options.reviewer_timeout_ms),
+        ),
     )?;
 
     // 14. At least two valid independent reports (plan section 36).
@@ -1482,12 +1519,29 @@ pub fn run_code_review(
             )),
         }
     }
+    // Timeout-caused shortfalls degrade to a clearly marked PARTIAL
+    // result (one valid report still carries validated findings);
+    // disagreement, invalid output, or zero reports keep the frozen
+    // hard failure.
+    let mut partial = None;
     if reports.len() < 2 {
-        return Err(CodeReviewError::TooFewValidReports {
-            review_id,
-            valid: reports.len(),
-            failures,
-        });
+        let all_session_timeouts = !outcomes.is_empty()
+            && outcomes.iter().all(|(_, outcome)| match outcome {
+                ReviewerOutcome::Completed(_) => true,
+                ReviewerOutcome::Failed(error) => error.code == "session_timeout",
+            });
+        if reports.is_empty() || !all_session_timeouts {
+            return Err(CodeReviewError::TooFewValidReports {
+                review_id,
+                valid: reports.len(),
+                failures,
+            });
+        }
+        partial = Some(failures.join("; "));
+        diagnostics.push(format!(
+            "PARTIAL REVIEW: {} of the 2 required independent reports; the missing reviewer(s) exhausted their session budgets",
+            reports.len()
+        ));
     }
 
     // 15. Validate every report against the exact snapshot; diff
@@ -1527,12 +1581,13 @@ pub fn run_code_review(
     }
 
     // 16. Consolidation (equivalence checks + synthesis, bounded).
-    let synthesis = consolidate(
+    let synthesis = consolidate_with_dispositions(
         &mut host,
         ReviewKind::Code,
         &validated,
         &options.consolidation,
         &thinking,
+        &disposition_entries,
     )?;
     diagnostics.extend(synthesis.diagnostics.iter().map(|d| d.message.clone()));
 
@@ -1542,7 +1597,10 @@ pub fn run_code_review(
         kind: ReviewKind::Code,
         created_at: crate::domain::time::now_utc_rfc3339(),
         snapshot: resolved.descriptor.clone(),
-        summary: synthesis.summary.clone(),
+        summary: match &partial {
+            Some(why) => format!("PARTIAL REVIEW ({why}): {}", synthesis.summary),
+            None => synthesis.summary.clone(),
+        },
         findings: synthesis.findings.clone(),
     };
 
@@ -3131,6 +3189,38 @@ mod tests {
                 .all(|omission| omission.contains("file deleted")),
             "{:?}",
             context.omitted
+        );
+    }
+
+    #[test]
+    fn effective_session_timeout_scales_only_extreme_thinking() {
+        use crate::domain::model::ThinkingLevel;
+        // Low levels: identity, uniformly clamped to the 1 h maximum.
+        assert_eq!(
+            effective_session_timeout(600_000, ThinkingLevel::High, 5_000),
+            600_000
+        );
+        assert_eq!(
+            effective_session_timeout(9_000_000, ThinkingLevel::Low, 0),
+            crate::config::MAX_REVIEWER_TIMEOUT_MS
+        );
+        // Max thinking: integer thresholds 1x / 2x / 3x with cliffs at
+        // 2 000 and 3 000 changed lines, clamped at 1 h.
+        assert_eq!(
+            effective_session_timeout(600_000, ThinkingLevel::Max, 1_999),
+            600_000
+        );
+        assert_eq!(
+            effective_session_timeout(600_000, ThinkingLevel::Max, 2_000),
+            1_200_000
+        );
+        assert_eq!(
+            effective_session_timeout(600_000, ThinkingLevel::Xhigh, 3_000),
+            1_800_000
+        );
+        assert_eq!(
+            effective_session_timeout(1_800_000, ThinkingLevel::Max, 5_000),
+            crate::config::MAX_REVIEWER_TIMEOUT_MS
         );
     }
 }
